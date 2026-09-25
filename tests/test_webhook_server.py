@@ -185,6 +185,11 @@ def main():
         r = client.get("/healthz")
         check("healthz ok", r.status_code == 200 and r.json()["status"] == "ok")
 
+        print("- /privacy")
+        r = client.get("/privacy")
+        check("privacy 200 и имя бизнеса",
+              r.status_code == 200 and r.json()["business"] == "Тестовый Бизнес")
+
     print(f"\nИТОГО: passed={passed}, failed={failed}")
     sys.exit(1 if failed else 0)
 
