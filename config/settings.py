@@ -214,8 +214,10 @@ def get_settings() -> Settings:
         bird_webhook_secret=os.getenv("BIRD_WEBHOOK_SECRET", "").strip(),
         bird_api_url=bird_api_url or "",
         whatsapp_sender_number=normalize_phone(os.getenv("WHATSAPP_SENDER_NUMBER", "").strip()),
-        app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
-        app_port=int(os.getenv("APP_PORT", "8000").strip() or "8000"),
+    # Порт: платформы-деплои (Railway/Render/Fly) подставляют PORT — он главный;
+    # APP_PORT нужен для локального запуска, APP_HOST=0.0.0.0 обязателен в контейнере.
+    app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
+    app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
         llm_api_url=os.getenv("LLM_API_URL", "").strip(),
         llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
         business_name=str(cfg.get("business_name") or "").strip(),

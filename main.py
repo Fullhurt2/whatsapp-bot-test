@@ -208,8 +208,33 @@ def main() -> None:
     setup_logging(os.getenv("LOG_LEVEL", "INFO").strip().upper())
     settings = get_settings()
     app = create_app(settings)
-    logger.info("Вебхук: http://0.0.0.0:%d/webhooks/bird", settings.app_port)
+    logger.info("Вебхук: http://%s:%d/webhooks/bird", settings.app_host, settings.app_port)
     uvicorn.run(app, host=settings.app_host, port=settings.app_port, log_config=None)
+
+
+def _build_default_app() -> FastAPI:
+    """Собирает приложение с настройками из .env — для `uvicorn main:app`.
+
+    Локальный запуск `python main.py` идёт через main(); облачные платформы
+    (Railway/Render/Fly) стартуют сервис командой `uvicorn main:app --port $PORT`
+    и импортируют модуль — тогда build выполняется здесь, при первом обращении
+    к атрибуту app. Если настройки не заданы, упадём с внятной ошибкой.
+    """
+    setup_logging(os.getenv("LOG_LEVEL", "INFO").strip().upper())
+    return create_app(get_settings())
+
+
+def __getattr__(name: str):
+    """Ленивая сборка `app` по запросу `uvicorn main:app`.
+
+    На уровне модуля объект не создаём намеренно: тесты и скрипты импортируют
+    create_app и подсовывают свои настройки — без .env это падать не должно.
+    """
+    if name == "app":
+        app = _build_default_app()
+        globals()["app"] = app  # кэшируем: дальше атрибут находится напрямую
+        return app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":

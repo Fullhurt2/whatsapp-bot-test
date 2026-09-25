@@ -114,6 +114,19 @@ python tests/test_webhook_server.py     # интеграция FastAPI (12)
 - Ретраи Bird: 5с → 5м → 30м → 2ч → 5ч → 10ч ×2 (at-least-once) — повторные
   доставки той же доставки отфильтровываются по `webhook-id`.
 
+## Деплой на Railway (Render/Fly аналогично)
+
+1. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT` (или просто
+   `uvicorn main:app --port $PORT`). Модуль отдаёт `app` лениво, так что
+   `uvicorn main:app` работает.
+2. Переменные окружения в дашборде: `BIRD_API_KEY`, `BIRD_WEBHOOK_SECRET`,
+   `WHATSAPP_SENDER_NUMBER`, `LLM_API_URL`, `LLM_API_KEY`, `CLIENT_CONFIG`.
+   `PORT` Railway подставляет сам — он имеет приоритет над `APP_PORT`;
+   `APP_HOST` уже `0.0.0.0` по умолчанию (в контейнере так обязательно).
+3. В Settings → Networking задайте порт, который слушает приложение
+   (PORT из окружения), и подключите домен.
+4. Вебхук Bird укажите на публичный домен: `https://<домен>/webhooks/bird`.
+
 ## Отличия от chat-bot-demo (Telegram)
 
 - Вместо long polling — вебхук + проверка подписи Bird (Standard Webhooks).
