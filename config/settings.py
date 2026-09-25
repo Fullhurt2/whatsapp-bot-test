@@ -86,14 +86,22 @@ class Settings:
     """Сводные настройки бота: секреты из .env + бизнес-конфиг из YAML."""
 
     # из .env
-    bird_api_key: str
-    bird_webhook_secret: str
-    bird_api_url: str
-    whatsapp_sender_number: str  # бизнес-номер (поле "from" при отправке)
+    messaging_provider: str  # "bird" или "meta" (MESSAGING_PROVIDER)
     app_host: str
     app_port: int
     llm_api_url: str
     llm_api_key: str
+    # --- провайдер Bird (используется при messaging_provider="bird") ---
+    bird_api_key: str
+    bird_webhook_secret: str
+    bird_api_url: str
+    whatsapp_sender_number: str  # бизнес-номер (поле "from" при отправке)
+    # из .env — Meta Cloud API (при messaging_provider="meta")
+    whatsapp_access_token: str   # токен System User с правами whatsapp_business_messaging
+    whatsapp_phone_number_id: str  # ID бизнес-номера отправителя в Graph API
+    meta_app_secret: str         # App Secret приложения — проверка X-Hub-Signature-256
+    meta_verify_token: str       # произвольная строка для привязки вебхука в дашборде
+    meta_graph_version: str      # версия Graph API (по умолчанию v21.0)
     # из client_config.yaml
     business_name: str
     tone: str
@@ -209,15 +217,27 @@ def get_settings() -> Settings:
 
     owner_phone = _resolve_owner_phone(cfg)
 
+    provider = (os.getenv("MESSAGING_PROVIDER", "bird").strip().lower() or "bird")
+    if provider not in ("bird", "meta"):
+        raise RuntimeError(
+            f"MESSAGING_PROVIDER={provider!r} не поддерживается: ожидается 'bird' или 'meta'"
+        )
+
     settings = Settings(
+        messaging_provider=provider,
         bird_api_key=os.getenv("BIRD_API_KEY", "").strip(),
         bird_webhook_secret=os.getenv("BIRD_WEBHOOK_SECRET", "").strip(),
         bird_api_url=bird_api_url or "",
         whatsapp_sender_number=normalize_phone(os.getenv("WHATSAPP_SENDER_NUMBER", "").strip()),
-    # Порт: платформы-деплои (Railway/Render/Fly) подставляют PORT — он главный;
-    # APP_PORT нужен для локального запуска, APP_HOST=0.0.0.0 обязателен в контейнере.
-    app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
-    app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
+        whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
+        whatsapp_phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip(),
+        meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
+        meta_verify_token=os.getenv("META_VERIFY_TOKEN", "").strip(),
+        meta_graph_version=os.getenv("META_GRAPH_VERSION", "").strip() or "v21.0",
+        # Порт: платформы-деплои (Railway/Render/Fly) подставляют PORT — он главный;
+        # APP_PORT нужен для локального запуска, APP_HOST=0.0.0.0 обязателен в контейнере.
+        app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
         llm_api_url=os.getenv("LLM_API_URL", "").strip(),
         llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
         business_name=str(cfg.get("business_name") or "").strip(),
@@ -236,21 +256,30 @@ def get_settings() -> Settings:
     )
 
     # Проверяем обязательные поля до старта, чтобы бот падал сразу с внятной ошибкой.
-    missing = [
-        name
-        for name, value in {
+    # Общие поля (LLM, бизнес) + свои у каждого провайдера: для Meta Bird-ключи
+    # не требуются и наоборот — так можно держать оба набора в .env и переключаться.
+    required = {
+        "LLM_API_URL (.env)": settings.llm_api_url,
+        "LLM_API_KEY (.env)": settings.llm_api_key,
+        "business_name (клиентский yaml)": settings.business_name,
+        "knowledge_base (клиентский yaml)": settings.knowledge_base,
+        "llm.model (.env или клиентский yaml)": settings.llm.model,
+    }
+    if settings.messaging_provider == "meta":
+        required.update({
+            "WHATSAPP_ACCESS_TOKEN (.env, System User)": settings.whatsapp_access_token,
+            "WHATSAPP_PHONE_NUMBER_ID (.env)": settings.whatsapp_phone_number_id,
+            "META_APP_SECRET (.env)": settings.meta_app_secret,
+            "META_VERIFY_TOKEN (.env)": settings.meta_verify_token,
+        })
+    else:  # bird
+        required.update({
             "BIRD_API_KEY (.env)": settings.bird_api_key,
             "BIRD_WEBHOOK_SECRET (.env)": settings.bird_webhook_secret,
             "BIRD_API_URL (.env или авто по префиксу ключа)": settings.bird_api_url,
             "WHATSAPP_SENDER_NUMBER (.env)": settings.whatsapp_sender_number,
-            "LLM_API_URL (.env)": settings.llm_api_url,
-            "LLM_API_KEY (.env)": settings.llm_api_key,
-            "business_name (клиентский yaml)": settings.business_name,
-            "knowledge_base (клиентский yaml)": settings.knowledge_base,
-            "llm.model (.env или клиентский yaml)": settings.llm.model,
-        }.items()
-        if not value
-    ]
+        })
+    missing = [name for name, value in required.items() if not value]
     if missing:
         raise RuntimeError(f"Не заданы обязательные настройки: {', '.join(missing)}")
 

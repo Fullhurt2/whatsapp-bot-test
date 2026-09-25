@@ -16,6 +16,7 @@ import uuid
 import httpx
 
 from config.settings import normalize_phone
+from whatsapp.errors import MessagingError, MessagingTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,11 @@ SEND_TIMEOUT_SEC = 20.0
 CONNECT_TIMEOUT_SEC = 10.0
 
 
-class BirdError(Exception):
+class BirdError(MessagingError):
     """Любая ошибка вызова Bird API (сеть, HTTP-ошибка, отказ)."""
 
 
-class BirdTimeout(BirdError):
+class BirdTimeout(MessagingTimeout):
     """Bird не ответил за отведённое время."""
 
 

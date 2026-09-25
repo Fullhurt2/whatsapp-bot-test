@@ -24,7 +24,7 @@ from handlers.owner_handler import notify_owner
 from services.fallback import extract_booking_summary, find_trigger, response_is_handoff
 from services.language import detect_language
 from services.llm_client import LLMClient, LLMError, LLMTimeout
-from whatsapp.bird_client import BirdError, BirdWhatsAppClient
+from whatsapp.errors import MessagingError
 
 logger = logging.getLogger(__name__)
 
@@ -135,10 +135,10 @@ _LANGUAGE_INSTRUCTIONS = {
 class MessageProcessor:
     """Обработчик входящих сообщений WhatsApp. Создаётся один раз при старте."""
 
-    def __init__(self, settings: Settings, llm_client, bird) -> None:
+    def __init__(self, settings: Settings, llm_client, sender) -> None:
         self.settings = settings
         self.llm = llm_client
-        self.bird = bird
+        self.sender = sender
         self.system_prompt = build_system_prompt(settings)
         # История диалогов в памяти: phone -> deque из {"role", "content"}.
         # OrderedDict позволяет дёшево вытеснять самые старые диалоги (LRU).
@@ -187,7 +187,7 @@ class MessageProcessor:
     async def handle_greeting(self, phone: str) -> None:
         """Приветствие по слову start (аналог /start) + сброс памяти диалога."""
         self._histories.pop(phone, None)
-        await self.bird.send_text(
+        await self.sender.send_text(
             phone,
             f"Здравствуйте! Это помощник {self.settings.business_name}.\n"
             "Задайте вопрос — отвечу на основе информации о нас. "
@@ -206,8 +206,8 @@ class MessageProcessor:
             phone, display_name or "-", content_kind,
         )
         try:
-            await self.bird.send_text(phone, NON_TEXT_REPLY)
-        except BirdError:
+            await self.sender.send_text(phone, NON_TEXT_REPLY)
+        except MessagingError:
             logger.exception("Не удалось отправить просьбу написать текстом (%s)", phone)
 
     # --- основной сценарий -------------------------------------------------------
@@ -318,8 +318,8 @@ class MessageProcessor:
 
         # 4. Успех: отправляем ответ. Полный текст ответа не логируем.
         try:
-            await self.bird.send_text(phone, reply)
-        except BirdError:
+            await self.sender.send_text(phone, reply)
+        except MessagingError:
             # Ответ не ушёл, но и в историю его добавлять нельзя: клиент его
             # не видел, и на следующий вопрос модель ответит без контекста.
             logger.exception("Не удалось отправить ответ клиенту (%s)", phone)
@@ -338,12 +338,12 @@ class MessageProcessor:
         сформировала, иначе исходное сообщение клиента.
         """
         try:
-            await self.bird.send_text(phone, reply)
-        except BirdError:
+            await self.sender.send_text(phone, reply)
+        except MessagingError:
             # Ответ клиенту не ушёл, но владельца предупредить всё равно стоит.
             logger.exception("Не удалось отправить fallback-ответ клиенту (%s)", phone)
         delivered = await notify_owner(
-            bird=self.bird,
+            sender=self.sender,
             settings=self.settings,
             client_phone=phone,
             display_name=display_name,

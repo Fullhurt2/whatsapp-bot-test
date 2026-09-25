@@ -21,12 +21,22 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config.settings import Settings, get_settings
 from handlers.message_handler import MessageProcessor
 from services.llm_client import LLMClient
 from whatsapp.bird_client import BirdWhatsAppClient
+from whatsapp.meta_client import MetaWhatsAppClient
+from whatsapp.meta_payload import parse_meta_events
+from whatsapp.meta_security import (
+    META_HEADER_SIGNATURE,
+    QUERY_CHALLENGE,
+    QUERY_MODE,
+    QUERY_VERIFY_TOKEN,
+    verify_meta_signature,
+    verify_subscription,
+)
 from whatsapp.webhook_payload import parse_incoming_event
 from whatsapp.webhook_security import (
     HEADER_SIGNATURE,
@@ -78,22 +88,30 @@ class WebhookState:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        # Один LLM-клиент и один Bird-клиент на всё приложение
-        # (переиспользуют HTTP-соединения).
+        # Один LLM-клиент и один WhatsApp-клиент на всё приложение
+        # (переиспользуют HTTP-соединения). Провайдер задаёт MESSAGING_PROVIDER.
         self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
-        self.bird = BirdWhatsAppClient(
-            settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
-        )
-        self.processor = MessageProcessor(settings, self.llm_client, self.bird)
+        if settings.messaging_provider == "meta":
+            self.sender = MetaWhatsAppClient(
+                settings.whatsapp_access_token,
+                settings.whatsapp_phone_number_id,
+                graph_version=settings.meta_graph_version,
+            )
+        else:
+            self.sender = BirdWhatsAppClient(
+                settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
+            )
+        self.processor = MessageProcessor(settings, self.llm_client, self.sender)
         self._seen_webhook_ids: OrderedDict[str, None] = OrderedDict()
 
     # --- дедупликация доставок ---------------------------------------------------
 
     def seen_before(self, webhook_id: str) -> bool:
-        """True, если доставку с таким webhook-id уже обрабатывали.
+        """True, если доставку с таким id уже обрабатывали.
 
         Регистрирует новую доставку и вытесняет самые старые id — кэш
-        ограничен, чтобы не рос бесконечно.
+        ограничен, чтобы не рос бесконечно. Для Meta сюда идёт id сообщения
+        (wamid...), для Bird — заголовок webhook-id.
         """
         if not webhook_id:
             return False
@@ -124,25 +142,27 @@ class WebhookState:
                     inbound.phone, inbound.display_name, inbound.content_kind
                 )
         except Exception:
-            # Падение обработки не должно крашить сервер: Bird при не-2xx
+            # Падение обработки не должно крашить сервер: провайдер при не-2xx
             # начнёт ретраи, а ответ клиенту уже мог уйти.
             logger.exception("Ошибка при обработке вебхука (%s)", inbound.phone)
 
     async def shutdown(self) -> None:
         await self.llm_client.close()
-        await self.bird.close()
+        await self.sender.close()
 
 
 def create_app(settings: Settings) -> FastAPI:
-    """Собирает приложение: вебхук Bird + healthcheck.
+    """Собирает приложение: вебхук активного провайдера + healthcheck.
 
     settings передаётся явно — так тесты подсовывают тестовые настройки
     без .env (см. tests/), а при запуске python main.py их даёт get_settings().
+    Провайдер выбирается переменной MESSAGING_PROVIDER: "meta" -> /webhooks/meta
+    (Graph API), "bird" -> /webhooks/bird (Standard Webhooks).
     """
     logger.info(
-        "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | Bird: %s",
+        "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | провайдер: %s",
         settings.business_name, settings.config_file, settings.llm.model,
-        settings.bird_api_url,
+        settings.messaging_provider,
     )
     state = WebhookState(settings)
 
@@ -155,6 +175,19 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="whatsapp-bot-test", lifespan=lifespan)
 
+    if settings.messaging_provider == "meta":
+        _register_meta_webhook(app, settings, state)
+    else:
+        _register_bird_webhook(app, settings, state)
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok", "business": settings.business_name}
+
+    return app
+
+
+def _register_bird_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
     @app.post("/webhooks/bird")
     async def bird_webhook(request: Request, background_tasks: BackgroundTasks):
         """Приём вебхука Bird: проверка подписи -> ack 200 -> обработка в фоне.
@@ -195,11 +228,64 @@ def create_app(settings: Settings) -> FastAPI:
         background_tasks.add_task(state.handle_event, inbound)
         return {"ok": True}
 
-    @app.get("/healthz")
-    async def healthz():
-        return {"status": "ok", "business": settings.business_name}
 
-    return app
+def _register_meta_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
+    """Роуты вебхука Meta: GET-верификация подписки + POST событий."""
+
+    @app.get("/webhooks/meta")
+    async def meta_verify(request: Request):
+        """Привязка вебхука в дашборде Meta: echo challenge при верном токене.
+
+        Meta однократно дёргает наш URL GET-запросом hub.mode=subscribe —
+        при совпадении META_VERIFY_TOKEN возвращаем hub.challenge как текст.
+        """
+        params = request.query_params
+        if not verify_subscription(
+            hub_mode=params.get(QUERY_MODE, ""),
+            verify_token=params.get(QUERY_VERIFY_TOKEN, ""),
+            expected_token=settings.meta_verify_token,
+        ):
+            logger.warning("Привязка вебхука Meta отклонена: verify_token не совпал")
+            return PlainTextResponse("forbidden", status_code=403)
+        # Возвращаем challenge ровно как прислал Meta, чистым текстом.
+        return PlainTextResponse(params.get(QUERY_CHALLENGE, ""))
+
+    @app.post("/webhooks/meta")
+    async def meta_webhook(request: Request, background_tasks: BackgroundTasks):
+        """Приём вебхука Meta: проверка X-Hub-Signature-256 -> ack 200 -> фон.
+
+        Требование Meta то же, что у Bird: ответить 2xx быстро, обработка —
+        в фоновой задаче (LLM + отправка могут длиться дольше).
+        """
+        raw_body = await request.body()
+        signature = request.headers.get(META_HEADER_SIGNATURE, "")
+        if not verify_meta_signature(settings.meta_app_secret, raw_body, signature):
+            logger.warning("Вебхук Meta отклонён: подпись не прошла проверку")
+            return JSONResponse(status_code=401, content={"error": "invalid signature"})
+
+        try:
+            payload = json.loads(raw_body)
+        except ValueError:
+            logger.warning("Вебхук Meta с невалидным JSON: %d байт", len(raw_body))
+            return {"ok": True}
+
+        inbound_messages = parse_meta_events(payload)
+        if not inbound_messages:
+            # Статусы доставки и прочие не-наши события — подтверждаем молча.
+            return {"ok": True}
+
+        for inbound in inbound_messages:
+            if state.seen_before(inbound.message_id or ""):
+                continue
+            background_tasks.add_task(state.handle_event, inbound)
+        return {"ok": True}
+
+
+        for inbound in inbound_messages:
+            if state.seen_before(inbound.message_id or ""):
+                continue
+            background_tasks.add_task(state.handle_event, inbound)
+        return {"ok": True}
 
 
 def main() -> None:
@@ -208,7 +294,10 @@ def main() -> None:
     setup_logging(os.getenv("LOG_LEVEL", "INFO").strip().upper())
     settings = get_settings()
     app = create_app(settings)
-    logger.info("Вебхук: http://%s:%d/webhooks/bird", settings.app_host, settings.app_port)
+    logger.info(
+        "Вебхук: http://%s:%d/webhooks/%s",
+        settings.app_host, settings.app_port, settings.messaging_provider,
+    )
     uvicorn.run(app, host=settings.app_host, port=settings.app_port, log_config=None)
 
 

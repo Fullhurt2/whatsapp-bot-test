@@ -45,6 +45,12 @@ def sign(secret: str, webhook_id: str, timestamp: str, body: bytes) -> str:
 
 def build_settings() -> Settings:
     return Settings(
+        messaging_provider="bird",
+        whatsapp_access_token="",
+        whatsapp_phone_number_id="",
+        meta_app_secret="",
+        meta_verify_token="",
+        meta_graph_version="v21.0",
         bird_api_key="test-key",
         bird_webhook_secret=SECRET,
         bird_api_url="https://eu1.platform.bird.com",
@@ -110,7 +116,7 @@ def main():
     with client:
         state = app.state.state
         fake_bird = FakeBird()
-        state.bird = fake_bird
+        state.sender = fake_bird
         state.processor = MessageProcessor(settings, StubLLM(), fake_bird)
 
         body = json.dumps({

@@ -1,11 +1,11 @@
-"""Проверка связки с Bird API: отправка одного WhatsApp-сообщения.
+"""Проверка исходящей отправки через активный WhatsApp-провайдер.
 
 Запуск из корня проекта:
     python scripts/send_test.py --to +77770000000 --text "Тест бота"
 
-Номер получателя — в формате E.164 (обязательно с «+»). Сообщение придёт
-от бизнес-номера из .env (WHATSAPP_SENDER_NUMBER). Успех — 202 Accepted:
-в логе появится id сообщения Bird (wam_...), доставка асинхронная.
+Провайдер берётся из .env (MESSAGING_PROVIDER): bird — Bird API, meta —
+WhatsApp Cloud API (Graph API). Номер получателя — в E.164 (с «+»).
+Успех: Bird — 202 Accepted, Meta — 200 (сообщение принято в очередь).
 """
 
 import argparse
@@ -17,36 +17,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.settings import get_settings
 from whatsapp.bird_client import BirdError, BirdWhatsAppClient
+from whatsapp.errors import MessagingError
+from whatsapp.meta_client import MetaError, MetaWhatsAppClient
+
+
+def make_sender(settings):
+    """Клиент активного провайдера — та же логика, что в main.WebhookState."""
+    if settings.messaging_provider == "meta":
+        return MetaWhatsAppClient(
+            settings.whatsapp_access_token,
+            settings.whatsapp_phone_number_id,
+            graph_version=settings.meta_graph_version,
+        )
+    return BirdWhatsAppClient(
+        settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
+    )
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Тестовая отправка WhatsApp через Bird API")
+    parser = argparse.ArgumentParser(description="Тестовая отправка WhatsApp")
     parser.add_argument("--to", required=True, help="номер получателя в E.164, например +77770000000")
     parser.add_argument("--text", default="Проверка связи от бота 🤖", help="текст сообщения")
     args = parser.parse_args()
 
     settings = get_settings()
     print(f"Бизнес: {settings.business_name}")
-    print(f"Отправитель (from): {settings.whatsapp_sender_number}")
-    print(f"Получатель (to): {args.to}")
-    print(f"API: {settings.bird_api_url}")
+    print(f"Провайдер: {settings.messaging_provider}")
+    if settings.messaging_provider == "meta":
+        print(f"Graph API: v{settings.meta_graph_version} | phone_number_id: {settings.whatsapp_phone_number_id}")
+    else:
+        print(f"API: {settings.bird_api_url} | from: {settings.whatsapp_sender_number}")
+    print(f"Получатель: {args.to}")
     print(f"Текст: {args.text!r}\n")
 
-    bird = BirdWhatsAppClient(settings.bird_api_key, settings.bird_api_url,
-                              settings.whatsapp_sender_number)
+    sender = make_sender(settings)
     try:
-        await bird.send_text(args.to, args.text)
-        print("OK: Bird принял сообщение (202). Проверьте WhatsApp получателя.")
-    except BirdError as exc:
+        await sender.send_text(args.to, args.text)
+        print("OK: провайдер принял сообщение. Проверьте WhatsApp получателя.")
+    except MessagingError as exc:
         print(f"ОШИБКА: {exc}")
         print("\nПодсказки:")
-        print("- статус 401: неверный BIRD_API_KEY;")
-        print("- 422 WhatsAppSenderRequired/NotFound: проверьте WHATSAPP_SENDER_NUMBER —")
-        print("  это должен быть номер отправителя, подключённый к workspace Bird;")
-        print("- 421 Misdirected Request: регион ключа не совпадает с BIRD_API_URL.")
+        print("- 401: неверный токен (BIRD_API_KEY / WHATSAPP_ACCESS_TOKEN);")
+        print("- Meta 190: токен истёк или не хватает прав System User;")
+        print("- Meta (131030) получатель не в списке: в dev-режиме получатель должен")
+        print("  быть в списке разрешённых номеров тестового окружения;")
+        print("- 421 Misdirected Request (Bird): регион ключа не совпадает с BIRD_API_URL.")
         raise SystemExit(1)
     finally:
-        await bird.close()
+        await sender.close()
 
 
 if __name__ == "__main__":

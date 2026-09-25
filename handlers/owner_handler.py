@@ -7,13 +7,13 @@ owner_whatsapp_phone из конфига клиента (или OWNER_WHATSAPP_N
 import logging
 
 from config.settings import Settings
-from whatsapp.bird_client import BirdError, BirdWhatsAppClient
+from whatsapp.errors import MessagingError
 
 logger = logging.getLogger(__name__)
 
 
 async def notify_owner(
-    bird: BirdWhatsAppClient,
+    sender,
     settings: Settings,
     client_phone: str,
     display_name: str,
@@ -38,9 +38,9 @@ async def notify_owner(
         f"Сообщение: {message_text}"
     )
     try:
-        await bird.send_text(settings.owner_phone, text)
+        await sender.send_text(settings.owner_phone, text)
         return True
-    except BirdError:
+    except MessagingError:
         # Падение уведомления не должно ломать диалог с клиентом — логируем.
         logger.exception("Не удалось отправить уведомление владельцу (%s)", settings.owner_phone)
         return False

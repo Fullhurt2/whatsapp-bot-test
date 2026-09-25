@@ -26,9 +26,9 @@ unsupported. Бот работает с текстом; остальное от�
 
 import logging
 import re
-from dataclasses import dataclass
 
 from config.settings import normalize_phone
+from whatsapp.inbound import InboundMessage  # noqa: F401 (переэкспорт для совместимости)
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +49,6 @@ CONTENT_ARMS = (
     "contact_cards",
     "unsupported",
 )
-
-
-@dataclass(frozen=True)
-class InboundMessage:
-    """Нормализованное входящее сообщение клиента."""
-
-    phone: str          # номер клиента (E.164) — ключ диалога
-    display_name: str   # имя в WhatsApp (может быть пустым)
-    text: str           # текст сообщения; "" для нетекстового контента
-    content_kind: str   # text / interactive_reply / image / ... / unknown
-    message_id: str     # id сообщения Bird (wam_...) — для логов и ответов
 
 
 def parse_incoming_event(payload: dict) -> InboundMessage | None:

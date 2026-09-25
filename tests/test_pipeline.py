@@ -16,7 +16,7 @@ from config.settings import LLMParams, Settings
 from handlers.message_handler import MessageProcessor
 from services.fallback import extract_booking_summary
 from services.llm_client import LLMTimeout
-from whatsapp.bird_client import BirdError
+from whatsapp.errors import MessagingError
 
 OWNER_PHONE = "+70000000000"
 CLIENT_PHONE = "+77770000001"
@@ -33,7 +33,7 @@ class FakeBird:
     async def send_text(self, to, text):
         if to in self.fail_for:
             # Тот же тип исключения, что у реального клиента: путь except BirdError.
-            raise BirdError("fake bird failure")
+            raise MessagingError("fake bird failure")
         self.sent.append((to, text))
 
 
@@ -69,6 +69,12 @@ SlowStubLLM = lambda replies: StubLLM(replies, delay=0.15)
 # Настройки целиком из кода: тесты не зависят от .env и конфига клиента.
 def _base_settings():
     return Settings(
+        messaging_provider="bird",
+        whatsapp_access_token="",
+        whatsapp_phone_number_id="",
+        meta_app_secret="",
+        meta_verify_token="",
+        meta_graph_version="v21.0",
         bird_api_key="test-key",
         bird_webhook_secret="whsec_test",
         bird_api_url="https://eu1.platform.bird.com",
@@ -91,8 +97,8 @@ def _base_settings():
 BASE_SETTINGS = _base_settings()
 
 
-def make_processor(replies, cls=StubLLM, bird=None):
-    return MessageProcessor(BASE_SETTINGS, cls(replies), bird or FakeBird())
+def make_processor(replies, cls=StubLLM, bird=None, sender=None):
+    return MessageProcessor(BASE_SETTINGS, cls(replies), bird or sender or FakeBird())
 
 
 passed = 0
@@ -121,7 +127,7 @@ async def main():
     check("2-й вызов: история = 2 записи", len(h) == 2)
     check("роли user/assistant", [m["role"] for m in h] == ["user", "assistant"])
     check("текст 1-го вопроса в истории", h[0]["content"] == "Сколько стоит капучино?")
-    check("клиенту ушло 2 ответа", len([1 for to, _ in proc1.bird.sent if to == CLIENT_PHONE]) == 2)
+    check("клиенту ушло 2 ответа", len([1 for to, _ in proc1.sender.sent if to == CLIENT_PHONE]) == 2)
 
     print("[2] HANDOFF не утекает в историю")
     proc2 = make_processor(["[HANDOFF] нет данных в базе"])
@@ -136,7 +142,7 @@ async def main():
     await proc3.handle_incoming(CLIENT_PHONE, "Аня", "Хочу человека")
     check("LLM не вызван", len(proc3.llm.calls) == 0)
     check("пара в истории", len(proc3._history_for(CLIENT_PHONE)) == 2)
-    owner3 = [t for to, t in proc3.bird.sent if to == OWNER_PHONE]
+    owner3 = [t for to, t in proc3.sender.sent if to == OWNER_PHONE]
     check("владелец уведомлён по ключевому слову", len(owner3) == 1)
 
     print("[4] обрезка длинных сообщений")
@@ -173,7 +179,7 @@ async def main():
     await proc7.handle_incoming(CLIENT_PHONE, "Аня", "привет")
     await proc7.handle_greeting(CLIENT_PHONE)
     check("история очищена", len(proc7._histories.get(CLIENT_PHONE, ())) == 0)
-    greetings = [t for to, t in proc7.bird.sent if "Здравствуйте" in t]
+    greetings = [t for to, t in proc7.sender.sent if "Здравствуйте" in t]
     check("приветствие ушло клиенту", len(greetings) >= 1)
 
     print("[8] timeout-путь")
@@ -181,14 +187,14 @@ async def main():
     await proc8.handle_incoming(CLIENT_PHONE, "Аня", "привет")
     h8 = proc8._history_for(CLIENT_PHONE)
     check("timeout_reply в истории", "уточняю" in h8[-1]["content"])
-    owner8 = [t for to, t in proc8.bird.sent if to == OWNER_PHONE]
+    owner8 = [t for to, t in proc8.sender.sent if to == OWNER_PHONE]
     check("владелец уведомлён при таймауте", len(owner8) == 1)
 
     print("[9] чанкинг длинного ответа: не в процессоре, а в BirdWhatsAppClient (см. test_bird_client.py)")
     # Здесь проверяем только то, что длинный ответ целиком передан клиенту.
     proc9 = make_processor(["x" * 9000])
     await proc9.handle_incoming(CLIENT_PHONE, "Аня", "дай длинный ответ")
-    client9 = [t for to, t in proc9.bird.sent if to == CLIENT_PHONE]
+    client9 = [t for to, t in proc9.sender.sent if to == CLIENT_PHONE]
     check("ответ ушёл целиком одним вызовом send_text",
           len(client9) == 1 and client9[0] == "x" * 9000)
 
@@ -200,7 +206,7 @@ async def main():
     ])
     await proc10.handle_incoming(CLIENT_PHONE, "Бота", "хочу записаться на маникюр")
     await proc10.handle_incoming(CLIENT_PHONE, "Клиент", "завтра в 15")
-    owner10 = [t for to, t in proc10.bird.sent if to == OWNER_PHONE]
+    owner10 = [t for to, t in proc10.sender.sent if to == OWNER_PHONE]
     check("уведомление владельцу отправлено", len(owner10) == 1)
     check("владельцу ушла именно сводка",
           "Сообщение: ЗАПИСЬ: услуга — маникюр, желаемое время — завтра 15:00" in (owner10[-1] if owner10 else ""))
@@ -211,17 +217,17 @@ async def main():
     print("[11] handoff без сводки: владельцу уходит исходный текст")
     proc11 = make_processor(["[HANDOFF] Не могу проверить статус заказа"])
     await proc11.handle_incoming(CLIENT_PHONE, "Валя", "где мой заказ")
-    owner11 = [t for to, t in proc11.bird.sent if to == OWNER_PHONE][-1]
+    owner11 = [t for to, t in proc11.sender.sent if to == OWNER_PHONE][-1]
     check("сырой текст клиента", "Сообщение: где мой заказ" in owner11)
     check("сводки нет", "ЗАПИСЬ:" not in owner11)
 
     print("[12] сбой отправки клиенту: ответ не в истории, владелец уведомлён")
     bad_bird = FakeBird()
     bad_bird.fail_for.add(CLIENT_PHONE)
-    proc12 = make_processor(["хороший ответ"], bird=bad_bird)
+    proc12 = make_processor(["хороший ответ"], sender=bad_bird)
     await proc12.handle_incoming(CLIENT_PHONE, "Аня", "вопрос")
     check("недоставленный ответ не в истории", len(proc12._histories.get(CLIENT_PHONE, ())) == 1)
-    proc12b = make_processor([LLMTimeout("t/o")], bird=bad_bird)
+    proc12b = make_processor([LLMTimeout("t/o")], sender=bad_bird)
     await proc12b.handle_incoming(CLIENT_PHONE, "Аня", "расскажи про доставку")
     owner12 = [t for to, t in bad_bird.sent if to == OWNER_PHONE]
     check("владелец уведомлён, хотя ответ клиенту не ушёл", len(owner12) == 1)
