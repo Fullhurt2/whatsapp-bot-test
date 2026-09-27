@@ -24,7 +24,7 @@
   .status.ok { color: var(--accent); }
   .hidden { display: none; }
   .top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-  #avatarPreview { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; margin-top: 8px; }
+  #avatarPreview, #avatarCurrent { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; margin-top: 8px; }
   #aboutCounter { text-align: right; }
 </style>
 </head>
@@ -114,6 +114,10 @@
       <label for="f_profile_photo">Фото номера (аватар)</label>
       <div class="hint">Картинка, которую видно в списке чатов. jpg, png или webp, до 5 МБ.
       Файл уходит в WhatsApp и у нас не сохраняется.</div>
+      <div class="row" style="align-items:center;">
+        <img id="avatarCurrent" class="hidden" alt="Текущий аватар номера">
+        <div class="muted" id="avatarCurrentHint">Загружаем текущий аватар…</div>
+      </div>
       <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp" onchange="previewAvatar()">
       <img id="avatarPreview" class="hidden" alt="Выбранный аватар">
       <p>
@@ -309,8 +313,25 @@ function profileWebsiteError(url) {
     : "Сайт должен начинаться с https:// — например https://example.com";
 }
 
-async function loadProfile(pid) {
+// Текущий аватар номера в WhatsApp. Пустая ссылка — фото не задано: показываем
+// об этом словами, а не пустым кружком.
+function showCurrentAvatar(url) {
+  const img = $("avatarCurrent");
+  const hint = $("avatarCurrentHint");
+  if (url) {
+    img.src = url;
+    show("avatarCurrent", true);
+    hint.textContent = "Сейчас такой аватар в WhatsApp.";
+  } else {
+    show("avatarCurrent", false);
+    hint.textContent = "Аватар не задан — картинки в чате не будет.";
+  }
+}
+
+async function loadProfile(pid, okMessage) {
   show("avatarPreview", false);
+  show("avatarCurrent", false);
+  $("avatarCurrentHint").textContent = "Загружаем текущий аватар…";
   $("f_profile_photo").value = "";
   $("f_about").value = "";
   $("f_profile_email").value = "";
@@ -319,6 +340,8 @@ async function loadProfile(pid) {
   status("profileStatus", "Читаем профиль из WhatsApp…", false);
   const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid) + "/profile");
   if (!ok) {
+    show("avatarCurrent", false);
+    $("avatarCurrentHint").textContent = "Текущий аватар показать не удалось.";
     status("profileStatus",
       "Профиль не загрузился (" + code + "): " + (data.error || "ошибка Meta") +
       ". Конфиг бота при этом сохраняется как обычно.", true);
@@ -327,8 +350,9 @@ async function loadProfile(pid) {
   $("f_about").value = data.about || "";
   $("f_profile_email").value = data.email || "";
   $("f_profile_website").value = (data.websites || [])[0] || "";
+  showCurrentAvatar(data.photo_url || "");
   updateAboutCounter();
-  status("profileStatus", "Профиль загружен из WhatsApp.", false);
+  status("profileStatus", okMessage || "Профиль загружен из WhatsApp.", false);
 }
 
 async function saveProfile() {
@@ -390,7 +414,13 @@ async function uploadAvatar() {
     status("profileStatus", "Аватар не обновлён (" + code + "): " + (data.error || "ошибка Meta"), true);
     return;
   }
-  status("profileStatus", "Аватар обновлён ✅ Теперь он виден в чатах с вашим номером.", false);
+  // Перечитываем профиль: Meta отдаст ссылку на уже загруженное фото. Сама
+  // ссылка ведёт на CDN Meta и иногда обновляется с задержкой — об этом прямо
+  // говорим, чтобы пользователь не решил, что загрузка не сработала.
+  show("avatarPreview", false);
+  input.value = "";
+  await loadProfile(currentPid, "Аватар отправлен в WhatsApp ✅ Если картинка не сменилась сразу — " +
+    "это CDN Meta, он обновляется с задержкой в минуту-две.");
 }
 
 function collectForm() {

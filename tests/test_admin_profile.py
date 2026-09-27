@@ -95,6 +95,7 @@ class GraphCapture:
                     "websites": ["https://shop.example"],
                     "vertical": "OTHER",
                     "address": "Абай 12, Алматы",
+                    "profile_picture_url": "https://pps.whatsapp.net/v/t61/avatar.jpg",
                 }]})
             return httpx.Response(200, json={"success": True})
 
@@ -194,6 +195,7 @@ def main():
                 "email": "hello@shop.example",
                 "websites": ["https://shop.example"],
                 "address": "Абай 12, Алматы",
+                "photo_url": "https://pps.whatsapp.net/v/t61/avatar.jpg",
             })
             call = capture.profile_calls()[-1]
             check("GET на whatsapp_business_profile нужной версии",
@@ -201,7 +203,8 @@ def main():
                   and call["path"] == f"/v21.0/{PID_A}{PROFILE_SUFFIX}")
             check("запрошены поля профиля",
                   all(field in call["query"]
-                      for field in ("about", "description", "email", "websites", "address")))
+                      for field in ("about", "description", "email", "websites", "address",
+                                    "profile_picture_url")))
             check("токен клиента в Bearer", call["auth"] == f"Bearer {WABA_A}")
             r = client.get(f"/admin/clients/{PID_B}/profile", headers=admin_headers)
             check("клиент без своего токена берёт общий",
@@ -217,9 +220,18 @@ def main():
             empty = MetaWhatsAppClient(WABA_A, PID_A, transport=httpx.MockTransport(handler_empty))
             import asyncio
             empty_profile = asyncio.run(empty.get_business_profile())
-            check("все поля пустые, websites — список",
+            check("все поля пустые, websites — список, фото — пустое",
                   empty_profile == {"about": "", "description": "", "email": "",
-                                    "websites": [], "vertical": "", "address": ""})
+                                    "websites": [], "vertical": "", "address": "",
+                                    "photo_url": ""})
+
+            def handler_http_photo(request):
+                return httpx.Response(200, json={"data": [{"profile_picture_url": "http://cdn/a.jpg"}]})
+
+            http_photo = asyncio.run(MetaWhatsAppClient(
+                WABA_A, PID_A, transport=httpx.MockTransport(handler_http_photo)
+            ).get_business_profile())
+            check("не-https ссылка на фото отбрасывается", http_photo["photo_url"] == "")
 
             print("[3] PATCH about: payload в Meta + аудит")
             r = client.patch(profile_url, headers=admin_headers,
@@ -395,6 +407,9 @@ def main():
                   'id="f_about"' in r.text and 'id="aboutCounter"' in r.text
                   and 'id="f_profile_photo"' in r.text
                   and "saveProfile()" in r.text and "uploadAvatar()" in r.text)
+            check("есть место под текущий аватар и его подпись",
+                  'id="avatarCurrent"' in r.text and 'id="avatarCurrentHint"' in r.text
+                  and "showCurrentAvatar(data.photo_url" in r.text)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

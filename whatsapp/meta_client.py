@@ -46,8 +46,10 @@ SEND_TIMEOUT_SEC = 20.0
 CONNECT_TIMEOUT_SEC = 10.0
 
 # Поля профиля бизнес-номера, которые запрашиваем у Graph API. Ответ может
-# содержать не все — отсутствующее трактуем как пустое.
-PROFILE_FIELDS = "about,description,email,websites,vertical,address"
+# содержать не все — отсутствующее трактуем как пустое. profile_picture_url
+# отдаётся только для номера с уже загруженным аватаром (проверено на живом
+# API: без аватара поля просто нет).
+PROFILE_FIELDS = "about,description,email,websites,vertical,address,profile_picture_url"
 
 # Лимит Meta на «о компании» (символы). Проверяется и на бэкенде, и в панели.
 ABOUT_MAX_LENGTH = 139
@@ -140,6 +142,7 @@ class MetaWhatsAppClient:
             "websites": [url for url in (_as_text(s) for s in websites) if url],
             "vertical": _as_text(entry.get("vertical")),
             "address": _as_text(entry.get("address")),
+            "photo_url": _as_https_url(entry.get("profile_picture_url")),
         }
 
     async def update_business_profile(self, fields: dict) -> None:
@@ -234,6 +237,13 @@ class MetaWhatsAppClient:
 def _as_text(value) -> str:
     """Поле профиля как строка без обрезки краёв; None/absent -> пустая строка."""
     return "" if value is None else str(value).strip()
+
+
+def _as_https_url(value) -> str:
+    """Ссылка на аватар, только если она https: страницу Meta отдаёт такой,
+    но подстраховка от «просто http» уберегает панель от mixed-content."""
+    url = _as_text(value)
+    return url if url.startswith("https://") else ""
 
 
 def _meta_error_text(response: httpx.Response) -> str:

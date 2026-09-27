@@ -82,8 +82,10 @@ MAX_BODY_BYTES = 256 * 1024  # база знаний бывает большой
 # --- профиль WhatsApp (живёт в Meta, а не в clients/*.yaml) ------------------
 
 # Поля, которые панель показывает в ответе GET профиля. vertical Meta тоже
-# отдаёт, но через API он не меняется и в панели не нужен.
-PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address")
+# отдаёт, но через API он не меняется и в панели не нужен; photo_url — ссылка
+# на текущий аватар (пустая, если номера с фото нет).
+PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address",
+                           "photo_url")
 
 # Поля, которые PATCH умеет применять (display name через API не меняется).
 PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address")
