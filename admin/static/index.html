@@ -24,6 +24,8 @@
   .status.ok { color: var(--accent); }
   .hidden { display: none; }
   .top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  #avatarPreview { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; margin-top: 8px; }
+  #aboutCounter { text-align: right; }
 </style>
 </head>
 <body>
@@ -93,6 +95,32 @@
         <option value="ru">всегда по-русски</option>
         <option value="kk">всегда по-казахски</option>
       </select>
+
+      <div class="section">Профиль WhatsApp</div>
+      <div class="hint">То, что видно рядом с именем вашего номера в WhatsApp: короткое
+      «о компании», контакты и фото. Название самого бизнеса через API не меняется —
+      оно задаётся в WhatsApp Manager (дашборд Meta) при регистрации номера.
+      Изменения профиля идут прямо в WhatsApp и не зависят от кнопки «Сохранить изменения».</div>
+      <label for="f_about">О компании</label>
+      <textarea id="f_about" rows="2" oninput="updateAboutCounter()"
+                placeholder="Кофейня на Абая 12, работаем ежедневно 8:00–20:00"></textarea>
+      <div class="hint" id="aboutCounter">0 / 139</div>
+      <div class="row">
+        <div><label for="f_profile_email">Email</label>
+        <input id="f_profile_email" type="email" placeholder="hello@example.com"></div>
+        <div><label for="f_profile_website">Сайт</label>
+        <input id="f_profile_website" placeholder="https://example.com"></div>
+      </div>
+      <label for="f_profile_photo">Фото номера (аватар)</label>
+      <div class="hint">Картинка, которую видно в списке чатов. jpg, png или webp, до 5 МБ.
+      Файл уходит в WhatsApp и у нас не сохраняется.</div>
+      <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp" onchange="previewAvatar()">
+      <img id="avatarPreview" class="hidden" alt="Выбранный аватар">
+      <p>
+        <button onclick="saveProfile()">Сохранить профиль</button>
+        <button onclick="uploadAvatar()">Обновить аватар</button>
+      </p>
+      <div class="status" id="profileStatus"></div>
 
       <div class="section">База знаний — что бот отвечает клиентам</div>
       <div class="hint">Единственный источник фактов: часы работы, адрес, услуги и цены, правила записи.
@@ -184,7 +212,10 @@ function esc(text) {
 async function api(method, url, body) {
   const token = localStorage.getItem(STORE_KEY) || "";
   const options = { method, headers: { "X-Admin-Token": token, "X-Client-Token": token } };
-  if (body !== undefined) {
+  if (body instanceof FormData) {
+    // Границу multipart и Content-Type проставит сам браузер — руками они не нужны.
+    options.body = body;
+  } else if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
@@ -244,6 +275,122 @@ async function openEditor(pid) {
   status("editorStatus", "");
   show("editorCard", true);
   show("listCard", false);
+  loadProfile(pid);
+}
+
+// --- профиль WhatsApp (живёт в Meta, а не в конфиге) --------------------------
+
+const ABOUT_LIMIT = 139;
+
+function updateAboutCounter() {
+  const length = $("f_about").value.length;
+  $("aboutCounter").textContent = length + " / " + ABOUT_LIMIT;
+  $("aboutCounter").style.color = length > ABOUT_LIMIT ? "var(--err)" : "";
+}
+
+function profileAboutError(text) {
+  return text.length > ABOUT_LIMIT
+    ? "«О компании» — максимум " + ABOUT_LIMIT + " символов, сейчас " + text.length +
+      ". Сократите текст: он показывается под именем в чате."
+    : "";
+}
+
+function profileEmailError(email) {
+  if (!email) return "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ? ""
+    : "Email выглядит неполным — проверьте адрес (например hello@example.com).";
+}
+
+function profileWebsiteError(url) {
+  if (!url) return "";
+  return url.startsWith("https://")
+    ? ""
+    : "Сайт должен начинаться с https:// — например https://example.com";
+}
+
+async function loadProfile(pid) {
+  show("avatarPreview", false);
+  $("f_profile_photo").value = "";
+  $("f_about").value = "";
+  $("f_profile_email").value = "";
+  $("f_profile_website").value = "";
+  updateAboutCounter();
+  status("profileStatus", "Читаем профиль из WhatsApp…", false);
+  const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid) + "/profile");
+  if (!ok) {
+    status("profileStatus",
+      "Профиль не загрузился (" + code + "): " + (data.error || "ошибка Meta") +
+      ". Конфиг бота при этом сохраняется как обычно.", true);
+    return;
+  }
+  $("f_about").value = data.about || "";
+  $("f_profile_email").value = data.email || "";
+  $("f_profile_website").value = (data.websites || [])[0] || "";
+  updateAboutCounter();
+  status("profileStatus", "Профиль загружен из WhatsApp.", false);
+}
+
+async function saveProfile() {
+  const about = $("f_about").value.trim();
+  const email = $("f_profile_email").value.trim();
+  const website = $("f_profile_website").value.trim();
+  updateAboutCounter();
+  const problem = profileAboutError(about) || profileEmailError(email) || profileWebsiteError(website);
+  if (problem) { status("profileStatus", problem, true); return; }
+  const { ok, code, data } = await api(
+    "PATCH",
+    "/admin/clients/" + encodeURIComponent(currentPid) + "/profile",
+    { about, email, websites: website ? [website] : [] },
+  );
+  if (!ok) {
+    const details = (data.problems || []).join(" ");
+    status("profileStatus", "Ошибка " + code + ": " + (data.error || "Meta не приняла изменения") +
+      (details ? " " + details : ""), true);
+    return;
+  }
+  status("profileStatus", "Профиль сохранён в WhatsApp ✅", false);
+}
+
+function previewAvatar() {
+  const input = $("f_profile_photo");
+  const file = input.files && input.files[0];
+  show("avatarPreview", false);
+  if (!file) return;
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    status("profileStatus", "Аватар — файл jpg, png или webp.", true);
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    status("profileStatus", "Файл больше 5 МБ — уменьшите размер картинки.", true);
+    return;
+  }
+  const preview = $("avatarPreview");
+  if (preview.dataset.objectUrl) URL.revokeObjectURL(preview.dataset.objectUrl);
+  preview.src = URL.createObjectURL(file);
+  preview.dataset.objectUrl = preview.src;
+  show("avatarPreview", true);
+  status("profileStatus", "Выбран файл " + file.name + " (" + Math.round(file.size / 1024) +
+    " КБ). Нажмите «Обновить аватар», чтобы отправить его в WhatsApp.", false);
+}
+
+async function uploadAvatar() {
+  const input = $("f_profile_photo");
+  const file = input.files && input.files[0];
+  if (!file) {
+    status("profileStatus", "Сначала выберите файл картинки.", true);
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const { ok, code, data } = await api(
+    "POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile/photo", form,
+  );
+  if (!ok) {
+    status("profileStatus", "Аватар не обновлён (" + code + "): " + (data.error || "ошибка Meta"), true);
+    return;
+  }
+  status("profileStatus", "Аватар обновлён ✅ Теперь он виден в чатах с вашим номером.", false);
 }
 
 function collectForm() {

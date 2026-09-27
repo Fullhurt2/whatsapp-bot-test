@@ -18,6 +18,11 @@
 Секреты (access_token, management_token) в GET-ответах маскируются
 ("EAAY…ab12"); пустое или замаскированное значение в PUT означает
 «оставить прежнее» — токен невозможно затереть случайно.
+
+Профиль WhatsApp-номера (тексты рядом с именем и аватар) живёт в Meta, а не
+в clients/*.yaml: /admin/clients/{pid}/profile читает и правит его напрямую
+через Graph API. Правится тем же токеном, что и конфиг, — клиент может менять
+профиль своего номера, админ — любого.
 """
 
 import hmac
@@ -25,15 +30,18 @@ import json
 import logging
 import os
 import shutil
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
-from fastapi import Request
+from fastapi import File, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from config.clients import is_client_file, is_valid_phone_number_id, validate_tenant_config
 from config.settings import Settings
+from whatsapp.meta_client import ABOUT_MAX_LENGTH, MetaError, MetaTimeout, MetaWhatsAppClient
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +78,26 @@ HISTORY_DIR = ".history"
 AUDIT_FILE = ".audit.jsonl"
 
 MAX_BODY_BYTES = 256 * 1024  # база знаний бывает большой, но не безграничной
+
+# --- профиль WhatsApp (живёт в Meta, а не в clients/*.yaml) ------------------
+
+# Поля, которые панель показывает в ответе GET профиля. vertical Meta тоже
+# отдаёт, но через API он не меняется и в панели не нужен.
+PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address")
+
+# Поля, которые PATCH умеет применять (display name через API не меняется).
+PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address")
+
+# Ссылок на сайте Meta принимает не больше двух.
+PROFILE_WEBSITES_MAX = 2
+
+# Аватар: jpg/png/webp до 5 МБ, файл нигде у нас не остаётся.
+PROFILE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
+PROFILE_PHOTO_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 _PAGE_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 
@@ -228,6 +256,121 @@ def _incoming_differs(key: str, old_value, new_value) -> bool:
         return provided not in ("", mask_secret(old_str), old_str)
     # llm
     return new_value not in (None, {}) and new_value != old_value
+
+
+# --- профиль WhatsApp ---------------------------------------------------------
+
+
+def _looks_like_email(value: str) -> bool:
+    """Грубая проверка адреса: непустые части вокруг «@» и точка в домене."""
+    local, _, domain = value.partition("@")
+    return bool(local and domain and "." in domain and " " not in value)
+
+
+def _validate_profile_fields(incoming: dict) -> tuple[dict, list[str]]:
+    """Тело PATCH -> (поля для Meta, список проблем). Есть проблема — Meta не зовём.
+
+    Пустое значение поля допустимо: так клиент очищает «о компании» или email,
+    пустой список websites — убирает сайт. Смысл проверок — не дать Meta
+    обрезать значение молча и показать в панели внятный русский текст.
+    """
+    payload: dict = {}
+    problems: list[str] = []
+
+    for key in ("about", "description", "address"):
+        if key not in incoming:
+            continue
+        text = str(incoming[key] or "").strip()
+        if key == "about" and len(text) > ABOUT_MAX_LENGTH:
+            problems.append(
+                f"«О компании» — максимум {ABOUT_MAX_LENGTH} символов, "
+                f"сейчас {len(text)}"
+            )
+            continue
+        payload[key] = text
+
+    if "email" in incoming:
+        email = str(incoming["email"] or "").strip()
+        if email and not _looks_like_email(email):
+            problems.append("email выглядит неполным — проверьте адрес")
+        else:
+            payload["email"] = email
+
+    if "websites" in incoming:
+        raw = incoming["websites"]
+        raw = [] if raw is None else raw
+        if not isinstance(raw, (list, tuple)):
+            problems.append("сайт — список ссылок (пустой список = убрать сайт)")
+        else:
+            sites = [str(site).strip() for site in raw if str(site or "").strip()]
+            if len(sites) > PROFILE_WEBSITES_MAX:
+                problems.append(
+                    f"сайтов может быть не больше {PROFILE_WEBSITES_MAX} — "
+                    "Meta принимает 1–2"
+                )
+            elif any(not site.startswith("https://") for site in sites):
+                problems.append(
+                    "ссылка на сайт должна начинаться с https:// — "
+                    "например https://example.com"
+                )
+            else:
+                payload["websites"] = sites
+
+    return payload, problems
+
+
+@asynccontextmanager
+async def _profile_meta_client(state, settings: Settings, clients_dir: Path, pid: str):
+    """Meta-клиент для правки профиля: бандл клиента или одноразовый.
+
+    Обычный путь — sender из бандла: там уже его токен и открытые соединения.
+    Бандла нет, когда конфиг клиента не прошёл валидацию, — тогда собираем
+    одноразовый клиент и закрываем его на выходе. None — работать нечем:
+    у номера нет токена.
+    """
+    await state.refresh_tenants()
+    bundle = state.tenants.get(pid)
+    if bundle is not None and isinstance(bundle.sender, MetaWhatsAppClient):
+        yield bundle.sender
+        return
+    path = _client_yaml_path(clients_dir, pid)
+    cfg = _read_cfg(path) if path else None
+    token = str((cfg or {}).get("access_token") or "").strip() or settings.whatsapp_access_token
+    if not token:
+        yield None
+        return
+    client = _make_meta_client(state, settings, token, pid)
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+def _make_meta_client(state, settings: Settings, access_token: str, pid: str) -> MetaWhatsAppClient:
+    """Одноразовый Meta-клиент номера — через фабрику приложения, если она есть.
+
+    Фабрика (state.sender_factory) уважает подмену транспорта в тестах; без
+    неё (вне мультитенанта, где этот путь не встречается) — прямой клиент.
+    """
+    factory = getattr(state, "sender_factory", None)
+    if factory is None:
+        return MetaWhatsAppClient(access_token, pid, graph_version=settings.meta_graph_version)
+    return factory(replace(
+        settings,
+        whatsapp_access_token=access_token,
+        whatsapp_phone_number_id=pid,
+    ))
+
+
+def _meta_failure(exc: MetaError | MetaTimeout) -> JSONResponse:
+    """Ошибка Meta наружу: 504 на таймаут, 502 на отказ API — с текстом Meta.
+
+    Текст показываем в панели как есть: в нём Meta пишет, чего именно не
+    хватило (чаще всего — прав токена на whatsapp_business_management).
+    """
+    if isinstance(exc, MetaTimeout):
+        return JSONResponse(status_code=504, content={"error": str(exc)})
+    return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
 # --- роуты --------------------------------------------------------------------
@@ -430,4 +573,132 @@ def register_admin_api(app, settings: Settings, state) -> None:
         path.unlink()
         _audit(clients_dir, "admin", "delete", pid, old_cfg, None)
         await state.refresh_tenants()
+        return {"ok": True}
+
+    @app.get("/admin/clients/{pid}/profile")
+    async def get_client_profile(pid: str, request: Request):
+        """Профиль WhatsApp-номера из Meta — что сейчас видно рядом с именем.
+
+        Кэша нет: источник истины — Meta, и панель зовёт его на каждый заход
+        в редактор. Отказ Meta уходит клиенту как 502 с её текстом.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
+            if meta is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "у клиента нет токена для работы с профилем"},
+                )
+            try:
+                profile = await meta.get_business_profile()
+            except (MetaError, MetaTimeout) as exc:
+                return _meta_failure(exc)
+        return {
+            key: profile.get(key, [] if key == "websites" else "")
+            for key in PROFILE_RESPONSE_FIELDS
+        }
+
+    @app.patch("/admin/clients/{pid}/profile")
+    async def patch_client_profile(pid: str, request: Request):
+        """Текстовые поля профиля: валидация -> PATCH в Meta -> строка аудита.
+
+        Конфиг клиента при этом не меняется — в clients/*.yaml профиля нет,
+        профиль живёт в Meta, и source of truth там.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        raw_body = await request.body()
+        if len(raw_body) > MAX_BODY_BYTES:
+            return JSONResponse(status_code=413, content={"error": "тело запроса слишком большое"})
+        try:
+            incoming = json.loads(raw_body)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "тело запроса должно быть JSON-объектом с полями профиля"},
+            )
+        if not isinstance(incoming, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "ожидается JSON-объект с полями профиля"},
+            )
+        unknown = sorted(key for key in incoming if key not in PROFILE_WRITABLE_FIELDS)
+        if unknown:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"поля не меняются через API: {', '.join(unknown)}"},
+            )
+        payload, problems = _validate_profile_fields(incoming)
+        if problems:
+            return JSONResponse(
+                status_code=400, content={"error": "проверьте поля", "problems": problems},
+            )
+        if not payload:
+            return JSONResponse(
+                status_code=400, content={"error": "нечего менять — пришлите хотя бы одно поле"},
+            )
+        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
+            if meta is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "у клиента нет токена для работы с профилем"},
+                )
+            try:
+                await meta.update_business_profile(payload)
+            except (MetaError, MetaTimeout) as exc:
+                return _meta_failure(exc)
+        actor = "admin" if role == "admin" else f"client:{pid}"
+        _audit(clients_dir, actor, "profile", pid, {}, payload)
+        logger.info("Админ-API: профиль %s обновлён (%s): %s", pid, role, ", ".join(sorted(payload)))
+        return {"ok": True, "changed": sorted(payload)}
+
+    @app.post("/admin/clients/{pid}/profile/photo")
+    async def upload_client_profile_photo(pid: str, request: Request,
+                                          file: UploadFile = File(...)):
+        """Аватар номера: файл уходит в Meta и здесь нигде не остаётся.
+
+        Расширение для Meta берём из content-type, а не из имени файла: в
+        имени может быть что угодно, а Graph API ждёт имя с .jpg/.png/.webp.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        content_type = (file.content_type or "").lower()
+        suffix = PROFILE_PHOTO_TYPES.get(content_type)
+        if suffix is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "аватар — файл jpg, png или webp"},
+            )
+        content = await file.read(PROFILE_PHOTO_MAX_BYTES + 1)
+        if len(content) > PROFILE_PHOTO_MAX_BYTES:
+            return JSONResponse(
+                status_code=413, content={"error": "файл больше 5 МБ — уменьшите размер"},
+            )
+        if not content:
+            return JSONResponse(status_code=400, content={"error": "файл пустой"})
+        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
+            if meta is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "у клиента нет токена для работы с профилем"},
+                )
+            try:
+                await meta.upload_profile_photo(
+                    f"whatsapp-profile{suffix}", content, content_type,
+                )
+            except (MetaError, MetaTimeout) as exc:
+                return _meta_failure(exc)
+        actor = "admin" if role == "admin" else f"client:{pid}"
+        _audit(clients_dir, actor, "profile_photo", pid, {}, {"photo": "avatar"})
+        logger.info("Админ-API: аватар %s обновлён (%s)", pid, role)
         return {"ok": True}

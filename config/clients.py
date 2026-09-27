@@ -202,8 +202,9 @@ def _resolve_owner_phone(cfg: dict, file_name: str) -> tuple[str | None, str | N
     phone = normalize_phone(raw)
     if not re.fullmatch(r"\+\d{8,15}", phone):
         return None, (
-            f"owner_whatsapp_phone={raw!r} не похож на номер (E.164) — "
-            "уведомления владельцу работать не будут"
+            f"owner_whatsapp_phone={raw!r} не похож на номер телефона. "
+            "Укажите его в формате +77770001122 (плюс, код страны, номер) — "
+            "иначе уведомления владельцу доходить не будут"
         )
     return phone, None
 
