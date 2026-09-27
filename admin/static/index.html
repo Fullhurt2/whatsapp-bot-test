@@ -42,13 +42,14 @@
   </div>
 
   <div class="hidden" id="app">
+    <div class="top" style="margin-bottom: 10px;">
+      <span class="muted" id="roleLine"></span>
+      <button onclick="logout()">Выйти</button>
+    </div>
     <div class="card" id="listCard">
       <div class="top">
         <h2>Клиенты</h2>
-        <span>
-          <button id="toggleNewBtn" onclick="toggleNew()">+ Добавить клиента</button>
-          <button onclick="logout()">Выйти</button>
-        </span>
+        <button id="toggleNewBtn" onclick="toggleNew()">+ Добавить клиента</button>
       </div>
       <table>
         <thead><tr><th>phone_number_id</th><th>Бизнес</th><th>WABA-токен</th><th>Токен панели</th></tr></thead>
@@ -151,22 +152,6 @@
       </p>
       <div class="status" id="editorStatus"></div>
     </div>
-
-    <div class="card" id="newCard">
-      <div class="top"><h2>Новый клиент</h2><button onclick="toggleNew()">Отмена</button></div>
-      <div class="row">
-        <div><label>phone_number_id (цифры)</label><input id="newPid" class="mono" placeholder="1354249714436396"></div>
-        <div><label>Название бизнеса</label><input id="newBusiness" placeholder="Кофейня на Абая"></div>
-      </div>
-      <label>База знаний (можно дополнить позже)</label>
-      <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
-      <label>Токен номера клиента (access_token) — можно оставить пустым</label>
-      <input id="newToken" class="mono" placeholder="EAAY…">
-      <label>Токен клиента для панели (management_token) — можно позже</label>
-      <input id="newMgmtToken" class="mono">
-      <p><button class="primary" onclick="createClient()">Создать</button></p>
-      <div class="status" id="listStatus"></div>
-    </div>
   </div>
 
 <script>
@@ -218,6 +203,9 @@ async function whoami() {
     return;
   }
   role = data.role;
+  $("roleLine").textContent = role === "admin"
+    ? "Вы вошли как администратор"
+    : "Вы вошли как клиент (ваш бизнес)";
   show("authCard", false);
   show("app", true);
   if (role === "admin") { loadList(); }
