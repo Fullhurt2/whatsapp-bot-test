@@ -10,18 +10,16 @@
   .wrap { max-width: 880px; margin: 0 auto; padding: 24px 16px; }
   h1 { font-size: 20px; margin: 0 0 14px; }
   h2 { font-size: 16px; margin: 14px 0 6px; }
-  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
-  .row > div { flex: 1 1 180px; }
-  label { display: block; font-size: 12px; color: #5a6675; margin: 10px 0 2px; }
+  .row > div { flex: 1 1 220px; }
+  label { display: block; font-size: 13px; font-weight: 600; color: #22303f; margin: 12px 0 2px; }
+  .hint { font-size: 12px; color: #77828e; margin: 1px 0 4px; }
   input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: #fbfcfd; }
   textarea { resize: vertical; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
-  tbody tr:hover { background: #f2f7f4; cursor: pointer; }
   .mono { font-family: ui-monospace, monospace; font-size: 13px; }
-  .muted { color: #68737f; font-size: 12px; }
-  .status { min-height: 20px; font-size: 13px; white-space: pre-wrap; margin-top: 8px; }
+  .muted { color: #77828e; font-size: 12px; }
+  .status { min-height: 20px; white-space: pre-wrap; font-size: 13px; margin-top: 8px; }
   .status.error { color: var(--err); }
   .status.ok { color: var(--accent); }
   .hidden { display: none; }
@@ -33,12 +31,13 @@
   <h1>Панель клиентов WhatsApp-бота</h1>
 
   <div class="card" id="authCard">
-    <label>Токен доступа (админ-токен или ваш клиентский токен)</label>
+    <label for="tokenInput">Токен доступа</label>
     <input type="password" id="tokenInput" placeholder="вставьте токен">
     <p>
       <button class="primary" onclick="login()">Войти</button>
       <button onclick="logout()">Забыть токен</button>
     </p>
+    <div class="muted">Токен выдаёт владелец сервиса. Он хранится только в этом браузере.</div>
     <div class="status" id="authStatus"></div>
   </div>
 
@@ -57,56 +56,87 @@
       </table>
       <div class="muted" id="skippedBox"></div>
 
-      <div class="hidden" id="newCard">
-        <h2>Новый клиент</h2>
-        <div class="row">
-          <div><label>phone_number_id (цифры)</label><input id="newPid" class="mono"></div>
-          <div><label>Название бизнеса</label><input id="newBusiness"></div>
-        </div>
+      <div class="card hidden" id="newCard" style="background:#f6faf7;">
+        <label>phone_number_id — цифры из WhatsApp → API Setup</label>
+        <input id="newPid" class="mono" placeholder="например 1354249714436396">
+        <label>Название бизнеса</label><input id="newBusiness" placeholder="Кофейня на Абая">
         <label>База знаний (можно дополнить позже)</label>
-        <textarea id="newKnowledge" rows="3"></textarea>
-        <div class="row">
-          <div><label>access_token WABA (пусто = глобальный)</label><input id="newToken" class="mono"></div>
-          <div><label>management_token клиента</label><input id="newMgmtToken" class="mono"></div>
-        </div>
+        <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
+        <label>Токен номера клиента, access_token (можно пусто — будет общий)</label>
+        <input id="newToken" class="mono">
+        <label>Токен клиента для панели, management_token (можно пусто)</label>
+        <input id="newMgmtToken" class="mono">
         <p>
           <button class="primary" onclick="createClient()">Создать</button>
           <button onclick="toggleNew()">Отмена</button>
         </p>
       </div>
+
       <div class="status" id="listStatus"></div>
     </div>
 
     <div class="card hidden" id="editorCard">
       <div class="top">
         <h2 id="editorTitle">Конфиг</h2>
-        <button id="backBtn" onclick="backToList()">← К списку</button>
+        <button id="backBtn" class="hidden" onclick="backToList()">← К списку</button>
       </div>
 
-      <label>Название бизнеса</label><input id="f_business_name">
-      <label>Тон общения</label><input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
+      <div class="section">О бизнесе</div>
+      <label for="f_business_name">Название бизнеса</label>
+      <input id="f_business_name" placeholder="Nails Studio">
+      <label for="f_tone">Тон общения бота</label>
+      <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
       <label>Язык ответов</label>
       <select id="f_language">
-        <option value="auto">auto — по языку клиента</option>
-        <option value="ru">ru — всегда русский</option>
-        <option value="kk">kk — всегда казахский</option>
+        <option value="auto">как напишет клиент — по-русски или по-казахски</option>
+        <option value="ru">всегда по-русски</option>
+        <option value="kk">всегда по-казахски</option>
       </select>
-      <label>База знаний</label><textarea id="f_knowledge_base" rows="9"></textarea>
-      <label>WhatsApp владельца (E.164, необязательно)</label><input id="f_owner_whatsapp_phone">
-      <label>Ключевые слова передачи владельцу (через запятую)</label><input id="f_fallback_triggers">
-      <label>Примеры тёплого ответа</label><textarea id="f_style_examples" rows="4"></textarea>
-      <label>fallback_reply_ru (свой текст передачи, необязательно)</label><textarea id="f_fallback_reply_ru" rows="2"></textarea>
-      <label>fallback_reply_kk</label><textarea id="f_fallback_reply_kk" rows="2"></textarea>
-      <label>timeout_reply_ru</label><textarea id="f_timeout_reply_ru" rows="2"></textarea>
-      <label>timeout_reply_kk</label><textarea id="f_timeout_reply_kk" rows="2"></textarea>
 
-      <div id="adminOnly">
-        <h2>Служебные поля (только администратор)</h2>
-        <div class="muted">Пустое или замаскированное значение секрета = оставить прежний токен.</div>
-        <label>access_token WABA</label><input id="f_access_token" class="mono">
-        <label>management_token (токен клиента для этой панели)</label><input id="f_management_token" class="mono">
+      <div class="section">База знаний — что бот отвечает клиентам</div>
+      <div class="hint">Единственный источник фактов: часы работы, адрес, услуги и цены, правила записи.
+      Бот отвечает только на основе этого текста и не выдумывает. Чем полнее — тем точнее ответы.</div>
+      <textarea id="f_knowledge_base" rows="9"></textarea>
+
+      <div class="section">Когда бот сразу передаёт диалог вам</div>
+      <label for="f_fallback_triggers">Слова-сигналы (через запятую)</label>
+      <div class="hint">Если клиент напишет что-то из этого, бот не будет отвечать сам —
+      он вежливо сообщит, что передал вопрос, а вам придёт сообщение с текстом клиента.
+      Например: жалоба, возврат, отменить запись, позовите менеджера.</div>
+      <input id="f_fallback_triggers" placeholder="жалоба, отменить, предоплата">
+
+      <label>Ваш WhatsApp для уведомлений</label>
+      <div class="hint">Сюда бот присылает вопрос, когда не смог ответить сам.
+      Формат: плюс, код страны, номер — например +77770001122.
+      Можно оставить пустым, если уведомления не нужны.</div>
+      <input id="f_owner_whatsapp_phone" placeholder="+77770001122">
+
+      <label>Примеры тёплого ответа (необязательно)</label>
+      <div class="hint">Пара образцов «вопрос клиента → ваш ответ» — бот будет отвечать в том же стиле.</div>
+      <textarea id="f_style_examples" rows="5" placeholder="Клиент: «Сколько стоит маникюр?»
+Хороший ответ: «Маникюр с покрытием — 4500 ₸. Подсказать свободное время? 😊»"></textarea>
+
+      <details>
+        <summary>Фразы бота в особых случаях (можно не заполнять)</summary>
+        <label>Что видит клиент, когда его вопрос дошёл до вас (по-русски)</label>
+        <textarea id="f_fallback_reply_ru" rows="2" placeholder="Оставьте пустым — есть встроенная фраза: «Передаю ваш вопрос команде … 🙌»"></textarea>
+        <label>… по-казахски</label>
+        <textarea id="f_fallback_reply_kk" rows="2"></textarea>
+        <label>Что видит клиент, пока бот уточняет ответ (по-русски)</label>
+        <textarea id="f_timeout_reply_ru" rows="2" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
+        <label>… по-казахски</label><textarea id="f_timeout_reply_kk" rows="2"></textarea>
+      </details>
+
+      <div class="hidden" id="adminOnly">
+        <div class="section">Служебные поля (только администратор)</div>
+        <div class="hint">Пустое значение или маска вида "EAAY…ab12" = оставить прежний токен.</div>
+        <label>access_token — токен WABA клиента (пусто = общий токен)</label>
+        <input id="f_access_token" class="mono">
+        <label>management_token — токен клиента для этой панели</label>
+        <input id="f_management_token" class="mono">
+        <div class="section">Параметры LLM (обычно менять не нужно)</div>
         <div class="row">
-          <div><label>llm.model (пусто = глобальный)</label><input id="f_llm_model" class="mono"></div>
+          <div><label>model (пусто = глобальная)</label><input id="f_llm_model" class="mono"></div>
           <div><label>temperature</label><input id="f_llm_temperature"></div>
           <div><label>max_tokens</label><input id="f_llm_max_tokens"></div>
           <div><label>timeout_seconds</label><input id="f_llm_timeout_seconds"></div>
@@ -115,18 +145,34 @@
       </div>
 
       <p>
-        <button class="primary" onclick="saveEditor()">Сохранить</button>
+        <button class="primary" onclick="saveEditor()">Сохранить изменения</button>
         <button id="deleteBtn" class="danger hidden" onclick="deleteCurrent()">Удалить клиента</button>
         <button id="backBtn" class="hidden" onclick="backToList()">← К списку</button>
       </p>
       <div class="status" id="editorStatus"></div>
+    </div>
+
+    <div class="card" id="newCard">
+      <div class="top"><h2>Новый клиент</h2><button onclick="toggleNew()">Отмена</button></div>
+      <div class="row">
+        <div><label>phone_number_id (цифры)</label><input id="newPid" class="mono" placeholder="1354249714436396"></div>
+        <div><label>Название бизнеса</label><input id="newBusiness" placeholder="Кофейня на Абая"></div>
+      </div>
+      <label>База знаний (можно дополнить позже)</label>
+      <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
+      <label>Токен номера клиента (access_token) — можно оставить пустым</label>
+      <input id="newToken" class="mono" placeholder="EAAY…">
+      <label>Токен клиента для панели (management_token) — можно позже</label>
+      <input id="newMgmtToken" class="mono">
+      <p><button class="primary" onclick="createClient()">Создать</button></p>
+      <div class="status" id="listStatus"></div>
     </div>
   </div>
 
 <script>
 "use strict";
 const STORE_KEY = "wa_panel_token";
-let role = null;         // "admin" | "client"
+let role = null;
 let currentPid = null;
 
 const $ = (id) => document.getElementById(id);
@@ -159,7 +205,7 @@ async function api(method, url, body) {
   }
   const response = await fetch(url, options);
   let data = {};
-  try { data = await response.json(); } catch (e) { /* тело не JSON */ }
+  try { data = await response.json(); } catch (e) { /* пустое тело */ }
   return { ok: response.ok, code: response.status, data };
 }
 
@@ -172,25 +218,11 @@ async function whoami() {
     return;
   }
   role = data.role;
-  if (role === "admin") {
-    show("authCard", false);
-    show("app", true);
-    show("listCard", true);
-    loadList();
-  } else {
-    show("authCard", false);
-    show("app", true);
-    show("listCard", false);
-    show("toggleNewBtn", false);
-    openEditor(data.phone_number_id);
-  }
+  show("authCard", false);
+  show("app", true);
+  if (role === "admin") { loadList(); }
+  else { show("listCard", false); show("toggleNewBtn", false); openEditor(data.phone_number_id); }
 }
-
-const TEXT_FIELDS = [
-  "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
-  "style_examples", "fallback_reply_ru", "fallback_reply_kk",
-  "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
-];
 
 async function openEditor(pid) {
   const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid));
@@ -199,7 +231,11 @@ async function openEditor(pid) {
     return;
   }
   currentPid = pid;
-  for (const key of TEXT_FIELDS) {
+  for (const key of [
+    "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
+    "style_examples", "fallback_reply_ru", "fallback_reply_kk",
+    "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
+  ]) {
     $("f_" + key).value = data[key] != null ? data[key] : "";
   }
   $("f_fallback_triggers").value = (data.fallback_triggers || []).join(", ");
@@ -210,27 +246,26 @@ async function openEditor(pid) {
   $("f_llm_max_tokens").value = llm.max_tokens != null ? llm.max_tokens : "";
   $("f_llm_timeout_seconds").value = llm.timeout_seconds != null ? llm.timeout_seconds : "";
   $("f_llm_reasoning_effort").value = llm.reasoning_effort != null ? llm.reasoning_effort : "";
-
   const isAdmin = role === "admin";
   show("adminOnly", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
   $("editorTitle").textContent = isAdmin
     ? "Конфиг " + pid + (data.business_name ? " — " + data.business_name : "")
-    : "Конфиг вашего бота";
+    : "Настройки вашего бота";
   status("editorStatus", "");
-  show("listCard", false);
   show("editorCard", true);
+  show("listCard", false);
 }
 
 function collectForm() {
   const value = (id) => $(id).value;
   const config = {
-    business_name: value("f_business_name"),
-    tone: value("f_tone"),
+    business_name: value("f_business_name").trim(),
+    tone: value("f_tone").trim(),
     language: value("f_language"),
     knowledge_base: value("f_knowledge_base"),
-    owner_whatsapp_phone: value("f_owner_whatsapp_phone"),
+    owner_whatsapp_phone: normalizeOwnerPhone(value("f_owner_whatsapp_phone")),
     fallback_triggers: value("f_fallback_triggers").split(",").map((s) => s.trim()).filter(Boolean),
     style_examples: value("f_style_examples"),
     fallback_reply_ru: value("f_fallback_reply_ru"),
@@ -239,10 +274,10 @@ function collectForm() {
     timeout_reply_kk: value("f_timeout_reply_kk"),
   };
   if (role === "admin") {
-    config.access_token = value("f_access_token");
-    config.management_token = value("f_management_token");
+    config.access_token = value("f_access_token").trim();
+    config.management_token = value("f_management_token").trim();
     config.llm = {
-      model: value("f_llm_model"),
+      model: value("f_llm_model").trim(),
       temperature: parseFloat(value("f_llm_temperature")) || 0.6,
       max_tokens: parseInt(value("f_llm_max_tokens"), 10) || 3500,
       timeout_seconds: parseInt(value("f_llm_timeout_seconds"), 10) || 15,
@@ -252,8 +287,29 @@ function collectForm() {
   return config;
 }
 
+// Номер владельца: убираем пробелы, скобки и дефисы. Формат, который ждёт
+// сервер: плюс, код страны, номер (7–15 цифр). Проверяем до отправки:
+// иначе конфиг сохранится, а уведомления владельцу доходить не будут.
+function normalizeOwnerPhone(raw) {
+  return String(raw || "").replace(/[\s()\-]/g, "");
+}
+
+function ownerPhoneError(phone) {
+  if (!phone) return "";
+  return /^\+?\d{8,15}$/.test(phone)
+    ? ""
+    : "Номер выглядит неполным. Введите его в международном формате — плюс, код страны, номер: например +77770001122 (или очистите поле, если уведомления не нужны).";
+}
+
 async function saveEditor() {
   const payload = collectForm();
+  const digits = normalizeOwnerPhone(payload.owner_whatsapp_phone);
+  const phoneProblem = ownerPhoneError(digits);
+  if (phoneProblem) {
+    status("editorStatus", phoneProblem, true);
+    return;
+  }
+  payload.owner_whatsapp_phone = digits;
   const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(currentPid), payload);
   if (ok) {
     const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
@@ -278,7 +334,7 @@ function toggleNew() {
 async function createClient() {
   const pid = $("newPid").value.trim();
   if (!/^\d{1,20}$/.test(pid)) {
-    status("listStatus", "phone_number_id должен состоять из цифр", true);
+    status("listStatus", "phone_number_id — только цифры; он показан в WhatsApp → API Setup", true);
     return;
   }
   const payload = {

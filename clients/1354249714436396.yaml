@@ -91,7 +91,7 @@ llm:
   timeout_seconds: 15
   reasoning_effort: "medium"
 
-access_token: ""
+access_token: "EAAYzaKbmepABSq9PsKcIqyFfnZA2D0DCDWEZCttiAgvoTLo2UIhZAZC78Ir2LiL3gqD0xWzcYuO7wwo4lRKY3ar5Lc4lMOSO5E385HXEQR1CCWL9b60vZBQCwDYlWBBgOkV4XZC4nFvw5FyyZB65fSH0b8IZCyT5qsvYWZCnJMAMjdEj6PfuqIwhQS0clh9lZBH9qv3gZDZD"
 
 # Персональный токен клиента для панели /admin (пусто = панель недоступна).
-management_token: ""
+management_token: "nailstest"
