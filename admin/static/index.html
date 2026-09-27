@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Панель клиентов — WhatsApp-бот</title>
+<style>
+  :root { --line: #d8dee6; --accent: #0b7a4b; --err: #b3261e; }
+  body { font: 15px/1.5 system-ui, "Segoe UI", sans-serif; color: #1c2430; background: #eef1f4; margin: 0; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 14px; }
+  h2 { font-size: 16px; margin: 14px 0 6px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 180px; }
+  label { display: block; font-size: 12px; color: #5a6675; margin: 10px 0 2px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: #fbfcfd; }
+  textarea { resize: vertical; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  tbody tr:hover { background: #f2f7f4; cursor: pointer; }
+  .mono { font-family: ui-monospace, monospace; font-size: 13px; }
+  .muted { color: #68737f; font-size: 12px; }
+  .status { min-height: 20px; font-size: 13px; white-space: pre-wrap; margin-top: 8px; }
+  .status.error { color: var(--err); }
+  .status.ok { color: var(--accent); }
+  .hidden { display: none; }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Панель клиентов WhatsApp-бота</h1>
+
+  <div class="card" id="authCard">
+    <label>Токен доступа (админ-токен или ваш клиентский токен)</label>
+    <input type="password" id="tokenInput" placeholder="вставьте токен">
+    <p>
+      <button class="primary" onclick="login()">Войти</button>
+      <button onclick="logout()">Забыть токен</button>
+    </p>
+    <div class="status" id="authStatus"></div>
+  </div>
+
+  <div class="hidden" id="app">
+    <div class="card" id="listCard">
+      <div class="top">
+        <h2>Клиенты</h2>
+        <span>
+          <button id="toggleNewBtn" onclick="toggleNew()">+ Добавить клиента</button>
+          <button onclick="logout()">Выйти</button>
+        </span>
+      </div>
+      <table>
+        <thead><tr><th>phone_number_id</th><th>Бизнес</th><th>WABA-токен</th><th>Токен панели</th></tr></thead>
+        <tbody id="clientsBody"></tbody>
+      </table>
+      <div class="muted" id="skippedBox"></div>
+
+      <div class="hidden" id="newCard">
+        <h2>Новый клиент</h2>
+        <div class="row">
+          <div><label>phone_number_id (цифры)</label><input id="newPid" class="mono"></div>
+          <div><label>Название бизнеса</label><input id="newBusiness"></div>
+        </div>
+        <label>База знаний (можно дополнить позже)</label>
+        <textarea id="newKnowledge" rows="3"></textarea>
+        <div class="row">
+          <div><label>access_token WABA (пусто = глобальный)</label><input id="newToken" class="mono"></div>
+          <div><label>management_token клиента</label><input id="newMgmtToken" class="mono"></div>
+        </div>
+        <p>
+          <button class="primary" onclick="createClient()">Создать</button>
+          <button onclick="toggleNew()">Отмена</button>
+        </p>
+      </div>
+      <div class="status" id="listStatus"></div>
+    </div>
+
+    <div class="card hidden" id="editorCard">
+      <div class="top">
+        <h2 id="editorTitle">Конфиг</h2>
+        <button id="backBtn" onclick="backToList()">← К списку</button>
+      </div>
+
+      <label>Название бизнеса</label><input id="f_business_name">
+      <label>Тон общения</label><input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
+      <label>Язык ответов</label>
+      <select id="f_language">
+        <option value="auto">auto — по языку клиента</option>
+        <option value="ru">ru — всегда русский</option>
+        <option value="kk">kk — всегда казахский</option>
+      </select>
+      <label>База знаний</label><textarea id="f_knowledge_base" rows="9"></textarea>
+      <label>WhatsApp владельца (E.164, необязательно)</label><input id="f_owner_whatsapp_phone">
+      <label>Ключевые слова передачи владельцу (через запятую)</label><input id="f_fallback_triggers">
+      <label>Примеры тёплого ответа</label><textarea id="f_style_examples" rows="4"></textarea>
+      <label>fallback_reply_ru (свой текст передачи, необязательно)</label><textarea id="f_fallback_reply_ru" rows="2"></textarea>
+      <label>fallback_reply_kk</label><textarea id="f_fallback_reply_kk" rows="2"></textarea>
+      <label>timeout_reply_ru</label><textarea id="f_timeout_reply_ru" rows="2"></textarea>
+      <label>timeout_reply_kk</label><textarea id="f_timeout_reply_kk" rows="2"></textarea>
+
+      <div id="adminOnly">
+        <h2>Служебные поля (только администратор)</h2>
+        <div class="muted">Пустое или замаскированное значение секрета = оставить прежний токен.</div>
+        <label>access_token WABA</label><input id="f_access_token" class="mono">
+        <label>management_token (токен клиента для этой панели)</label><input id="f_management_token" class="mono">
+        <div class="row">
+          <div><label>llm.model (пусто = глобальный)</label><input id="f_llm_model" class="mono"></div>
+          <div><label>temperature</label><input id="f_llm_temperature"></div>
+          <div><label>max_tokens</label><input id="f_llm_max_tokens"></div>
+          <div><label>timeout_seconds</label><input id="f_llm_timeout_seconds"></div>
+          <div><label>reasoning_effort</label><input id="f_llm_reasoning_effort"></div>
+        </div>
+      </div>
+
+      <p>
+        <button class="primary" onclick="saveEditor()">Сохранить</button>
+        <button id="deleteBtn" class="danger hidden" onclick="deleteCurrent()">Удалить клиента</button>
+        <button id="backBtn" class="hidden" onclick="backToList()">← К списку</button>
+      </p>
+      <div class="status" id="editorStatus"></div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+const STORE_KEY = "wa_panel_token";
+let role = null;         // "admin" | "client"
+let currentPid = null;
+
+const $ = (id) => document.getElementById(id);
+
+function show(id, visible) {
+  const el = $(id);
+  if (el) el.classList.toggle("hidden", !visible);
+}
+
+function status(id, text, isError) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("error", Boolean(isError));
+  el.classList.toggle("ok", Boolean(text) && !isError);
+}
+
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"]/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]
+  ));
+}
+
+async function api(method, url, body) {
+  const token = localStorage.getItem(STORE_KEY) || "";
+  const options = { method, headers: { "X-Admin-Token": token, "X-Client-Token": token } };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  let data = {};
+  try { data = await response.json(); } catch (e) { /* тело не JSON */ }
+  return { ok: response.ok, code: response.status, data };
+}
+
+async function whoami() {
+  const { ok, data } = await api("GET", "/admin/whoami");
+  if (!ok) {
+    show("app", false);
+    show("authCard", true);
+    status("authStatus", data.error || "токен не подошёл — введите его и нажмите «Войти»", true);
+    return;
+  }
+  role = data.role;
+  if (role === "admin") {
+    show("authCard", false);
+    show("app", true);
+    show("listCard", true);
+    loadList();
+  } else {
+    show("authCard", false);
+    show("app", true);
+    show("listCard", false);
+    show("toggleNewBtn", false);
+    openEditor(data.phone_number_id);
+  }
+}
+
+const TEXT_FIELDS = [
+  "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
+  "style_examples", "fallback_reply_ru", "fallback_reply_kk",
+  "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
+];
+
+async function openEditor(pid) {
+  const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid));
+  if (!ok) {
+    status("editorStatus", data.error || "ошибка " + code, true);
+    return;
+  }
+  currentPid = pid;
+  for (const key of TEXT_FIELDS) {
+    $("f_" + key).value = data[key] != null ? data[key] : "";
+  }
+  $("f_fallback_triggers").value = (data.fallback_triggers || []).join(", ");
+  $("f_language").value = ["ru", "kk", "auto"].includes(data.language) ? data.language : "auto";
+  const llm = data.llm || {};
+  $("f_llm_model").value = llm.model != null ? llm.model : "";
+  $("f_llm_temperature").value = llm.temperature != null ? llm.temperature : "";
+  $("f_llm_max_tokens").value = llm.max_tokens != null ? llm.max_tokens : "";
+  $("f_llm_timeout_seconds").value = llm.timeout_seconds != null ? llm.timeout_seconds : "";
+  $("f_llm_reasoning_effort").value = llm.reasoning_effort != null ? llm.reasoning_effort : "";
+
+  const isAdmin = role === "admin";
+  show("adminOnly", isAdmin);
+  show("deleteBtn", isAdmin);
+  show("backBtn", isAdmin);
+  $("editorTitle").textContent = isAdmin
+    ? "Конфиг " + pid + (data.business_name ? " — " + data.business_name : "")
+    : "Конфиг вашего бота";
+  status("editorStatus", "");
+  show("listCard", false);
+  show("editorCard", true);
+}
+
+function collectForm() {
+  const value = (id) => $(id).value;
+  const config = {
+    business_name: value("f_business_name"),
+    tone: value("f_tone"),
+    language: value("f_language"),
+    knowledge_base: value("f_knowledge_base"),
+    owner_whatsapp_phone: value("f_owner_whatsapp_phone"),
+    fallback_triggers: value("f_fallback_triggers").split(",").map((s) => s.trim()).filter(Boolean),
+    style_examples: value("f_style_examples"),
+    fallback_reply_ru: value("f_fallback_reply_ru"),
+    fallback_reply_kk: value("f_fallback_reply_kk"),
+    timeout_reply_ru: value("f_timeout_reply_ru"),
+    timeout_reply_kk: value("f_timeout_reply_kk"),
+  };
+  if (role === "admin") {
+    config.access_token = value("f_access_token");
+    config.management_token = value("f_management_token");
+    config.llm = {
+      model: value("f_llm_model"),
+      temperature: parseFloat(value("f_llm_temperature")) || 0.6,
+      max_tokens: parseInt(value("f_llm_max_tokens"), 10) || 3500,
+      timeout_seconds: parseInt(value("f_llm_timeout_seconds"), 10) || 15,
+      reasoning_effort: value("f_llm_reasoning_effort").trim(),
+    };
+  }
+  return config;
+}
+
+async function saveEditor() {
+  const payload = collectForm();
+  const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(currentPid), payload);
+  if (ok) {
+    const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
+    status("editorStatus", "Сохранено ✅" + warnings, false);
+    return;
+  }
+  const problems = (data.problems || []).join("\n");
+  status("editorStatus", "Ошибка " + code + ": " + (data.error || problems || "неизвестная ошибка"), true);
+}
+
+async function deleteCurrent() {
+  if (!confirm("Удалить клиента " + currentPid + "? Он перестанет отвечать; копия конфига останется в .history.")) return;
+  const { ok, code, data } = await api("DELETE", "/admin/clients/" + encodeURIComponent(currentPid));
+  if (ok) { backToList(); return; }
+  status("editorStatus", "Ошибка " + code + ": " + (data.error || ""), true);
+}
+
+function toggleNew() {
+  show("newCard", $("newCard").classList.contains("hidden"));
+}
+
+async function createClient() {
+  const pid = $("newPid").value.trim();
+  if (!/^\d{1,20}$/.test(pid)) {
+    status("listStatus", "phone_number_id должен состоять из цифр", true);
+    return;
+  }
+  const payload = {
+    business_name: $("newBusiness").value.trim() || "Новый бизнес",
+    tone: "вежливый, дружелюбный, на «вы»",
+    language: "auto",
+    knowledge_base: $("newKnowledge").value || "База знаний пока не заполнена.",
+    owner_whatsapp_phone: "",
+    fallback_triggers: [],
+    style_examples: "",
+    access_token: $("newToken").value.trim(),
+    management_token: $("newMgmtToken").value.trim(),
+  };
+  const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(pid), payload);
+  if (!ok) {
+    status("listStatus", "Ошибка " + code + ": " + (data.error || (data.problems || []).join("; ")), true);
+    return;
+  }
+  $("newPid").value = "";
+  $("newToken").value = "";
+  $("newMgmtToken").value = "";
+  show("newCard", false);
+  loadList();
+}
+
+function backToList() {
+  show("editorCard", false);
+  show("listCard", true);
+  loadList();
+}
+
+async function loadList() {
+  const { ok, code, data } = await api("GET", "/admin/clients");
+  if (!ok) { status("listStatus", data.error || "ошибка " + code, true); return; }
+  const tbody = $("clientsBody");
+  tbody.innerHTML = "";
+  for (const client of data.clients || []) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td class="mono">' + esc(client.phone_number_id) + "</td>" +
+      "<td>" + esc(client.business_name) + "</td>" +
+      "<td>" + (client.has_own_token ? "свой" : "глобальный") + "</td>" +
+      "<td>" + (client.has_management_token ? "есть" : "—") + "</td>";
+    tr.onclick = () => openEditor(client.phone_number_id);
+    tbody.appendChild(tr);
+  }
+  $("skippedBox").innerHTML = (data.skipped || [])
+    .map((s) => "<div>⚠ " + esc(s.file) + ": " + esc((s.problems || []).join("; ")) + "</div>")
+    .join("");
+  show("editorCard", false);
+  show("listCard", true);
+}
+
+function login() {
+  localStorage.setItem(STORE_KEY, $("tokenInput").value.trim());
+  whoami();
+}
+
+function logout() {
+  localStorage.removeItem(STORE_KEY);
+  location.reload();
+}
+
+whoami();
+</script>
+</body>
+</html>

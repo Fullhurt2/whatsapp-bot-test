@@ -56,6 +56,7 @@ def main():
     check("текст извлечён", inbound.text == "Привет")
     check("content_kind=text", inbound.content_kind == "text")
     check("message_id", inbound.message_id.startswith("wamid."))
+    check("phone_number_id из metadata", inbound.phone_number_id == "106540352242922")
 
     print("[2] чужие/служебные события игнорируются")
     check("не наш объект", parse_meta_events({"object": "page", "entry": []}) == [])
@@ -101,6 +102,29 @@ def main():
     check("None -> []", parse_meta_events(None) == [])
     no_phone = parse_meta_events(payload({"id": "wamid_y", "type": "text", "text": {"body": "x"}}))
     check("сообщение без from пропускается", len(no_phone) == 0)
+
+    print("[6] phone_number_id для маршрутизации мультитенанта")
+    no_meta = parse_meta_events({
+        "object": "whatsapp_business_account",
+        "entry": [{"changes": [{"field": "messages",
+                                "value": {"messages": [message(text={"body": "x"})]}}]}],
+    })
+    check("без metadata -> пустой phone_number_id",
+          len(no_meta) == 1 and no_meta[0].phone_number_id == "")
+    two_ids = parse_meta_events({
+        "object": "whatsapp_business_account",
+        "entry": [
+            {"changes": [{"field": "messages", "value": {
+                "metadata": {"phone_number_id": "111111111111111"},
+                "messages": [message(text={"body": "раз"})]}}]},
+            {"changes": [{"field": "messages", "value": {
+                "metadata": {"phone_number_id": "222222222222222"},
+                "messages": [message(text={"body": "два"})]}}]},
+        ],
+    })
+    check("каждому сообщению — свой phone_number_id",
+          [e.phone_number_id for e in two_ids] == ["111111111111111", "222222222222222"])
+    check("тексты не перепутались", [e.text for e in two_ids] == ["раз", "два"])
 
     print(f"\nИТОГО: passed={passed}, failed={failed}")
     sys.exit(1 if failed else 0)

@@ -71,6 +71,9 @@ def _iter_dicts(value) -> list[dict]:
 
 def _parse_value(value: dict) -> list[InboundMessage]:
     """value одного change -> список InboundMessage (может быть пустым)."""
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    phone_number_id = str(metadata.get("phone_number_id") or "").strip()
+
     contacts: dict[str, str] = {}
     for contact in _iter_dicts(value.get("contacts")):
         wa_id = str(contact.get("wa_id") or "")
@@ -91,6 +94,7 @@ def _parse_value(value: dict) -> list[InboundMessage]:
             text=_extract_text(message),
             content_kind=str(message.get("type") or "unknown"),
             message_id=str(message.get("id") or ""),
+            phone_number_id=phone_number_id,
         ))
     return result
 

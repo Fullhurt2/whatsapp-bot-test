@@ -16,3 +16,6 @@ class InboundMessage:
     text: str           # текст сообщения; "" для нетекстового контента
     content_kind: str   # text / interactive / image / ... / unknown
     message_id: str     # id сообщения провайдера (wam_... / wamid....) — для логов
+    # ID бизнес-номера, на который пришло сообщение (Meta: value.metadata).
+    # В мультитенанте — ключ маршрутизации к конфигу клиента; "" для Bird.
+    phone_number_id: str = ""

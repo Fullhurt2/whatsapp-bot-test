@@ -1,16 +1,18 @@
-"""Точка входа: FastAPI-сервер, принимающий вебхуки Bird (WhatsApp).
+"""Точка входа: FastAPI-сервер, принимающий вебхуки WhatsApp (Bird или Meta).
 
 Запуск: python main.py
-Все настройки берутся из .env и конфига клиента из config/
-(какой файл — переменная CLIENT_CONFIG, по умолчанию client_config.yaml).
+Все настройки берутся из .env; конфиги клиентов — из config/ (single-tenant,
+CLIENT_CONFIG) или из папки clients/ (мультитенант, один файл на клиента,
+имя файла = phone_number_id; включается переменной CLIENTS_DIR или наличием
+непустой папки clients/).
 
-Схема работы: Bird POST'ит входящие сообщения на /webhooks/bird. Мы
-проверяем подпись (whsec-секрет, Standard Webhooks), сразу отвечаем 200
-(у Bird лимит 15 секунд на ack) и обрабатываем сообщение в фоновой
-задаче: ключевые слова -> LLM -> [HANDOFF] -> ответ клиенту и уведомление
-владельцу через Bird.
+Схема работы: провайдер POST'ит входящие сообщения на /webhooks/{bird|meta}.
+Мы проверяем подпись, сразу отвечаем 200 (у провайдера лимит 15 секунд на
+ack) и обрабатываем сообщение в фоновой задаче: ключевые слова -> LLM ->
+[HANDOFF] -> ответ клиенту и уведомление владельцу.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -18,11 +20,14 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Callable
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from admin.api import register_admin_api
+from config.clients import ClientRegistry
 from config.settings import Settings, get_settings
 from handlers.message_handler import MessageProcessor
 from services.llm_client import LLMClient
@@ -80,29 +85,151 @@ def setup_logging(level: str) -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
-class WebhookState:
-    """Общие объекты приложения: настройки, клиенты, обработчик, seen-кэш.
+def build_meta_sender(settings: Settings) -> MetaWhatsAppClient:
+    """Meta-клиент для конкретного клиента: его токен и его phone_number_id.
 
+    Вынесен в фабрику, чтобы тесты подменяли транспорт (MockTransport) без
+    правки кода: create_app(settings, sender_factory=...).
+    """
+    return MetaWhatsAppClient(
+        settings.whatsapp_access_token,
+        settings.whatsapp_phone_number_id,
+        graph_version=settings.meta_graph_version,
+    )
+
+
+class TenantBundle:
+    """Рабочий набор одного клиента мультитенанта.
+
+    У каждого клиента свои: настройки (Settings из его yaml), LLM-клиент
+    (общий ключ из env, но параметры модели — из его yaml), Meta-клиент
+    (токен его WABA) и MessageProcessor (свой system prompt и своя
+    история диалогов). Бандл пересоздаётся при изменении yaml клиента;
+    если конфиг не менялся — переиспользуется, история диалогов живёт.
+    """
+
+    def __init__(self, settings: Settings, llm_client, sender, processor) -> None:
+        self.settings = settings
+        self.llm_client = llm_client
+        self.sender = sender
+        self.processor = processor
+
+    async def close(self) -> None:
+        for resource in (self.sender, self.llm_client):
+            try:
+                await resource.close()
+            except Exception:
+                logger.exception(
+                    "Ошибка закрытия ресурсов клиента %s",
+                    self.settings.whatsapp_phone_number_id,
+                )
+
+
+class WebhookState:
+    """Общие объекты приложения: настройки, клиенты, обработчики, seen-кэш.
+
+    Single-tenant (clients_dir пуст): один sender + один processor, как раньше.
+    Мультитенант (Meta): реестр clients/ и по бандлу на каждого клиента —
+    маршрутизация входящих по phone_number_id.
     Создаётся один раз на жизненный цикл приложения (lifespan).
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, sender_factory: Callable | None = None) -> None:
         self.settings = settings
-        # Один LLM-клиент и один WhatsApp-клиент на всё приложение
-        # (переиспользуют HTTP-соединения). Провайдер задаёт MESSAGING_PROVIDER.
-        self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
-        if settings.messaging_provider == "meta":
-            self.sender = MetaWhatsAppClient(
-                settings.whatsapp_access_token,
-                settings.whatsapp_phone_number_id,
-                graph_version=settings.meta_graph_version,
-            )
-        else:
-            self.sender = BirdWhatsAppClient(
-                settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
-            )
-        self.processor = MessageProcessor(settings, self.llm_client, self.sender)
         self._seen_webhook_ids: OrderedDict[str, None] = OrderedDict()
+        self._reload_lock = asyncio.Lock()
+        self.multitenant = bool(settings.clients_dir) and settings.messaging_provider == "meta"
+
+        if not self.multitenant:
+            # Single-tenant: один LLM-клиент и один WhatsApp-клиент на всё
+            # приложение (переиспользуют HTTP-соединения). Провайдер задаёт
+            # MESSAGING_PROVIDER.
+            self.registry = None
+            self.tenants: dict[str, TenantBundle] = {}
+            self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
+            if settings.messaging_provider == "meta":
+                self.sender = MetaWhatsAppClient(
+                    settings.whatsapp_access_token,
+                    settings.whatsapp_phone_number_id,
+                    graph_version=settings.meta_graph_version,
+                )
+            else:
+                self.sender = BirdWhatsAppClient(
+                    settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
+                )
+            self.processor = MessageProcessor(settings, self.llm_client, self.sender)
+            return
+
+        # Мультитенант: по бандлу на каждого клиента реестра.
+        self.registry = ClientRegistry(Path(settings.clients_dir), settings)
+        self.sender_factory = sender_factory or build_meta_sender
+        self.tenants: dict[str, TenantBundle] = {
+            pid: self._build_tenant(tenant_settings)
+            for pid, tenant_settings in self.registry.tenants.items()
+        }
+        # В мультитенанте общих sender/processor нет — только per-tenant.
+        self.llm_client = None
+        self.sender = None
+        self.processor = None
+
+    # --- мультитенант: бандлы клиентов ------------------------------------------
+
+    def _build_tenant(self, tenant_settings: Settings) -> TenantBundle:
+        """Собирает бандл одного клиента из его Settings."""
+        pid = tenant_settings.whatsapp_phone_number_id
+        llm_client = LLMClient(self.settings.llm_api_url, self.settings.llm_api_key, tenant_settings.llm)
+        sender = self.sender_factory(tenant_settings)
+        processor = MessageProcessor(tenant_settings, llm_client, sender)
+        return TenantBundle(tenant_settings, llm_client, sender, processor)
+
+    async def refresh_tenants(self) -> None:
+        """Hot-reload: сверяет снапшот папки clients/ и пересобирает бандлы.
+
+        Новый yaml -> клиент появился без рестарта. Изменённый yaml ->
+        бандл пересобран (история диалогов этого клиента начинается заново).
+        Удалённый yaml -> клиент отключён, ресурсы закрыты. Неизменённые
+        клиенты продолжают жить со своей историей.
+        """
+        async with self._reload_lock:
+            if not self.registry.maybe_reload():
+                return
+            stale: list[TenantBundle] = []
+            new_bundles: dict[str, TenantBundle] = {}
+            for pid, tenant_settings in self.registry.tenants.items():
+                existing = self.tenants.get(pid)
+                if existing is not None and existing.settings == tenant_settings:
+                    # yaml не менялся — бандл живёт, история диалогов сохранена.
+                    new_bundles[pid] = existing
+                    continue
+                if old := self.tenants.get(pid):
+                    stale.append(old)
+                new_bundles[pid] = self._build_tenant(tenant_settings)
+                logger.info(
+                    "Клиент обновлён | phone_number_id=%s | бизнес=%s",
+                    pid, tenant_settings.business_name,
+                )
+            for pid, old in self.tenants.items():
+                if pid not in new_bundles:
+                    stale.append(old)
+                    logger.info("Клиент отключён | phone_number_id=%s", pid)
+            self.tenants = new_bundles
+        for bundle in stale:
+            await bundle.close()
+
+    # --- маршрутизация -----------------------------------------------------------
+
+    async def processor_for(self, inbound):
+        """Процессор клиента для входящего сообщения по его phone_number_id.
+
+        В single-tenant процессор всегда один. В мультитенанте перед поиском
+        сверяется снапшот папки clients/ (hot-reload), затем клиент ищется
+        по inbound.phone_number_id; None — номер не зарегистрирован.
+        """
+        if not self.multitenant:
+            return self.processor
+        await self.refresh_tenants()
+        bundle = self.tenants.get(inbound.phone_number_id)
+        return bundle.processor if bundle else None
 
     # --- дедупликация доставок ---------------------------------------------------
 
@@ -122,23 +249,25 @@ class WebhookState:
             self._seen_webhook_ids.popitem(last=False)
         return False
 
-    async def handle_event(self, inbound) -> None:
+    async def handle_event(self, inbound, processor: MessageProcessor | None = None) -> None:
         """Обработка разобранного входящего сообщения (фоновая задача).
 
         Единая точка входа из вебхука: приветствие по слову «start»,
         нетекстовый контент — вежливая просьба написать текстом, остальное —
-        полный сценарий MessageProcessor. Любое исключение гасится здесь:
-        сбой обработки не должен ронять воркер.
+        полный сценарий MessageProcessor. Процессор подбирается по клиенту
+        (processor_for); в single-tenant он один. Любое исключение гасится
+        здесь: сбой обработки не должен ронять воркер.
         """
+        processor = processor or self.processor
         try:
             if inbound.text.strip("/").casefold() == "start":
-                await self.processor.handle_greeting(inbound.phone)
+                await processor.handle_greeting(inbound.phone)
             elif inbound.text:
-                await self.processor.handle_incoming(
+                await processor.handle_incoming(
                     inbound.phone, inbound.display_name, inbound.text
                 )
             else:
-                await self.processor.handle_non_text(
+                await processor.handle_non_text(
                     inbound.phone, inbound.display_name, inbound.content_kind
                 )
         except Exception:
@@ -147,24 +276,36 @@ class WebhookState:
             logger.exception("Ошибка при обработке вебхука (%s)", inbound.phone)
 
     async def shutdown(self) -> None:
+        if self.multitenant:
+            for bundle in self.tenants.values():
+                await bundle.close()
+            return
         await self.llm_client.close()
         await self.sender.close()
 
 
-def create_app(settings: Settings) -> FastAPI:
+def create_app(settings: Settings, sender_factory: Callable | None = None) -> FastAPI:
     """Собирает приложение: вебхук активного провайдера + healthcheck.
 
     settings передаётся явно — так тесты подсовывают тестовые настройки
     без .env (см. tests/), а при запуске python main.py их даёт get_settings().
     Провайдер выбирается переменной MESSAGING_PROVIDER: "meta" -> /webhooks/meta
-    (Graph API), "bird" -> /webhooks/bird (Standard Webhooks).
+    (Graph API), "bird" -> /webhooks/bird (Standard Webhooks). Мультитенант
+    включён, если settings.clients_dir задан: тогда маршрутизация идёт по
+    phone_number_id из clients/ (sender_factory — точка подмены для тестов).
     """
-    logger.info(
-        "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | провайдер: %s",
-        settings.business_name, settings.config_file, settings.llm.model,
-        settings.messaging_provider,
-    )
-    state = WebhookState(settings)
+    if settings.clients_dir:
+        logger.info(
+            "Запуск бота | режим: мультитенант | папка клиентов: %s | провайдер: %s",
+            settings.clients_dir, settings.messaging_provider,
+        )
+    else:
+        logger.info(
+            "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | провайдер: %s",
+            settings.business_name, settings.config_file, settings.llm.model,
+            settings.messaging_provider,
+        )
+    state = WebhookState(settings, sender_factory)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -180,8 +321,15 @@ def create_app(settings: Settings) -> FastAPI:
     else:
         _register_bird_webhook(app, settings, state)
 
+    # Админ-API и панель /admin: только в мультитенанте и с заданным
+    # ADMIN_TOKEN (иначе роуты не существуют — см. admin/api.py).
+    if state.multitenant:
+        register_admin_api(app, settings, state)
+
     @app.get("/healthz")
     async def healthz():
+        if state.multitenant:
+            return {"status": "ok", "clients": len(state.tenants)}
         return {"status": "ok", "business": settings.business_name}
 
     @app.get("/privacy")
@@ -189,27 +337,56 @@ def create_app(settings: Settings) -> FastAPI:
         """Короткая памятка о данных клиента — открывается по ссылке из браузера.
 
         Ссылку удобно указать в профиле бизнеса WhatsApp: клиенты видят,
-        какие данные собираются и как их удалить.
+        какие данные собираются и как их удалить. В мультитенанте страница
+        общая для всех клиентов (свой текст появится с админкой/БД).
         """
-        return {
-            "business": settings.business_name,
-            "what_we_store": (
-                "Бот хранит только несколько последних сообщений этого диалога "
-                "— в оперативной памяти, без базы данных. История стирается "
-                "командой «start» от вас или при перезапуске сервиса."
-            ),
-            "how_we_use": (
-                "Ваши сообщения используются только для ответов на вопросы "
-                f"о {settings.business_name}. Мы не пересылаем их третьим "
-                "лицам: при необходимости менеджеру уходит лишь ваш вопрос."
-            ),
-            "delete": (
-                "Чтобы удалить переписку и связаться с человеком, напишите "
-                "«хочу человека» — владелец свяжется с вами."
-            ),
-        }
+        if state.multitenant:
+            return _multitenant_privacy()
+        return _single_tenant_privacy(settings)
 
     return app
+
+
+def _single_tenant_privacy(settings: Settings) -> dict:
+    """Памятка о данных клиента для single-tenant (имя бизнеса подставляется)."""
+    return {
+        "business": settings.business_name,
+        "what_we_store": (
+            "Бот хранит только несколько последних сообщений этого диалога "
+            "— в оперативной памяти, без базы данных. История стирается "
+            "командой «start» от вас или при перезапуске сервиса."
+        ),
+        "how_we_use": (
+            "Ваши сообщения используются только для ответов на вопросы "
+            f"о {settings.business_name}. Мы не пересылаем их третьим "
+            "лицам: при необходимости менеджеру уходит лишь ваш вопрос."
+        ),
+        "delete": (
+            "Чтобы удалить переписку и связаться с человеком, напишите "
+            "«хочу человека» — владелец свяжется с вами."
+        ),
+    }
+
+
+def _multitenant_privacy() -> dict:
+    """Общая памятка для всех клиентов мультитенантного деплоя."""
+    return {
+        "business": "помощник бизнеса в WhatsApp",
+        "what_we_store": (
+            "Бот хранит только несколько последних сообщений этого диалога "
+            "— в оперативной памяти, без базы данных. История стирается "
+            "командой «start» от вас или при перезапуске сервиса."
+        ),
+        "how_we_use": (
+            "Ваши сообщения используются только для ответов на вопросы "
+            "о бизнесе, номер которого вам написал. Мы не пересылаем их "
+            "третьим лицам: при необходимости менеджеру уходит лишь ваш вопрос."
+        ),
+        "delete": (
+            "Чтобы удалить переписку и связаться с человеком, напишите "
+            "«хочу человека» — владелец свяжется с вами."
+        ),
+    }
 
 
 def _register_bird_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
@@ -302,14 +479,16 @@ def _register_meta_webhook(app: FastAPI, settings: Settings, state: WebhookState
         for inbound in inbound_messages:
             if state.seen_before(inbound.message_id or ""):
                 continue
-            background_tasks.add_task(state.handle_event, inbound)
-        return {"ok": True}
-
-
-        for inbound in inbound_messages:
-            if state.seen_before(inbound.message_id or ""):
+            processor = await state.processor_for(inbound)
+            if processor is None:
+                # Неизвестный номер: не наш клиент — ack, чтобы Meta не ретраила.
+                logger.warning(
+                    "Событие для незарегистрированного номера: phone_number_id=%s "
+                    "— подтверждено без обработки (клиента нет в clients/)",
+                    inbound.phone_number_id or "-",
+                )
                 continue
-            background_tasks.add_task(state.handle_event, inbound)
+            background_tasks.add_task(state.handle_event, inbound, processor)
         return {"ok": True}
 
 

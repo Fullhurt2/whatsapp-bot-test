@@ -26,10 +26,17 @@ WhatsApp-версия FAQ-бота [chat-bot-demo](../chat-bot-demo): тот ж�
 Python 3.11+, FastAPI + uvicorn, httpx, PyYAML, python-dotenv.
 
 ```
-main.py                  FastAPI: вебхук провайдера, проверка подписи, ack 200, фоновая обработка
+main.py                  FastAPI: вебхук провайдера, проверка подписи, ack 200, фоновая обработка;
+                         мультитенант: маршрутизация по phone_number_id, hot-reload реестра
+admin/
+  api.py                 админ-API: CRUD конфигов clients/, валидация, бэкапы, аудит
+  static/index.html      страница панели /admin (админ — все клиенты, клиент — свой)
 config/
   settings.py            .env + YAML-конфиг клиента, fail-fast валидация
-  client_config*.yaml    конфиги клиентов (бизнес, база знаний, триггеры, LLM)
+  clients.py             реестр клиентов clients/*.yaml (мультитенант, hot-reload)
+clients/
+  _example.yaml          образец клиентского yaml (в git, без секретов)
+  <phone_number_id>.yaml один файл на клиента в мультитенант-режиме
 handlers/
   message_handler.py     пайплайн: история → keyword → LLM → [HANDOFF] → ответ/передача
   owner_handler.py       уведомление владельцу через активного провайдера
@@ -38,11 +45,12 @@ whatsapp/
   errors.py              общие исключения MessagingError (для обоих провайдеров)
   meta_client.py         POST /{phone_number_id}/messages (Graph API), чанкинг 4096, retry
   meta_security.py       проверка X-Hub-Signature-256 + GET-верификация подписки
-  meta_payload.py        разбор entry/changes/messages
+  meta_payload.py        разбор entry/changes/messages (+metadata.phone_number_id)
   bird_client.py         POST /v1/whatsapp/messages, чанкинг 4096, retry 5xx/429
   webhook_security.py    проверка подписи Bird (Standard Webhooks, HMAC-SHA256)
   webhook_payload.py     разбор события whatsapp.received
 scripts/send_test.py     тестовая отправка сообщения через активного провайдера
+wa_onboard.py            автономный онбординг клиента (2FA, подписка WABA, печать .env)
 tests/                   тесты (запуск: python tests/<имя>.py)
 ```
 
@@ -68,9 +76,11 @@ python main.py
 | `BIRD_WEBHOOK_SECRET` | (bird) секрет вебхука `whsec_...`. |
 | `BIRD_API_URL` | (bird, необязательно) по умолчанию `https://eu1.platform.bird.com`. |
 | `WHATSAPP_SENDER_NUMBER` | (bird) бизнес-номер отправителя (E.164, с `+`). |
-| `OWNER_WHATSAPP_NUMBER` | Номер владельца для уведомлений (перекрывает yaml). |
+| `OWNER_WHATSAPP_NUMBER` | Номер владельца для уведомлений (перекрывает yaml; только single-tenant). |
 | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL` | OpenAI-совместимый LLM. |
-| `CLIENT_CONFIG` | Какой yaml из `config/` грузить (по умолчанию `client_config.yaml`). |
+| `CLIENT_CONFIG` | (single-tenant) какой yaml из `config/` грузить (по умолчанию `client_config.yaml`). |
+| `CLIENTS_DIR` | (необязательно) папка реестра клиентов для мультитенанта, по умолчанию `clients/`. |
+| `ADMIN_TOKEN` | (необязательно, мультитенант) токен админ-API и панели `/admin`, от 32 случайных символов. Без него админ-роуты отключены. |
 | `APP_HOST`, `APP_PORT` | Сервер вебхука (по умолчанию `0.0.0.0:8000`; на Railway порт берётся из `PORT`). |
 
 Бот стартует только тогда, когда заполнены переменные активного провайдера —
@@ -78,7 +88,8 @@ python main.py
 
 ## HTTP-эндпоинты
 
-- `GET /healthz` — проверка живости (`{"status": "ok", ...}`).
+- `GET /healthz` — проверка живости: `{"status": "ok", "business": ...}` в
+  single-tenant, `{"status": "ok", "clients": N}` в мультитенанте.
 - `GET /privacy` — памятка о данных клиента (что хранится, как удалить);
   удобно указать её в профиле бизнеса WhatsApp.
 - `POST /webhooks/meta` / `/webhooks/bird` — входящие вебхуки провайдера.
@@ -146,11 +157,13 @@ python tests/test_webhook_security.py   # подпись Bird (16)
 python tests/test_webhook_payload.py    # разбор событий Bird (19)
 python tests/test_pipeline.py           # пайплайн обработки (38)
 python tests/test_bird_client.py        # Bird-клиент: чанкинг/ретраи (14)
-python tests/test_webhook_server.py     # интеграция FastAPI, Bird-роут (12)
+python tests/test_webhook_server.py     # интеграция FastAPI, Bird-роут (13)
 python tests/test_meta_security.py      # подпись Meta + верификация (13)
-python tests/test_meta_payload.py       # разбор событий Meta (18)
+python tests/test_meta_payload.py       # разбор событий Meta + phone_number_id (22)
 python tests/test_meta_client.py        # Meta-клиент: чанкинг/ретраи (14)
-python tests/test_meta_webhook.py       # интеграция FastAPI, Meta-роуты (11)
+python tests/test_meta_webhook.py       # интеграция FastAPI, Meta-роуты (12)
+python tests/test_multitenant.py        # мультитенант: маршрутизация/hot-reload (33)
+python tests/test_admin_api.py          # админ-API: auth/маскирование/бэкапы/аудит (40)
 ```
 
 Все тесты автономны: сеть не используется (LLM и провайдеры — стабы/моки).
@@ -160,14 +173,153 @@ python tests/test_meta_webhook.py       # интеграция FastAPI, Meta-р�
 1. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`. Модуль отдаёт
    `app` лениво, так что `uvicorn main:app` работает.
 2. Переменные окружения в дашборде: активного провайдера (см. `.env.example`)
-   + `LLM_API_URL`, `LLM_API_KEY`, `CLIENT_CONFIG`. `PORT` Railway подставляет
-   сам — он имеет приоритет над `APP_PORT`; `APP_HOST` уже `0.0.0.0`.
+   + `LLM_API_URL`, `LLM_API_KEY`. В single-tenant дополнительно `CLIENT_CONFIG`
+   и `WHATSAPP_PHONE_NUMBER_ID`; в мультитенанте — только `META_APP_SECRET`,
+   `META_VERIFY_TOKEN` и (при fallback-схеме токенов) `WHATSAPP_ACCESS_TOKEN`.
+   `PORT` Railway подставляет сам — он имеет приоритет над `APP_PORT`;
+   `APP_HOST` уже `0.0.0.0`.
 3. В Settings → Networking задайте порт, который слушает приложение
    (PORT из окружения), и подключите домен.
 4. Вебхук провайдера укажите на публичный домен:
    - Meta: `https://<домен>/webhooks/meta` (Callback URL в настройках приложения,
      Verify token = `META_VERIFY_TOKEN`, подписка на поле `messages`);
    - Bird: `https://<домен>/webhooks/bird` (events: `whatsapp.received`).
+
+## Мультитенант: один деплой на 20+ клиентов
+
+Один деплой обслуживает много номеров: событие каждого входящего сообщения
+несёт `phone_number_id`, по которому оно маршрутизируется к конфигу клиента.
+Режим включается, если задан `CLIENTS_DIR` **или** существует папка `clients/`
+хотя бы с одним клиентским yaml — так старый single-tenant деплой не
+переключается, пока в `clients/` нет ни одного клиента.
+
+**Формат:** один yaml на клиента, имя файла = `phone_number_id` (цифры):
+
+```
+clients/
+  _example.yaml             # образец с комментариями (в git, без секретов)
+  1354249714436396.yaml     # Nails Studio — первый клиент (в git, токен пустой)
+  <phone_number_id>.yaml    # остальные клиенты (не в git — там токены)
+```
+
+Скопируйте `clients/_example.yaml` под именем `<phone_number_id>.yaml` и
+заполните: `business_name`, `knowledge_base`, `tone`, `language`,
+`fallback_triggers`, `style_examples`, `owner_whatsapp_phone`, опционально
+блок `llm` (пустой `model` = глобальный `LLM_MODEL`) и `access_token`.
+
+Правила:
+
+- **`access_token`** — токен System User с доступом к WABA клиента. Если поле
+  пустое, используется глобальный `WHATSAPP_ACCESS_TOKEN` из env (случай «все
+  номера под партнёрством и одним токеном»). Токены в git не попадают: папка
+  `clients/` закрыта в `.gitignore`, кроме `_example.yaml` и конфига Nails
+  Studio (в нём нет секретов).
+- **Hot-reload:** новый/изменённый/удалённый yaml подхватывается без рестарта
+  (сверка mtime при каждом входящем событии). Изменение конфига пересоздаёт
+  обработчик клиента — история его диалогов начинается заново.
+- **Изоляция:** битый yaml или клиент без обязательных полей пропускается с
+  warning, остальные клиенты работают; у каждого клиента свой
+  `MetaWhatsAppClient` (его токен), свой system prompt и своя история.
+- `App Secret` и `META_VERIFY_TOKEN` — глобальные, одни на весь деплой:
+  события всех клиентов идут через одно приложение разработчика.
+- Событие с незарегистрированным `phone_number_id` подтверждается `200`
+  без обработки (warning в логе).
+- `OWNER_WHATSAPP_NUMBER` в мультитенанте не применяется — номер владельца
+  задаётся в yaml каждого клиента.
+
+## Админ-API и панель /admin
+
+Правка конфигов клиентов без деплоя и SSH. Включается в мультитенанте
+заданным `ADMIN_TOKEN` (≥32 случайных символов, только в переменных
+окружения — нигде в коде); иначе `/admin*` просто не существует (404).
+
+**Доступ:** `X-Admin-Token: $ADMIN_TOKEN` — полный доступ; `X-Client-Token` —
+персональный токен клиента (поле `management_token` в его yaml): клиент видит
+и правит только свой конфиг и только бизнес-поля (название, тон, база знаний,
+триггеры, номер владельца и т.п.) — свой `access_token`, `management_token` и
+параметры `llm` ему менять нельзя. Токены клиентам выдаёте вы (сгенерируйте,
+например, `python -c "import secrets; print(secrets.token_urlsafe(24))"` и
+впишите в их yaml).
+
+| Эндпоинт | Кто | Что делает |
+|---|---|---|
+| `GET /admin` | — | страница панели (данные — только через API с токеном) |
+| `GET /admin/whoami` | любой токен | роль: `admin` или `client` + свой phone_number_id |
+| `GET /admin/clients` | админ | список клиентов + пропущенные файлы с причинами |
+| `GET /admin/clients/{id}` | админ или свой клиент | конфиг с замаскированными секретами |
+| `PUT /admin/clients/{id}` | админ / свой клиент | создать/обновить: валидация → бэкап → атомарная запись → hot-reload |
+| `DELETE /admin/clients/{id}` | админ | отключение клиента (бэкап + удаление yaml) |
+
+Гарантии записи: перед сохранением конфиг валидируется тем же кодом, что ест
+реестр (битый yaml на диск не попадёт); запись атомарная; предыдущая версия
+файла уходит в `clients/.history/<id>/<UTC-время>.yaml`; каждое изменение —
+строка в `clients/.audit.jsonl` (кто, когда, какие поля — без значений).
+Пустое или замаскированное (`EAAY…ab12`) значение секрета в PUT сохраняет
+прежний токен. Клиент не может менять `access_token`, `management_token`
+и блок `llm` — только админ.
+
+Деплой: volume на путь из `CLIENTS_DIR` (например `/data/clients`), в
+переменные — `ADMIN_TOKEN`; панель открывается на `https://<домен>/admin`
+(токен хранится в localStorage браузера, авторизация — заголовком в каждом
+запросе, куки и сессии не используются).
+
+## Онбординг нового клиента (модель партнёрства)
+
+Схема: одно Meta-приложение и один BM у вас, у клиента — свой BM со своей WABA,
+ваш BM добавлен к нему как партнёр. Один App Secret на все деплои, токен — на каждого клиента (System User в вашем BM, которому назначена его WABA).
+
+1. Клиент: business.facebook.com → создаёт BM → WhatsApp → WABA → добавляет номер
+   (подтверждение кодом; номер должен быть отвязан от WhatsApp-приложения на телефоне).
+2. Клиент: Business Settings → **Partners** → Add partner → ваш BM ID →
+   ассет **WhatsApp Account** → Full control.
+3. Вы: проверяете доступ и подписываете WABA на вебхуки с override на его деплой.
+   Для этого есть отдельный автономный скрипт **`wa_onboard.py`** (один файл,
+   только стандартная библиотека — можно копировать куда угодно, проект не нужен):
+   ```bash
+   python wa_onboard.py --list --token $YOUR_SYSTEM_USER_TOKEN
+   python wa_onboard.py \
+       --waba-id 4434067880143233 \
+       --webhook-url https://<деплой-клиента>.up.railway.app/webhooks/meta \
+       --verify-token <verify-токен его деплоя> \
+       --pin 123456 \
+       --token $YOUR_SYSTEM_USER_TOKEN --send-test +77081178202
+   ```
+   Скрипт: устанавливает пин двухфакторки номера (`POST /{phone_number_id}/register`
+   — удобно, если номер новый/мигрируется), подписывает WABA
+   (`POST /{waba}/subscribed_apps` + override на URL деплоя), проверяет
+   GET-верификацию деплоя, при `--send-test` отправляет контрольное сообщение
+   и печатает готовый `.env` для нового деплоя. Работает без pip install.
+1. Клиент: business.facebook.com → создаёт BM → WhatsApp → WABA → добавляет номер
+   (подтверждение кодом; номер должен быть отвязан от WhatsApp-приложения на телефоне).
+2. Клиент: Business Settings → **Partners** → Add partner → ваш BM ID →
+   ассет **WhatsApp Account** → Full control.
+3. Вы: проверяете доступ и подписываете WABA на вебхуки. Для этого есть
+   отдельный автономный скрипт **`wa_onboard.py`** (один файл,
+   только стандартная библиотека — можно копировать куда угодно, проект не нужен):
+   ```bash
+   python wa_onboard.py --list --token $YOUR_SYSTEM_USER_TOKEN
+   python wa_onboard.py \
+       --waba-id 4434067880143233 \
+       --webhook-url https://<деплой>.up.railway.app/webhooks/meta \
+       --verify-token <verify-токен деплоя> \
+       --pin 123456 \
+       --token $YOUR_SYSTEM_USER_TOKEN --send-test +77081178202
+   ```
+   Скрипт: устанавливает пин двухфакторки номера (`POST /{phone_number_id}/register`
+   — удобно, если номер новый/мигрируется), подписывает WABA
+   (`POST /{waba}/subscribed_apps`), проверяет GET-верификацию деплоя,
+   при `--send-test` отправляет контрольное сообщение и печатает готовый `.env`.
+   Работает без pip install.
+   В мультитенанте все клиенты подписываются на **один** вебхук одного деплоя:
+   `--webhook-url https://<общий-деплой>.up.railway.app/webhooks/meta`,
+   verify-token один на всех.
+4. Создаёте `clients/<phone_number_id>.yaml` по образцу `clients/_example.yaml`
+   (база знаний, цены, тон; токен — в локальную копию файла или в глобальный
+   `WHATSAPP_ACCESS_TOKEN`). Файл подхватывается без рестарта.
+5. Клиент пишет номеру → бот отвечает.
+
+Мессаджинг-лимиты у новых номеров стартуют с 250 уникальных собеседников/сутки
+и растут с качеством. Бизнес-верификация клиента может понадобиться для масштаба.
 
 ## Отличия от chat-bot-demo (Telegram)
 

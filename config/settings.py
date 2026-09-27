@@ -114,6 +114,13 @@ class Settings:
     style_examples: str = ""
     # Имя загруженного конфига клиента (для логов старта).
     config_file: str = ""
+    # Папка реестра клиентов (мультитенант, Meta): задана -> один деплой
+    # обслуживает clients/*.yaml, маршрутизация по phone_number_id.
+    # Пусто = single-tenant (один клиент из CLIENT_CONFIG, как раньше).
+    clients_dir: str = ""
+    # Токен админ-API (заголовок X-Admin-Token в /admin/*). Не задан ->
+    # админ-роуты и панель /admin отключены.
+    admin_token: str = ""
     # Служебные ответы бота (передача/таймаут) с переопределением из yaml.
     # Пустая строка = встроенный текст для этого языка; {business_name} подставится.
     fallback_reply_ru: str = ""
@@ -192,11 +199,115 @@ def _resolve_owner_phone(cfg: dict) -> str | None:
     return phone
 
 
+def resolve_clients_dir() -> Path | None:
+    """Папка реестра клиентов или None — значит single-tenant (как раньше).
+
+    CLIENTS_DIR задаёт папку явно (относительный путь — от корня проекта).
+    Без переменной мультитенант включается автоматически, если существует
+    папка clients/ с хотя бы одним клиентским yaml (имя файла = цифры,
+    файлы-образцы с префиксом "_" не считаются) — так текущий single-tenant
+    деплой не переключается, пока в clients/ нет ни одного клиента.
+    Актуально только для MESSAGING_PROVIDER=meta; Bird всегда single-tenant.
+    """
+    raw = os.getenv("CLIENTS_DIR", "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.is_absolute() else BASE_DIR / path
+    default_dir = BASE_DIR / "clients"
+    try:
+        for entry in os.scandir(default_dir):
+            name = entry.name
+            if not name.lower().endswith((".yaml", ".yml")):
+                continue
+            if name.startswith("_"):
+                continue
+            if Path(name).stem.isdigit():
+                return default_dir
+    except OSError:
+        return None
+    return None
+
+
+def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
+    """Глобальные настройки мультитенант-режима (Meta): только общие env.
+
+    Бизнес-поля и access_token у каждого клиента свои — они собираются
+    в реестре из clients/*.yaml (см. config/clients.py), и валидация
+    per-client происходит там: один битый клиент не роняет весь сервис.
+    """
+    if os.getenv("CLIENT_CONFIG", "").strip():
+        logger.info("CLIENT_CONFIG задан, но включён мультитенант (clients/) — переменная игнорируется")
+    settings = Settings(
+        messaging_provider=provider,
+        bird_api_key="",
+        bird_webhook_secret="",
+        bird_api_url="",
+        whatsapp_sender_number="",
+        # Глобальный токен — fallback для клиентов с пустым access_token
+        # (случай «все номера под партнёрством и одним токеном»).
+        whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
+        whatsapp_phone_number_id="",
+        meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
+        meta_verify_token=os.getenv("META_VERIFY_TOKEN", "").strip(),
+        meta_graph_version=os.getenv("META_GRAPH_VERSION", "").strip() or "v21.0",
+        app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
+        llm_api_url=os.getenv("LLM_API_URL", "").strip(),
+        llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
+        business_name="",
+        tone="",
+        language="ru",
+        knowledge_base="",
+        owner_phone=None,
+        llm=LLMParams(
+            model=os.getenv("LLM_MODEL", "").strip(),
+            temperature=0.6,
+            max_tokens=3500,
+            timeout_seconds=15,
+        ),
+        clients_dir=str(clients_dir),
+        # Админ-API (панель /admin): полный доступ к clients/*.yaml.
+        # Не обязателен — без него админ-роуты просто не регистрируются.
+        admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
+    )
+    if 0 < len(settings.admin_token) < 32:
+        logger.warning(
+            "ADMIN_TOKEN короче 32 символов — для продакшена сгенерируйте длиннее "
+            "(например python -c \"import secrets; print(secrets.token_urlsafe(32))\")"
+        )
+    # Обязательное — только то, без чего сервис в принципе не работает.
+    # Per-client обязательные поля (business_name, knowledge_base, токен,
+    # модель) проверяет реестр при загрузке каждого yaml.
+    required = {
+        "LLM_API_URL (.env)": settings.llm_api_url,
+        "LLM_API_KEY (.env)": settings.llm_api_key,
+        "META_APP_SECRET (.env)": settings.meta_app_secret,
+        "META_VERIFY_TOKEN (.env)": settings.meta_verify_token,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(f"Не заданы обязательные настройки: {', '.join(missing)}")
+    return settings
+
+
 def get_settings() -> Settings:
     """Собирает итоговые настройки из .env и конфига клиента (CLIENT_CONFIG).
 
     Бросает RuntimeError с понятным описанием, если не хватает обязательных полей.
     """
+    provider = (os.getenv("MESSAGING_PROVIDER", "bird").strip().lower() or "bird")
+    if provider not in ("bird", "meta"):
+        raise RuntimeError(
+            f"MESSAGING_PROVIDER={provider!r} не поддерживается: ожидается 'bird' или 'meta'"
+        )
+
+    # Мультитенант: CLIENTS_DIR задан или в clients/ есть хотя бы один клиент.
+    if provider == "meta":
+        clients_dir = resolve_clients_dir()
+        if clients_dir is not None:
+            logger.info("Режим мультитенант: реестр клиентов в %s", clients_dir)
+            return _get_multitenant_settings(provider, clients_dir)
+
     cfg, config_file = _load_config()
 
     model = str((cfg.get("llm") or {}).get("model") or "").strip() or os.getenv("LLM_MODEL", "").strip()
@@ -216,12 +327,6 @@ def get_settings() -> Settings:
     )
 
     owner_phone = _resolve_owner_phone(cfg)
-
-    provider = (os.getenv("MESSAGING_PROVIDER", "bird").strip().lower() or "bird")
-    if provider not in ("bird", "meta"):
-        raise RuntimeError(
-            f"MESSAGING_PROVIDER={provider!r} не поддерживается: ожидается 'bird' или 'meta'"
-        )
 
     settings = Settings(
         messaging_provider=provider,

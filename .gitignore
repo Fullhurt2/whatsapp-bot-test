@@ -219,3 +219,11 @@ __marimo__/
 
 # ZCode session files
 .zcode/
+
+# --- Мультитенант: реестр клиентов WhatsApp -----------------------------------
+# Секреты клиентов (access_token WABA) не должны попадать в git:
+# вся папка закрыта, в репозитории только образец и конфиг Nails Studio
+# (в нём токен пустой — используется глобальный WHATSAPP_ACCESS_TOKEN).
+clients/*
+!clients/_example.yaml
+!clients/1354249714436396.yaml
