@@ -76,7 +76,8 @@
   }
   input::placeholder, textarea::placeholder { color: var(--text-faint); }
   input:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--surface); }
-  textarea { resize: vertical; }
+  textarea { resize: vertical; min-height: 80px; }
+  textarea.auto-resize { min-height: 80px; max-height: none; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
   .row > div { flex: 1 1 220px; }
@@ -104,7 +105,7 @@
 
   .new-client-card { margin-bottom: 14px; background: var(--surface-muted); }
 
-  .editor-inner { max-width: 640px; }
+  .editor-inner { width: 100%; max-width: none; }
   .editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
   .editor-head h2 { font-size: 18px; margin: 0; }
   .editor-sub { font-size: 12.5px; color: var(--text-soft); margin-top: 3px; }
@@ -288,7 +289,7 @@
 
         <section class="tab-panel hidden" id="tab-knowledge">
           <div class="hint">Единственный источник фактов: часы работы, адрес, услуги и цены, правила записи. Бот отвечает только на основе этого текста и не выдумывает. Чем полнее — тем точнее ответы.</div>
-          <textarea id="f_knowledge_base" rows="12"></textarea>
+          <textarea id="f_knowledge_base" class="auto-resize" placeholder="Введите базу знаний…"></textarea>
         </section>
 
         <section class="tab-panel hidden" id="tab-auto">
@@ -304,18 +305,18 @@
           <div class="section-title">Стиль ответов</div>
           <label>Примеры тёплого ответа (необязательно)</label>
           <div class="hint">Пара образцов «вопрос клиента → ваш ответ» — бот будет отвечать в том же стиле.</div>
-          <textarea id="f_style_examples" rows="5" placeholder="Клиент: «Сколько стоит маникюр?»
+          <textarea id="f_style_examples" class="auto-resize" placeholder="Клиент: «Сколько стоит маникюр?»
 Хороший ответ: «Маникюр с покрытием — 4500 ₸. Подсказать свободное время? 😊»"></textarea>
 
           <details>
             <summary>Фразы бота в особых случаях (можно не заполнять)</summary>
             <label>Что видит клиент, когда его вопрос дошёл до вас (по-русски)</label>
-            <textarea id="f_fallback_reply_ru" rows="2" placeholder="Оставьте пустым — есть встроенная фраза: «Передаю ваш вопрос команде … 🙌»"></textarea>
+            <textarea id="f_fallback_reply_ru" class="auto-resize" placeholder="Оставьте пустым — есть встроенная фраза: «Передаю ваш вопрос команде … 🙌»"></textarea>
             <label>… по-казахски</label>
-            <textarea id="f_fallback_reply_kk" rows="2"></textarea>
+            <textarea id="f_fallback_reply_kk" class="auto-resize"></textarea>
             <label>Что видит клиент, пока бот уточняет ответ (по-русски)</label>
-            <textarea id="f_timeout_reply_ru" rows="2" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
-            <label>… по-казахски</label><textarea id="f_timeout_reply_kk" rows="2"></textarea>
+            <textarea id="f_timeout_reply_ru" class="auto-resize" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
+            <label>… по-казахски</label><textarea id="f_timeout_reply_kk" class="auto-resize"></textarea>
           </details>
         </section>
 
@@ -870,6 +871,25 @@ document.addEventListener("keydown", (event) => {
     saveEditor();
   }
 });
+
+// --- auto-resize для textarea.auto-resize ---
+function autoResizeTextarea(textarea) {
+  textarea.style.height = "auto";
+  textarea.style.height = textarea.scrollHeight + "px";
+}
+
+document.querySelectorAll("textarea.auto-resize").forEach((ta) => {
+  ta.addEventListener("input", () => autoResizeTextarea(ta));
+  // Инициализация при загрузке
+  autoResizeTextarea(ta);
+});
+
+// При переключении вкладок тоже обновляем высоту
+const originalSwitchTab = switchTab;
+switchTab = function(name) {
+  originalSwitchTab(name);
+  document.querySelectorAll("textarea.auto-resize").forEach((ta) => autoResizeTextarea(ta));
+};
 
 function logout() {
   localStorage.removeItem(STORE_KEY);
