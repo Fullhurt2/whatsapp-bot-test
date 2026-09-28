@@ -24,6 +24,9 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
+  /* Резервируем место под полосу прокрутки: страница не «съезжает», когда она появляется/исчезает */
+  html { scrollbar-gutter: stable; }
+  @supports not (scrollbar-gutter: stable) { html { overflow-y: scroll; } }
   body {
     font: 14.5px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: var(--text);
@@ -129,6 +132,18 @@
 
   .only-mobile { display: none; }
 
+  /* --- savebar (sticky bottom) --- */
+  .savebar {
+    position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 14px;
+    margin: 24px -22px -22px; padding: 12px 22px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: var(--surface); border-top: 1px solid var(--border); border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  }
+  .savebar-msg { flex: 1; min-width: 0; }
+  .savebar .status { margin: 0; min-height: 0; }
+  .dirty-note { font-size: 12.5px; color: var(--text-soft); }
+  .dirty-note::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: #C98A1B; margin-right: 7px; vertical-align: 1px; }
+
   @media (max-width: 760px) {
     .app-layout.has-sidebar { display: block; }
     .app-layout.has-sidebar .sidebar { position: static; }
@@ -136,6 +151,8 @@
     .app-layout.has-sidebar:not(.editor-open) .editor { display: none; }
     .only-mobile { display: inline-flex; }
     .editor-inner { max-width: none; }
+    .savebar { margin: 24px -16px -16px; padding-left: 16px; padding-right: 16px; }
+    .card { padding: 16px; }
   }
 </style>
 </head>
@@ -325,7 +342,13 @@
           <p><button id="deleteBtn" class="btn btn-danger hidden" onclick="deleteCurrent()">Удалить клиента</button></p>
         </section>
 
-        <div class="status" id="editorStatus"></div>
+        <div class="savebar" id="saveBar">
+          <div class="savebar-msg">
+            <div class="dirty-note hidden" id="dirtyNote">Есть несохранённые изменения</div>
+            <div class="status" id="editorStatus" role="status"></div>
+          </div>
+          <button class="btn btn-primary" id="saveBtn" onclick="saveEditor()">Сохранить настройки</button>
+        </div>
       </div>
     </main>
 
@@ -381,12 +404,14 @@ async function api(method, url, body) {
 }
 
 async function whoami() {
+  const hadToken = Boolean(localStorage.getItem(STORE_KEY));
   const { ok, data } = await api("GET", "/admin/whoami");
   if (!ok) {
     show("app", false);
     show("topbarRight", false);
     show("authCard", true);
-    status("authStatus", data.error || "токен не подошёл — введите его и нажмите «Войти»", true);
+    // Первый визит без токена — не ругаемся красным, просто ждём ввода.
+    status("authStatus", hadToken ? (data.error || "Токен не подошёл — проверьте его и попробуйте снова.") : "", hadToken);
     return;
   }
   role = data.role;
@@ -490,18 +515,62 @@ async function openEditor(pid) {
   show("backBtn", isAdmin);
   $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
   $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
+  setDirty(false);
   status("editorStatus", "");
   switchTab("business");
   renderClientList($("clientSearch") ? $("clientSearch").value : "");
   loadProfile(pid);
 }
 
-function backToList() {
+function backToList(skipConfirm) {
+  if (skipConfirm !== true && !confirmDiscard()) return;
+  setDirty(false);
   currentPid = null;
   show("editorCard", false);
   show("editorEmpty", true);
   $("app").classList.remove("editor-open");
   loadList();
+}
+
+async function openEditor(pid) {
+  const editorOpen = !$("editorCard").classList.contains("hidden");
+  if (editorOpen && pid === currentPid) return;   // повторный клик по тому же клиенту не затирает правки
+  if (editorOpen && !confirmDiscard()) return;
+  show("editorEmpty", false);
+  show("editorCard", true);
+  const isAdmin = role === "admin";
+  if (isAdmin) $("app").classList.add("editor-open");
+  const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid));
+  if (!ok) {
+    status("editorStatus", data.error || "ошибка " + code, true);
+    return;
+  }
+  currentPid = pid;
+  for (const key of [
+    "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
+    "style_examples", "fallback_reply_ru", "fallback_reply_kk",
+    "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
+  ]) {
+    $("f_" + key).value = data[key] != null ? data[key] : "";
+  }
+  $("f_fallback_triggers").value = (data.fallback_triggers || []).join(", ");
+  $("f_language").value = ["ru", "kk", "auto"].includes(data.language) ? data.language : "auto";
+  const llm = data.llm || {};
+  $("f_llm_model").value = llm.model != null ? llm.model : "";
+  $("f_llm_temperature").value = llm.temperature != null ? llm.temperature : "";
+  $("f_llm_max_tokens").value = llm.max_tokens != null ? llm.max_tokens : "";
+  $("f_llm_timeout_seconds").value = llm.timeout_seconds != null ? llm.timeout_seconds : "";
+  $("f_llm_reasoning_effort").value = llm.reasoning_effort != null ? llm.reasoning_effort : "";
+  show("tabAdminBtn", isAdmin);
+  show("deleteBtn", isAdmin);
+  show("backBtn", isAdmin);
+  $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
+  $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
+  setDirty(false);
+  status("editorStatus", "");
+  switchTab("business");
+  renderClientList($("clientSearch") ? $("clientSearch").value : "");
+  loadProfile(pid);
 }
 
 // --- профиль WhatsApp (живёт в Meta, а не в конфиге) --------------------------
@@ -697,8 +766,14 @@ async function saveEditor() {
     return;
   }
   payload.owner_whatsapp_phone = digits;
+  const saveBtn = $("saveBtn");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Сохраняем…";
   const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(currentPid), payload);
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Сохранить настройки";
   if (ok) {
+    setDirty(false);
     const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
     status("editorStatus", "Сохранено ✅" + warnings, false);
     if (role === "admin") loadList();
@@ -711,7 +786,7 @@ async function saveEditor() {
 async function deleteCurrent() {
   if (!confirm("Удалить клиента " + currentPid + "? Он перестанет отвечать; копия конфига останется в .history.")) return;
   const { ok, code, data } = await api("DELETE", "/admin/clients/" + encodeURIComponent(currentPid));
-  if (ok) { backToList(); return; }
+  if (ok) { backToList(true); return; }
   status("editorStatus", "Ошибка " + code + ": " + (data.error || ""), true);
 }
 
@@ -752,6 +827,49 @@ function login() {
   localStorage.setItem(STORE_KEY, $("tokenInput").value.trim());
   whoami();
 }
+
+function logout() {
+  localStorage.removeItem(STORE_KEY);
+  location.reload();
+}
+
+// --- dirty tracking для конфига (не для профиля WhatsApp) --------------------
+
+let dirty = false;
+
+function setDirty(value) {
+  dirty = value;
+  if (value) status("editorStatus", "");
+}
+
+function confirmDiscard() {
+  return !dirty || confirm("Есть несохранённые изменения. Продолжить без сохранения?");
+}
+
+// Любая правка настроек бота (кроме блока профиля WhatsApp — он сохраняется отдельно) → «несохранённые изменения».
+function markDirty(event) {
+  if (event.target.closest("#tab-profile")) return;
+  setDirty(true);
+}
+
+$("editorCard").addEventListener("input", markDirty);
+$("editorCard").addEventListener("change", markDirty);
+
+window.addEventListener("beforeunload", (event) => {
+  if (dirty) { event.preventDefault(); event.returnValue = ""; }
+});
+
+// Enter отправляет формы входа и создания клиента; Ctrl/Cmd+S сохраняет настройки.
+$("tokenInput").addEventListener("keydown", (event) => { if (event.key === "Enter") login(); });
+["newPid", "newBusiness", "newToken", "newMgmtToken"].forEach((id) => {
+  $(id).addEventListener("keydown", (event) => { if (event.key === "Enter") createClient(); });
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && !$("editorCard").classList.contains("hidden")) {
+    event.preventDefault();
+    saveEditor();
+  }
+});
 
 function logout() {
   localStorage.removeItem(STORE_KEY);
