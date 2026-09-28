@@ -77,10 +77,22 @@
   input::placeholder, textarea::placeholder { color: var(--text-faint); }
   input:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--surface); }
   textarea { resize: vertical; min-height: 80px; }
-  textarea.auto-resize { min-height: 80px; max-height: none; }
+  textarea.auto-resize { min-height: 80px; max-height: none; overflow: hidden; }
+  textarea.auto-resize { min-height: 80px; max-height: none; overflow: hidden; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
   .row > div { flex: 1 1 220px; }
+
+  /* password toggle */
+  .password-wrap { position: relative; }
+  .pwd-toggle {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; padding: 4px; cursor: pointer;
+    color: var(--text-faint); display: flex; align-items: center; justify-content: center;
+  }
+  .pwd-toggle:hover { color: var(--text); }
+  .pwd-toggle svg { width: 18px; height: 18px; }
+  .password-wrap input { padding-right: 40px; }
 
   .status { min-height: 18px; white-space: pre-wrap; font-size: 13px; margin-top: 10px; }
   .status.error { color: var(--danger); }
@@ -175,7 +187,13 @@
     <h1>Вход в панель</h1>
     <div class="muted">Токен выдаёт владелец сервиса. Он хранится только в этом браузере.</div>
     <label for="tokenInput">Токен доступа</label>
-    <input type="password" id="tokenInput" placeholder="вставьте токен" autocomplete="off">
+    <div class="password-wrap">
+      <input type="password" id="tokenInput" placeholder="вставьте токен" autocomplete="off">
+      <button type="button" class="pwd-toggle" onclick="togglePassword('tokenInput')" aria-label="Показать/скрыть токен">
+        <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg class="eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
     <p>
       <button class="btn btn-primary" onclick="login()">Войти</button>
       <button class="btn btn-ghost" onclick="logout()">Забыть токен</button>
@@ -890,6 +908,22 @@ switchTab = function(name) {
   originalSwitchTab(name);
   document.querySelectorAll("textarea.auto-resize").forEach((ta) => autoResizeTextarea(ta));
 };
+
+function togglePassword(inputId) {
+  const input = $(inputId);
+  const btn = input.parentElement.querySelector(".pwd-toggle");
+  const openEye = btn.querySelector(".eye-open");
+  const closedEye = btn.querySelector(".eye-closed");
+  if (input.type === "password") {
+    input.type = "text";
+    show(openEye, false);
+    show(closedEye, true);
+  } else {
+    input.type = "password";
+    show(openEye, true);
+    show(closedEye, false);
+  }
+}
 
 function logout() {
   localStorage.removeItem(STORE_KEY);
