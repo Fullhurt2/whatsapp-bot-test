@@ -90,6 +90,9 @@ PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address
 # Поля, которые PATCH умеет применять (display name через API не меняется).
 PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address")
 
+# Лимит Meta на «Описание» (символы). Проверяется и на бэкенде, и в панели.
+DESCRIPTION_MAX_LENGTH = 512
+
 # Ссылок на сайте Meta принимает не больше двух.
 PROFILE_WEBSITES_MAX = 2
 
@@ -286,6 +289,12 @@ def _validate_profile_fields(incoming: dict) -> tuple[dict, list[str]]:
         if key == "about" and len(text) > ABOUT_MAX_LENGTH:
             problems.append(
                 f"«О компании» — максимум {ABOUT_MAX_LENGTH} символов, "
+                f"сейчас {len(text)}"
+            )
+            continue
+        if key == "description" and len(text) > DESCRIPTION_MAX_LENGTH:
+            problems.append(
+                f"Описание — максимум {DESCRIPTION_MAX_LENGTH} символов, "
                 f"сейчас {len(text)}"
             )
             continue

@@ -1,5 +1,5 @@
 # Тесты блока «Профиль WhatsApp» админ-API: чтение/правка полей профиля через
-# Meta Graph API, загрузка аватара, валидация (139 символов, https, email),
+# Meta Graph API, загрузка аватара, валидация (512 символов, https, email),
 # права клиентского токена, маппинг ошибок Meta в 502/504 и аудит-строки.
 # Обращения к Graph API перехватываются MockTransport'ом настоящего
 # MetaWhatsAppClient — наружу (в Meta) ничего не уходит.
@@ -89,8 +89,8 @@ class GraphCapture:
                 )
             if request.method == "GET":
                 return httpx.Response(200, json={"data": [{
-                    "about": "Кофейня на Абая, 8:00–20:00",
-                    "description": "Кофе и десерты",
+                    "description": "Кофейня на Абая, 8:00–20:00",
+                    "about": "Кофе и десерты",
                     "email": "hello@shop.example",
                     "websites": ["https://shop.example"],
                     "vertical": "OTHER",
@@ -190,8 +190,8 @@ def main():
             r = client.get(profile_url, headers=admin_headers)
             body = r.json()
             check("200 и поля профиля", r.status_code == 200 and body == {
-                "about": "Кофейня на Абая, 8:00–20:00",
-                "description": "Кофе и десерты",
+                "description": "Кофейня на Абая, 8:00–20:00",
+                "about": "Кофе и десерты",
                 "email": "hello@shop.example",
                 "websites": ["https://shop.example"],
                 "address": "Абай 12, Алматы",
@@ -221,7 +221,7 @@ def main():
             import asyncio
             empty_profile = asyncio.run(empty.get_business_profile())
             check("все поля пустые, websites — список, фото — пустое",
-                  empty_profile == {"about": "", "description": "", "email": "",
+                  empty_profile == {"description": "", "about": "", "email": "",
                                     "websites": [], "vertical": "", "address": "",
                                     "photo_url": ""})
 
@@ -233,29 +233,29 @@ def main():
             ).get_business_profile())
             check("не-https ссылка на фото отбрасывается", http_photo["photo_url"] == "")
 
-            print("[3] PATCH about: payload в Meta + аудит")
+            print("[3] PATCH description: payload в Meta + аудит")
             r = client.patch(profile_url, headers=admin_headers,
-                             json={"about": "Кофейня на Абая 12, работаем 8:00–20:00"})
+                             json={"description": "Кофейня на Абая 12, работаем 8:00–20:00"})
             check("200 и ok", r.status_code == 200 and r.json() == {
-                "ok": True, "changed": ["about"]})
+                "ok": True, "changed": ["description"]})
             call = capture.profile_calls()[-1]
             check("PATCH с телом в Meta",
                   call["method"] == "PATCH" and call["json"] == {
-                      "about": "Кофейня на Абая 12, работаем 8:00–20:00"})
+                      "description": "Кофейня на Абая 12, работаем 8:00–20:00"})
             entry = audit_tail(tmp)
-            check("аудит: admin/profile/about/phone_number_id",
+            check("аудит: admin/profile/description/phone_number_id",
                   entry.get("actor") == "admin" and entry.get("action") == "profile"
-                  and entry.get("changed") == ["about"]
+                  and entry.get("changed") == ["description"]
                   and entry.get("phone_number_id") == PID_A)
             r = client.patch(profile_url, headers=admin_headers,
-                             json={"about": "x" * 139})
-            check("ровно 139 символов проходят", r.status_code == 200)
+                             json={"description": "x" * 512})
+            check("ровно 512 символов проходят", r.status_code == 200)
             r = client.patch(profile_url, headers=admin_headers,
-                             json={"about": "x" * 140})
-            check("140 символов -> 400 с объяснением",
+                             json={"description": "x" * 513})
+            check("513 символов -> 400 с объяснением",
                   r.status_code == 400 and r.json().get("problems"))
             before = len(capture.profile_calls())
-            client.patch(profile_url, headers=admin_headers, json={"about": "x" * 200})
+            client.patch(profile_url, headers=admin_headers, json={"description": "x" * 600})
             check("Meta не звали при невалидном поле",
                   len(capture.profile_calls()) == before)
 
@@ -327,13 +327,13 @@ def main():
 
             print("[6] клиентский токен правит только свой профиль")
             r = client.patch(profile_url, headers=client_headers,
-                             json={"about": "Салон красоты, запись по телефону"})
+                             json={"description": "Салон красоты, запись по телефону"})
             check("клиент обновил свой профиль", r.status_code == 200)
             check("аудит: actor=client:<pid>",
                   audit_tail(tmp)["actor"] == f"client:{PID_A}"
                   and audit_tail(tmp)["action"] == "profile")
             r = client.patch(f"/admin/clients/{PID_B}/profile", headers=client_headers,
-                             json={"about": "чужой профиль"})
+                             json={"description": "чужой профиль"})
             check("PATCH чужого профиля -> 403", r.status_code == 403)
             r = client.post(f"/admin/clients/{PID_B}/profile/photo", headers=client_headers,
                             files={"file": ("logo.png", PNG_BYTES, "image/png")})
@@ -346,7 +346,7 @@ def main():
                 "body": {"error": {"message": "Unsupported post request.",
                                    "code": 131030}},
             }
-            r = client.patch(profile_url, headers=admin_headers, json={"about": "Кофе"})
+            r = client.patch(profile_url, headers=admin_headers, json={"description": "Кофе"})
             check("PATCH -> 502", r.status_code == 502)
             check("текст ошибки Meta показан клиенту",
                   "Unsupported post request." in r.json().get("error", ""))
@@ -373,7 +373,7 @@ def main():
                                    headers=admin_headers)
                     check("ни своего, ни общего токена -> 409", r.status_code == 409)
                     r = client2.patch(f"/admin/clients/{PID_UNKNOWN}/profile",
-                                      headers=admin_headers, json={"about": "Кофе"})
+                                      headers=admin_headers, json={"description": "Кофе"})
                     check("PATCH без токена -> 409", r.status_code == 409)
                     r = client2.post(f"/admin/clients/{PID_UNKNOWN}/profile/photo",
                                      headers=admin_headers,
@@ -404,7 +404,7 @@ def main():
             r = client.get("/admin")
             check("страница отдаётся", r.status_code == 200)
             check("есть блок профиля, счётчик и кнопки",
-                  'id="f_about"' in r.text and 'id="aboutCounter"' in r.text
+                  'id="f_description"' in r.text and 'id="descriptionCounter"' in r.text
                   and 'id="f_profile_photo"' in r.text
                   and "saveProfile()" in r.text and "uploadAvatar()" in r.text)
             check("есть место под текущий аватар и его подпись",

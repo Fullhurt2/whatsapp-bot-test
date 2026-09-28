@@ -276,14 +276,14 @@
 
         <section class="tab-panel hidden" id="tab-profile">
           <div class="hint">
-            То, что видно рядом с именем вашего номера в WhatsApp: короткое «о компании», контакты и фото.
+            То, что видно рядом с именем вашего номера в WhatsApp: описание, контакты и фото.
             Название самого бизнеса через API не меняется — оно задаётся в WhatsApp Manager (дашборд Meta)
             при регистрации номера. Изменения профиля идут прямо в WhatsApp и не зависят от кнопки «Сохранить».
           </div>
-          <label for="f_about">О компании</label>
-          <textarea id="f_about" rows="2" oninput="updateAboutCounter()"
-                    placeholder="Кофейня на Абая 12, работаем ежедневно 8:00–20:00"></textarea>
-          <div class="hint" id="aboutCounter">0 / 139</div>
+          <label for="f_description">Описание</label>
+          <textarea id="f_description" rows="3" oninput="updateDescriptionCounter()"
+                    placeholder="Тестовый бот для демонстраций. Писать +7 708 117 8202"></textarea>
+          <div class="hint" id="descriptionCounter">0 / 512</div>
           <div class="row">
             <div><label for="f_profile_email">Email</label>
             <input id="f_profile_email" type="email" placeholder="hello@example.com"></div>
@@ -594,18 +594,18 @@ async function openEditor(pid) {
 
 // --- профиль WhatsApp (живёт в Meta, а не в конфиге) --------------------------
 
-const ABOUT_LIMIT = 139;
+const DESCRIPTION_LIMIT = 512;
 
-function updateAboutCounter() {
-  const length = $("f_about").value.length;
-  $("aboutCounter").textContent = length + " / " + ABOUT_LIMIT;
-  $("aboutCounter").style.color = length > ABOUT_LIMIT ? "var(--danger)" : "";
+function updateDescriptionCounter() {
+  const length = $("f_description").value.length;
+  $("descriptionCounter").textContent = length + " / " + DESCRIPTION_LIMIT;
+  $("descriptionCounter").style.color = length > DESCRIPTION_LIMIT ? "var(--danger)" : "";
 }
 
-function profileAboutError(text) {
-  return text.length > ABOUT_LIMIT
-    ? "«О компании» — максимум " + ABOUT_LIMIT + " символов, сейчас " + text.length +
-      ". Сократите текст: он показывается под именем в чате."
+function profileDescriptionError(text) {
+  return text.length > DESCRIPTION_LIMIT
+    ? "Описание — максимум " + DESCRIPTION_LIMIT + " символов, сейчас " + text.length +
+      ". Сократите текст."
     : "";
 }
 
@@ -643,10 +643,10 @@ async function loadProfile(pid, okMessage) {
   show("avatarCurrent", false);
   $("avatarCurrentHint").textContent = "Загружаем текущий аватар…";
   $("f_profile_photo").value = "";
-  $("f_about").value = "";
+  $("f_description").value = "";
   $("f_profile_email").value = "";
   $("f_profile_website").value = "";
-  updateAboutCounter();
+  updateDescriptionCounter();
   status("profileStatus", "Читаем профиль из WhatsApp…", false);
   const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid) + "/profile");
   if (!ok) {
@@ -657,25 +657,25 @@ async function loadProfile(pid, okMessage) {
       ". Конфиг бота при этом сохраняется как обычно.", true);
     return;
   }
-  $("f_about").value = data.about || "";
+  $("f_description").value = data.description || "";
   $("f_profile_email").value = data.email || "";
   $("f_profile_website").value = (data.websites || [])[0] || "";
   showCurrentAvatar(data.photo_url || "");
-  updateAboutCounter();
+  updateDescriptionCounter();
   status("profileStatus", okMessage || "Профиль загружен из WhatsApp.", false);
 }
 
 async function saveProfile() {
-  const about = $("f_about").value.trim();
+  const description = $("f_description").value.trim();
   const email = $("f_profile_email").value.trim();
   const website = $("f_profile_website").value.trim();
-  updateAboutCounter();
-  const problem = profileAboutError(about) || profileEmailError(email) || profileWebsiteError(website);
+  updateDescriptionCounter();
+  const problem = profileDescriptionError(description) || profileEmailError(email) || profileWebsiteError(website);
   if (problem) { status("profileStatus", problem, true); return; }
   const { ok, code, data } = await api(
     "PATCH",
     "/admin/clients/" + encodeURIComponent(currentPid) + "/profile",
-    { about, email, websites: website ? [website] : [] },
+    { description, email, websites: website ? [website] : [] },
   );
   if (!ok) {
     const details = (data.problems || []).join(" ");
