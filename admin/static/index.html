@@ -78,7 +78,6 @@
   input:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--surface); }
   textarea { resize: vertical; min-height: 80px; }
   textarea.auto-resize { min-height: 80px; max-height: none; overflow: hidden; }
-  textarea.auto-resize { min-height: 80px; max-height: none; overflow: hidden; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
   .row > div { flex: 1 1 220px; }
@@ -93,6 +92,13 @@
   .pwd-toggle:hover { color: var(--text); }
   .pwd-toggle svg { width: 18px; height: 18px; }
   .password-wrap input { padding-right: 40px; }
+
+  /* hide browser's native password reveal button */
+  input[type="password"]::-ms-reveal,
+  input[type="password"]::-webkit-credentials-auto-fill-button,
+  input[type="password"]::-webkit-contacts-auto-fill-button {
+    display: none;
+  }
 
   .status { min-height: 18px; white-space: pre-wrap; font-size: 13px; margin-top: 10px; }
   .status.error { color: var(--danger); }
@@ -255,7 +261,6 @@
 
         <nav class="tabs" id="tabsNav">
           <button class="tab-btn active" data-tab="business" onclick="switchTab('business')">О бизнесе</button>
-          <button class="tab-btn" data-tab="profile" onclick="switchTab('profile')">WhatsApp-профиль</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">База знаний</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Автоответы</button>
           <button class="tab-btn hidden" id="tabAdminBtn" data-tab="admin" onclick="switchTab('admin')">Служебное</button>
@@ -272,37 +277,6 @@
             <option value="ru">всегда по-русски</option>
             <option value="kk">всегда по-казахски</option>
           </select>
-        </section>
-
-        <section class="tab-panel hidden" id="tab-profile">
-          <div class="hint">
-            То, что видно рядом с именем вашего номера в WhatsApp: описание, контакты и фото.
-            Название самого бизнеса через API не меняется — оно задаётся в WhatsApp Manager (дашборд Meta)
-            при регистрации номера. Изменения профиля идут прямо в WhatsApp и не зависят от кнопки «Сохранить».
-          </div>
-          <label for="f_description">Описание</label>
-          <textarea id="f_description" rows="3" oninput="updateDescriptionCounter()"
-                    placeholder="Тестовый бот для демонстраций. Писать +7 708 117 8202"></textarea>
-          <div class="hint" id="descriptionCounter">0 / 512</div>
-          <div class="row">
-            <div><label for="f_profile_email">Email</label>
-            <input id="f_profile_email" type="email" placeholder="hello@example.com"></div>
-            <div><label for="f_profile_website">Сайт</label>
-            <input id="f_profile_website" placeholder="https://example.com"></div>
-          </div>
-          <label for="f_profile_photo">Фото номера (аватар)</label>
-          <div class="hint">Картинка, которую видно в списке чатов. jpg, png или webp, до 5 МБ. Файл уходит в WhatsApp и у нас не сохраняется.</div>
-          <div class="row" style="align-items:center;">
-            <img id="avatarCurrent" class="hidden" alt="Текущий аватар номера">
-            <div class="muted" id="avatarCurrentHint">Загружаем текущий аватар…</div>
-          </div>
-          <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp" onchange="previewAvatar()">
-          <img id="avatarPreview" class="hidden" alt="Выбранный аватар">
-          <p>
-            <button class="btn" onclick="saveProfile()">Сохранить профиль</button>
-            <button class="btn" onclick="uploadAvatar()">Обновить аватар</button>
-          </p>
-          <div class="status" id="profileStatus"></div>
         </section>
 
         <section class="tab-panel hidden" id="tab-knowledge">
@@ -590,147 +564,6 @@ async function openEditor(pid) {
   switchTab("business");
   renderClientList($("clientSearch") ? $("clientSearch").value : "");
   loadProfile(pid);
-}
-
-// --- профиль WhatsApp (живёт в Meta, а не в конфиге) --------------------------
-
-const DESCRIPTION_LIMIT = 512;
-
-function updateDescriptionCounter() {
-  const length = $("f_description").value.length;
-  $("descriptionCounter").textContent = length + " / " + DESCRIPTION_LIMIT;
-  $("descriptionCounter").style.color = length > DESCRIPTION_LIMIT ? "var(--danger)" : "";
-}
-
-function profileDescriptionError(text) {
-  return text.length > DESCRIPTION_LIMIT
-    ? "Описание — максимум " + DESCRIPTION_LIMIT + " символов, сейчас " + text.length +
-      ". Сократите текст."
-    : "";
-}
-
-function profileEmailError(email) {
-  if (!email) return "";
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-    ? ""
-    : "Email выглядит неполным — проверьте адрес (например hello@example.com).";
-}
-
-function profileWebsiteError(url) {
-  if (!url) return "";
-  return url.startsWith("https://")
-    ? ""
-    : "Сайт должен начинаться с https:// — например https://example.com";
-}
-
-// Текущий аватар номера в WhatsApp. Пустая ссылка — фото не задано: показываем
-// об этом словами, а не пустым кружком.
-function showCurrentAvatar(url) {
-  const img = $("avatarCurrent");
-  const hint = $("avatarCurrentHint");
-  if (url) {
-    img.src = url;
-    show("avatarCurrent", true);
-    hint.textContent = "Сейчас такой аватар в WhatsApp.";
-  } else {
-    show("avatarCurrent", false);
-    hint.textContent = "Аватар не задан — картинки в чате не будет.";
-  }
-}
-
-async function loadProfile(pid, okMessage) {
-  show("avatarPreview", false);
-  show("avatarCurrent", false);
-  $("avatarCurrentHint").textContent = "Загружаем текущий аватар…";
-  $("f_profile_photo").value = "";
-  $("f_description").value = "";
-  $("f_profile_email").value = "";
-  $("f_profile_website").value = "";
-  updateDescriptionCounter();
-  status("profileStatus", "Читаем профиль из WhatsApp…", false);
-  const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid) + "/profile");
-  if (!ok) {
-    show("avatarCurrent", false);
-    $("avatarCurrentHint").textContent = "Текущий аватар показать не удалось.";
-    status("profileStatus",
-      "Профиль не загрузился (" + code + "): " + (data.error || "ошибка Meta") +
-      ". Конфиг бота при этом сохраняется как обычно.", true);
-    return;
-  }
-  $("f_description").value = data.description || "";
-  $("f_profile_email").value = data.email || "";
-  $("f_profile_website").value = (data.websites || [])[0] || "";
-  showCurrentAvatar(data.photo_url || "");
-  updateDescriptionCounter();
-  status("profileStatus", okMessage || "Профиль загружен из WhatsApp.", false);
-}
-
-async function saveProfile() {
-  const description = $("f_description").value.trim();
-  const email = $("f_profile_email").value.trim();
-  const website = $("f_profile_website").value.trim();
-  updateDescriptionCounter();
-  const problem = profileDescriptionError(description) || profileEmailError(email) || profileWebsiteError(website);
-  if (problem) { status("profileStatus", problem, true); return; }
-  const { ok, code, data } = await api(
-    "PATCH",
-    "/admin/clients/" + encodeURIComponent(currentPid) + "/profile",
-    { description, email, websites: website ? [website] : [] },
-  );
-  if (!ok) {
-    const details = (data.problems || []).join(" ");
-    status("profileStatus", "Ошибка " + code + ": " + (data.error || "Meta не приняла изменения") +
-      (details ? " " + details : ""), true);
-    return;
-  }
-  status("profileStatus", "Профиль сохранён в WhatsApp ✅", false);
-}
-
-function previewAvatar() {
-  const input = $("f_profile_photo");
-  const file = input.files && input.files[0];
-  show("avatarPreview", false);
-  if (!file) return;
-  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-    status("profileStatus", "Аватар — файл jpg, png или webp.", true);
-    return;
-  }
-  if (file.size > 5 * 1024 * 1024) {
-    status("profileStatus", "Файл больше 5 МБ — уменьшите размер картинки.", true);
-    return;
-  }
-  const preview = $("avatarPreview");
-  if (preview.dataset.objectUrl) URL.revokeObjectURL(preview.dataset.objectUrl);
-  preview.src = URL.createObjectURL(file);
-  preview.dataset.objectUrl = preview.src;
-  show("avatarPreview", true);
-  status("profileStatus", "Выбран файл " + file.name + " (" + Math.round(file.size / 1024) +
-    " КБ). Нажмите «Обновить аватар», чтобы отправить его в WhatsApp.", false);
-}
-
-async function uploadAvatar() {
-  const input = $("f_profile_photo");
-  const file = input.files && input.files[0];
-  if (!file) {
-    status("profileStatus", "Сначала выберите файл картинки.", true);
-    return;
-  }
-  const form = new FormData();
-  form.append("file", file, file.name);
-  const { ok, code, data } = await api(
-    "POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile/photo", form,
-  );
-  if (!ok) {
-    status("profileStatus", "Аватар не обновлён (" + code + "): " + (data.error || "ошибка Meta"), true);
-    return;
-  }
-  // Перечитываем профиль: Meta отдаст ссылку на уже загруженное фото. Сама
-  // ссылка ведёт на CDN Meta и иногда обновляется с задержкой — об этом прямо
-  // говорим, чтобы пользователь не решил, что загрузка не сработала.
-  show("avatarPreview", false);
-  input.value = "";
-  await loadProfile(currentPid, "Аватар отправлен в WhatsApp ✅ Если картинка не сменилась сразу — " +
-    "это CDN Meta, он обновляется с задержкой в минуту-две.");
 }
 
 function collectForm() {

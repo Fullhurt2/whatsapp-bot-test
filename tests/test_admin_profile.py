@@ -400,16 +400,17 @@ def main():
             finally:
                 shutil.rmtree(tmp_b, ignore_errors=True)
 
-            print("[9] панель: блок профиля на странице")
+            print("[9] панель: профиль удалён, есть только конфиг")
             r = client.get("/admin")
             check("страница отдаётся", r.status_code == 200)
-            check("есть блок профиля, счётчик и кнопки",
-                  'id="f_description"' in r.text and 'id="descriptionCounter"' in r.text
-                  and 'id="f_profile_photo"' in r.text
-                  and "saveProfile()" in r.text and "uploadAvatar()" in r.text)
-            check("есть место под текущий аватар и его подпись",
-                  'id="avatarCurrent"' in r.text and 'id="avatarCurrentHint"' in r.text
-                  and "showCurrentAvatar(data.photo_url" in r.text)
+            check("нет вкладки профиля",
+                  'id="f_description"' not in r.text
+                  and 'id="descriptionCounter"' not in r.text
+                  and 'id="f_profile_photo"' not in r.text
+                  and 'id="avatarCurrent"' not in r.text)
+            check("есть вкладки конфига",
+                  'id="f_business_name"' in r.text
+                  and 'id="f_knowledge_base"' in r.text)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
