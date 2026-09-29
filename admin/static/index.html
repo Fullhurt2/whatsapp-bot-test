@@ -13,7 +13,7 @@
     --border-strong: #D8D5CE;
     --text: #17181A;
     --text-soft: #6B6F76;
-    --text-faint: #9B9D9F;
+    --text-faint: #767A80;
     --accent: #0E9F6E;
     --accent-ink: #0B7A57;
     --accent-soft: #E4F5EE;
@@ -25,7 +25,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; }
   /* Резервируем место под полосу прокрутки: страница не «съезжает», когда она появляется/исчезает */
-  html { scrollbar-gutter: stable; }
+  html { scrollbar-gutter: stable; scroll-padding-bottom: 90px; }
   @supports not (scrollbar-gutter: stable) { html { overflow-y: scroll; } }
   body {
     font: 14.5px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -44,6 +44,7 @@
   button { font: inherit; cursor: pointer; }
   .btn { border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
     border-radius: var(--radius); padding: 8px 14px; font-weight: 600; font-size: 13.5px;
+    min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
     transition: background .12s ease, border-color .12s ease, color .12s ease; }
   .btn:hover { border-color: #C7C4BC; }
   .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -67,18 +68,19 @@
 
   label { display: block; font-size: 12.5px; font-weight: 600; color: var(--text); margin: 16px 0 5px; }
   .tab-panel > label:first-child, .tab-panel > .row:first-child label:first-child { margin-top: 0; }
-  .hint { font-size: 12px; color: var(--text-soft); margin: 2px 0 7px; line-height: 1.5; }
+  .hint { font-size: 13.5px; color: var(--text-soft); margin: 2px 0 7px; line-height: 1.5; }
   .muted { color: var(--text-soft); font-size: 12.5px; }
 
   input, textarea, select {
     width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--border-strong);
-    border-radius: var(--radius); font: inherit; background: var(--surface-muted); color: var(--text);
+    border-radius: var(--radius); font: inherit; font-size: 16px; background: var(--surface-muted); color: var(--text);
   }
   input::placeholder, textarea::placeholder { color: var(--text-faint); }
   input:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--surface); }
   textarea { resize: vertical; min-height: 80px; }
-  textarea.auto-resize { min-height: 80px; max-height: none; overflow: hidden; }
+  textarea.auto-resize { min-height: 80px; max-height: 65vh; overflow-y: auto; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  input.mono, textarea.mono, select.mono { font-size: 16px; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
   .row > div { flex: 1 1 220px; }
 
@@ -131,7 +133,8 @@
 
   .tabs { display: flex; border-bottom: 1px solid var(--border); margin: 20px 0 22px; overflow-x: auto; }
   .tab-btn { background: none; border: none; padding: 9px 0; margin-right: 20px; font-size: 13.5px;
-    font-weight: 600; color: var(--text-soft); border-bottom: 2px solid transparent; white-space: nowrap; }
+    font-weight: 600; color: var(--text-soft); border-bottom: 2px solid transparent; white-space: nowrap;
+    min-height: 44px; display: inline-flex; align-items: center; }
   .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
   .tab-btn:hover { color: var(--text); }
 
@@ -141,8 +144,14 @@
   .empty-state { padding: 60px 20px; text-align: center; color: var(--text-soft); }
   .empty-state div { font-size: 13.5px; }
 
-  #aboutCounter { text-align: right; }
-  #avatarPreview, #avatarCurrent { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; margin-top: 6px; }
+  /* Подсказка клиенту: бот ещё не знает о бизнесе */
+  .notice {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 18px; padding: 12px 14px;
+    background: #FDF6E3; border: 1px solid #EAD9A8; border-radius: var(--radius);
+    color: #6B5312; font-size: 13.5px; cursor: pointer;
+  }
+  .notice::before { content: "⚠"; flex-shrink: 0; font-size: 15px; }
+  .notice:hover { background: #FBF0D6; }
 
   details summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-soft); margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); list-style: none; }
   details summary::-webkit-details-marker { display: none; }
@@ -191,18 +200,18 @@
 
   <div class="card auth-card" id="authCard">
     <h1>Вход в панель</h1>
-    <div class="muted">Токен выдаёт владелец сервиса. Он хранится только в этом браузере.</div>
-    <label for="tokenInput">Токен доступа</label>
+    <div class="muted">Ключ вам прислал(а) владелец сервиса в WhatsApp. Он хранится только в этом браузере.</div>
+    <label for="tokenInput">Ключ доступа</label>
     <div class="password-wrap">
-      <input type="password" id="tokenInput" placeholder="вставьте токен" autocomplete="off">
-      <button type="button" class="pwd-toggle" onclick="togglePassword('tokenInput')" aria-label="Показать/скрыть токен">
+      <input type="password" id="tokenInput" placeholder="вставьте ключ" autocomplete="off">
+      <button type="button" class="pwd-toggle" onclick="togglePassword('tokenInput')" aria-label="Показать/скрыть ключ">
         <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
         <svg class="eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
       </button>
     </div>
     <p>
       <button class="btn btn-primary" onclick="login()">Войти</button>
-      <button class="btn btn-ghost" onclick="logout()">Забыть токен</button>
+      <button class="btn btn-ghost" onclick="logout()">Выйти с этого устройства</button>
     </p>
     <div class="status" id="authStatus"></div>
   </div>
@@ -226,7 +235,7 @@
         <input id="newPid" class="mono" placeholder="например 1354249714436396">
         <label>Название бизнеса</label>
         <input id="newBusiness" placeholder="Кофейня на Абая">
-        <label>База знаний (можно дополнить позже)</label>
+        <label>Информация о бизнесе (можно дополнить позже)</label>
         <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
         <label>Токен номера клиента, access_token</label>
         <div class="hint">Можно пусто — будет общий</div>
@@ -255,21 +264,24 @@
           </div>
           <div class="editor-actions">
             <button id="backBtn" class="btn btn-ghost only-mobile hidden" onclick="backToList()">← К списку</button>
-            <button class="btn btn-primary" onclick="saveEditor()">Сохранить</button>
           </div>
+        </div>
+
+        <div class="notice hidden" id="knowledgeNotice" onclick="switchTab('knowledge')">
+          Бот пока не знает о вашем бизнесе. Заполните вкладку «Информация о бизнесе» — это главное, что нужно сделать.
         </div>
 
         <nav class="tabs" id="tabsNav">
           <button class="tab-btn active" data-tab="business" onclick="switchTab('business')">О бизнесе</button>
-          <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">База знаний</button>
-          <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Автоответы</button>
+          <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
+          <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
           <button class="tab-btn hidden" id="tabAdminBtn" data-tab="admin" onclick="switchTab('admin')">Служебное</button>
         </nav>
 
         <section class="tab-panel" id="tab-business">
           <label for="f_business_name">Название бизнеса</label>
           <input id="f_business_name" placeholder="Nails Studio">
-          <label for="f_tone">Тон общения бота</label>
+          <label for="f_tone">Как бот общается</label>
           <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
           <label>Язык ответов</label>
           <select id="f_language">
@@ -281,12 +293,14 @@
 
         <section class="tab-panel hidden" id="tab-knowledge">
           <div class="hint">Единственный источник фактов: часы работы, адрес, услуги и цены, правила записи. Бот отвечает только на основе этого текста и не выдумывает. Чем полнее — тем точнее ответы.</div>
-          <textarea id="f_knowledge_base" class="auto-resize" placeholder="Введите базу знаний…"></textarea>
+          <p id="knowledgeTemplateRow"><button type="button" class="btn btn-sm" id="knowledgeTemplateBtn" onclick="insertKnowledgeTemplate()">Вставить образец</button></p>
+          <div class="hint" id="knowledgeProgress"></div>
+          <textarea id="f_knowledge_base" class="auto-resize" placeholder="Введите информацию о бизнесе…"></textarea>
         </section>
 
         <section class="tab-panel hidden" id="tab-auto">
           <div class="section-title">Когда бот сразу передаёт диалог вам</div>
-          <label for="f_fallback_triggers">Слова-сигналы (через запятую)</label>
+          <label for="f_fallback_triggers">Слова, после которых бот зовёт вас (через запятую)</label>
           <div class="hint">Если клиент напишет что-то из этого, бот не будет отвечать сам — он вежливо сообщит, что передал вопрос, а вам придёт сообщение с текстом клиента. Например: жалоба, возврат, отменить запись, позовите менеджера.</div>
           <input id="f_fallback_triggers" placeholder="жалоба, отменить, предоплата">
 
@@ -294,14 +308,14 @@
           <div class="hint">Сюда бот присылает вопрос, когда не смог ответить сам. Формат: плюс, код страны, номер — например +77770001122. Можно оставить пустым, если уведомления не нужны.</div>
           <input id="f_owner_whatsapp_phone" placeholder="+77770001122">
 
-          <div class="section-title">Стиль ответов</div>
+          <div class="section-title">Как бот должен отвечать</div>
           <label>Примеры тёплого ответа (необязательно)</label>
           <div class="hint">Пара образцов «вопрос клиента → ваш ответ» — бот будет отвечать в том же стиле.</div>
           <textarea id="f_style_examples" class="auto-resize" placeholder="Клиент: «Сколько стоит маникюр?»
 Хороший ответ: «Маникюр с покрытием — 4500 ₸. Подсказать свободное время? 😊»"></textarea>
 
           <details>
-            <summary>Фразы бота в особых случаях (можно не заполнять)</summary>
+            <summary>Свои фразы бота (необязательно)</summary>
             <label>Что видит клиент, когда его вопрос дошёл до вас (по-русски)</label>
             <textarea id="f_fallback_reply_ru" class="auto-resize" placeholder="Оставьте пустым — есть встроенная фраза: «Передаю ваш вопрос команде … 🙌»"></textarea>
             <label>… по-казахски</label>
@@ -376,6 +390,20 @@ function esc(text) {
   ));
 }
 
+// Ответ сервера → понятная человеку фраза. Технический код показываем мелкой строкой ниже.
+function humanError(code, data) {
+  const problems = (data && data.problems) || [];
+  const detail = (data && data.error) || problems.join("; ") || "";
+  let message;
+  if (code === 0) message = detail || "Нет связи, проверьте интернет и попробуйте снова.";
+  else if (code === 401 || code === 403) message = "Ключ не подошёл. Проверьте, что скопировали его целиком.";
+  else if (code === 404) message = "Не нашли эти настройки. Возможно, клиента уже удалили.";
+  else if (code === 422) message = "Проверьте заполнение полей" + (detail ? ": " + detail : ".");
+  else if (code >= 500) message = "Что-то на нашей стороне. Попробуйте через минуту.";
+  else message = detail || "Что-то пошло не так. Попробуйте ещё раз.";
+  return message + (code ? "\n(код " + code + ")" : "");
+}
+
 async function api(method, url, body) {
   const token = localStorage.getItem(STORE_KEY) || "";
   const options = { method, headers: { "X-Admin-Token": token, "X-Client-Token": token } };
@@ -398,13 +426,13 @@ async function api(method, url, body) {
 
 async function whoami() {
   const hadToken = Boolean(localStorage.getItem(STORE_KEY));
-  const { ok, data } = await api("GET", "/admin/whoami");
+  const { ok, code, data } = await api("GET", "/admin/whoami");
   if (!ok) {
     show("app", false);
     show("topbarRight", false);
     show("authCard", true);
     // Первый визит без токена — не ругаемся красным, просто ждём ввода.
-    status("authStatus", hadToken ? (data.error || "Токен не подошёл — проверьте его и попробуйте снова.") : "", hadToken);
+    status("authStatus", hadToken ? humanError(code, data) : "", hadToken);
     return;
   }
   role = data.role;
@@ -460,7 +488,7 @@ function filterClients() {
 
 async function loadList() {
   const { ok, code, data } = await api("GET", "/admin/clients");
-  if (!ok) { status("listStatus", data.error || "ошибка " + code, true); return; }
+  if (!ok) { status("listStatus", humanError(code, data), true); return; }
   clientsData = data.clients || [];
   renderClientList($("clientSearch") ? $("clientSearch").value : "");
   $("skippedBox").innerHTML = (data.skipped || [])
@@ -475,44 +503,6 @@ function switchTab(name) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("hidden", panel.id !== "tab-" + name);
   });
-}
-
-async function openEditor(pid) {
-  show("editorEmpty", false);
-  show("editorCard", true);
-  const isAdmin = role === "admin";
-  if (isAdmin) $("app").classList.add("editor-open");
-  const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid));
-  if (!ok) {
-    status("editorStatus", data.error || "ошибка " + code, true);
-    return;
-  }
-  currentPid = pid;
-  for (const key of [
-    "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
-    "style_examples", "fallback_reply_ru", "fallback_reply_kk",
-    "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
-  ]) {
-    $("f_" + key).value = data[key] != null ? data[key] : "";
-  }
-  $("f_fallback_triggers").value = (data.fallback_triggers || []).join(", ");
-  $("f_language").value = ["ru", "kk", "auto"].includes(data.language) ? data.language : "auto";
-  const llm = data.llm || {};
-  $("f_llm_model").value = llm.model != null ? llm.model : "";
-  $("f_llm_temperature").value = llm.temperature != null ? llm.temperature : "";
-  $("f_llm_max_tokens").value = llm.max_tokens != null ? llm.max_tokens : "";
-  $("f_llm_timeout_seconds").value = llm.timeout_seconds != null ? llm.timeout_seconds : "";
-  $("f_llm_reasoning_effort").value = llm.reasoning_effort != null ? llm.reasoning_effort : "";
-  show("tabAdminBtn", isAdmin);
-  show("deleteBtn", isAdmin);
-  show("backBtn", isAdmin);
-  $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
-  $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
-  setDirty(false);
-  status("editorStatus", "");
-  switchTab("business");
-  renderClientList($("clientSearch") ? $("clientSearch").value : "");
-  loadProfile(pid);
 }
 
 function backToList(skipConfirm) {
@@ -535,7 +525,7 @@ async function openEditor(pid) {
   if (isAdmin) $("app").classList.add("editor-open");
   const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(pid));
   if (!ok) {
-    status("editorStatus", data.error || "ошибка " + code, true);
+    status("editorStatus", humanError(code, data), true);
     return;
   }
   currentPid = pid;
@@ -563,7 +553,7 @@ async function openEditor(pid) {
   status("editorStatus", "");
   switchTab("business");
   renderClientList($("clientSearch") ? $("clientSearch").value : "");
-  loadProfile(pid);
+  updateKnowledgeHelpers();
 }
 
 function collectForm() {
@@ -627,19 +617,18 @@ async function saveEditor() {
   if (ok) {
     setDirty(false);
     const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
-    status("editorStatus", "Сохранено ✅" + warnings, false);
+    status("editorStatus", "Готово. Бот уже отвечает по новым настройкам." + warnings, false);
     if (role === "admin") loadList();
     return;
   }
-  const problems = (data.problems || []).join("\n");
-  status("editorStatus", "Ошибка " + code + ": " + (data.error || problems || "неизвестная ошибка"), true);
+  status("editorStatus", humanError(code, data), true);
 }
 
 async function deleteCurrent() {
   if (!confirm("Удалить клиента " + currentPid + "? Он перестанет отвечать; копия конфига останется в .history.")) return;
   const { ok, code, data } = await api("DELETE", "/admin/clients/" + encodeURIComponent(currentPid));
   if (ok) { backToList(true); return; }
-  status("editorStatus", "Ошибка " + code + ": " + (data.error || ""), true);
+  status("editorStatus", humanError(code, data), true);
 }
 
 function toggleNew() {
@@ -665,7 +654,7 @@ async function createClient() {
   };
   const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(pid), payload);
   if (!ok) {
-    status("listStatus", "Ошибка " + code + ": " + (data.error || (data.problems || []).join("; ")), true);
+    status("listStatus", humanError(code, data), true);
     return;
   }
   $("newPid").value = "";
@@ -691,6 +680,7 @@ let dirty = false;
 
 function setDirty(value) {
   dirty = value;
+  show("dirtyNote", value);
   if (value) status("editorStatus", "");
 }
 
@@ -698,9 +688,8 @@ function confirmDiscard() {
   return !dirty || confirm("Есть несохранённые изменения. Продолжить без сохранения?");
 }
 
-// Любая правка настроек бота (кроме блока профиля WhatsApp — он сохраняется отдельно) → «несохранённые изменения».
-function markDirty(event) {
-  if (event.target.closest("#tab-profile")) return;
+// Любая правка настроек бота → «несохранённые изменения».
+function markDirty() {
   setDirty(true);
 }
 
@@ -724,9 +713,16 @@ document.addEventListener("keydown", (event) => {
 });
 
 // --- auto-resize для textarea.auto-resize ---
+// Важно: при смене высоты страница на миг меняет длину, и браузер может сбросить
+// прокрутку наверх. Запоминаем позицию страницы и курсора и возвращаем их обратно.
 function autoResizeTextarea(textarea) {
+  if (!textarea.offsetParent) return;             // поле скрыто (другая вкладка / закрытый details) — не мерим
+  const pageY = window.scrollY;
+  const innerY = textarea.scrollTop;
   textarea.style.height = "auto";
-  textarea.style.height = textarea.scrollHeight + "px";
+  textarea.style.height = (textarea.scrollHeight + 2) + "px";
+  window.scrollTo(0, pageY);
+  textarea.scrollTop = innerY;
 }
 
 document.querySelectorAll("textarea.auto-resize").forEach((ta) => {
@@ -735,12 +731,62 @@ document.querySelectorAll("textarea.auto-resize").forEach((ta) => {
   autoResizeTextarea(ta);
 });
 
+// Пересчёт при раскрытии <details>: пока блок закрыт, его поля имеют высоту 0,
+// и длинный текст обрезался бы до первого нажатия.
+document.querySelectorAll("details").forEach((details) => {
+  details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    details.querySelectorAll("textarea.auto-resize").forEach(autoResizeTextarea);
+  });
+});
+
 // При переключении вкладок тоже обновляем высоту
 const originalSwitchTab = switchTab;
 switchTab = function(name) {
   originalSwitchTab(name);
   document.querySelectorAll("textarea.auto-resize").forEach((ta) => autoResizeTextarea(ta));
 };
+
+// --- образец, счётчик и подсказка для «Информации о бизнесе» ---
+const KNOWLEDGE_TEMPLATE = "Адрес:\nЧасы работы:\nУслуги и цены:\nКак записаться:\nЧастые вопросы:";
+const KNOWLEDGE_SECTIONS = ["Адрес", "Часы работы", "Услуги и цены", "Как записаться", "Частые вопросы"];
+
+function knowledgeFilledCount(text) {
+  return KNOWLEDGE_SECTIONS.filter((name) =>
+    new RegExp("^\\s*" + name + "\\s*:\\s*\\S", "m").test(text)
+  ).length;
+}
+
+// Жёлтая полоска сверху — только клиенту и только пока информация не заполнена.
+function updateKnowledgeNotice() {
+  if (role === "admin") { show("knowledgeNotice", false); return; }
+  const text = ($("f_knowledge_base").value || "").trim();
+  show("knowledgeNotice", !text || text === "База знаний пока не заполнена.");
+}
+
+function updateKnowledgeHelpers() {
+  const ta = $("f_knowledge_base");
+  const empty = !ta.value.trim();
+  show("knowledgeTemplateRow", empty);
+  $("knowledgeProgress").textContent = empty
+    ? ""
+    : "Заполнено: " + knowledgeFilledCount(ta.value) + " из " + KNOWLEDGE_SECTIONS.length + " разделов";
+}
+
+function insertKnowledgeTemplate() {
+  const ta = $("f_knowledge_base");
+  ta.value = KNOWLEDGE_TEMPLATE;
+  autoResizeTextarea(ta);
+  updateKnowledgeHelpers();
+  updateKnowledgeNotice();
+  setDirty(true);
+  ta.focus();
+}
+
+$("f_knowledge_base").addEventListener("input", () => {
+  updateKnowledgeHelpers();
+  updateKnowledgeNotice();
+});
 
 function togglePassword(inputId) {
   const input = $(inputId);
@@ -756,11 +802,6 @@ function togglePassword(inputId) {
     show(openEye, true);
     show(closedEye, false);
   }
-}
-
-function logout() {
-  localStorage.removeItem(STORE_KEY);
-  location.reload();
 }
 
 whoami();
