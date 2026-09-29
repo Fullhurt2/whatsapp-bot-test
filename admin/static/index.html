@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Панель клиентов — WhatsApp-бот</title>
+<title>JAUAP — панель клиентов</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect x='32' y='32' width='440' height='400' rx='112' fill='%23BAEF93'/%3E%3Cpath d='M372 420 L438 496 Q452 502 458 488 L470 350 Z' fill='%23BAEF93'/%3E%3Cpath transform='translate(-92.1 -59.1) scale(0.62)' fill='%23434343' fill-rule='evenodd' d='M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z M754 228 L744 260 L738 270 L729 278 L719 283 L693 291 L693 292 L720 300 L728 304 L737 312 L745 327 L754 355 L756 352 L762 329 L771 312 L780 304 L786 301 L816 292 L814 290 L787 282 L775 275 L770 270 L763 257Z'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #F7F7F5;
@@ -14,9 +15,11 @@
     --text: #17181A;
     --text-soft: #6B6F76;
     --text-faint: #767A80;
-    --accent: #0E9F6E;
-    --accent-ink: #0B7A57;
-    --accent-soft: #E4F5EE;
+    --accent: #BAEF93;
+    --accent-hover: #A6E37B;
+    --accent-ink: #3B7A1A;
+    --on-accent: #26301F;
+    --accent-soft: #EEF9E4;
     --danger: #C2410C;
     --danger-soft: #FBEAE1;
     --radius: 8px;
@@ -36,6 +39,9 @@
   .wrap { max-width: 1120px; margin: 0 auto; padding: 22px 20px 60px; }
 
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 4px 0 24px; gap: 12px; }
+  .brand-wrap { display: flex; align-items: center; gap: 10px; }
+  .brand-logo { width: 36px; height: 36px; flex: none; display: block; }
+  .auth-logo { width: 56px; height: 56px; display: block; margin: 0 0 14px; }
   .brand { font-size: 15px; font-weight: 600; }
   .brand-sub { font-size: 12.5px; color: var(--text-soft); margin-top: 1px; }
   .topbar-right { display: flex; align-items: center; gap: 12px; }
@@ -47,8 +53,8 @@
     min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
     transition: background .12s ease, border-color .12s ease, color .12s ease; }
   .btn:hover { border-color: #C7C4BC; }
-  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn-primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
   .btn-ghost { background: transparent; border-color: transparent; color: var(--text-soft); padding: 8px 10px; }
   .btn-ghost:hover { color: var(--text); }
   .btn-danger { background: var(--surface); border-color: var(--danger); color: var(--danger); }
@@ -56,7 +62,7 @@
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 7px; }
   .btn-block { width: 100%; }
   button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
+    outline: 2px solid var(--accent-ink); outline-offset: 1px;
   }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 22px; }
@@ -76,7 +82,7 @@
     border-radius: var(--radius); font: inherit; font-size: 16px; background: var(--surface-muted); color: var(--text);
   }
   input::placeholder, textarea::placeholder { color: var(--text-faint); }
-  input:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--surface); }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent-ink); background: var(--surface); }
   textarea { resize: vertical; min-height: 80px; }
   textarea.auto-resize { min-height: 80px; max-height: 65vh; overflow-y: auto; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
@@ -135,7 +141,7 @@
   .tab-btn { background: none; border: none; padding: 9px 0; margin-right: 20px; font-size: 13.5px;
     font-weight: 600; color: var(--text-soft); border-bottom: 2px solid transparent; white-space: nowrap;
     min-height: 44px; display: inline-flex; align-items: center; }
-  .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab-btn.active { color: var(--text); border-bottom-color: var(--accent-ink); }
   .tab-btn:hover { color: var(--text); }
 
   .section-title { font-size: 13px; font-weight: 600; margin: 0 0 2px; padding-top: 18px; border-top: 1px solid var(--border); }
@@ -185,12 +191,16 @@
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="jauap-logo" viewBox="0 0 512 512"><rect x="32" y="32" width="440" height="400" rx="112" fill="#BAEF93"/><path d="M372 420 L438 496 Q452 502 458 488 L470 350 Z" fill="#BAEF93"/><path transform="translate(-92.1 -59.1) scale(0.62)" fill="#434343" fill-rule="evenodd" d="M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z M754 228 L744 260 L738 270 L729 278 L719 283 L693 291 L693 292 L720 300 L728 304 L737 312 L745 327 L754 355 L756 352 L762 329 L771 312 L780 304 L786 301 L816 292 L814 290 L787 282 L775 275 L770 270 L763 257Z"/></symbol></svg>
 <div class="wrap">
 
   <div class="topbar">
-    <div>
-      <div class="brand">Панель клиентов</div>
-      <div class="brand-sub">WhatsApp-бот</div>
+    <div class="brand-wrap">
+      <svg class="brand-logo" role="img" aria-label="JAUAP"><use href="#jauap-logo"/></svg>
+      <div>
+        <div class="brand">JAUAP</div>
+        <div class="brand-sub">Панель клиентов</div>
+      </div>
     </div>
     <div class="topbar-right hidden" id="topbarRight">
       <span class="role-badge" id="roleLine"></span>
@@ -199,6 +209,7 @@
   </div>
 
   <div class="card auth-card" id="authCard">
+    <svg class="auth-logo" aria-hidden="true"><use href="#jauap-logo"/></svg>
     <h1>Вход в панель</h1>
     <div class="muted">Ключ вам прислал(а) владелец сервиса в WhatsApp. Он хранится только в этом браузере.</div>
     <label for="tokenInput">Ключ доступа</label>
