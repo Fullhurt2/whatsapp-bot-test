@@ -13,6 +13,7 @@ ack) и обрабатываем сообщение в фоновой задач
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -42,6 +43,9 @@ from whatsapp.meta_security import (
     verify_meta_signature,
     verify_subscription,
 )
+from whatsapp.telegram_client import TelegramClient
+from whatsapp.telegram_payload import parse_telegram_update
+from whatsapp.telegram_token import bot_id_from_token
 from whatsapp.webhook_payload import parse_incoming_event
 from whatsapp.webhook_security import (
     HEADER_SIGNATURE,
@@ -60,6 +64,9 @@ LOG_FILE = LOG_DIR / "bot.log"
 # доставки тот же webhook-id — второй раз отвечать клиенту нельзя.
 # Храним только последние id, чтобы словарь не рос бесконечно.
 SEEN_WEBHOOK_IDS_MAX = 4096
+
+# Заголовок с секретом вебхука Telegram (задаётся при setWebhook).
+TELEGRAM_HEADER_SECRET = "X-Telegram-Bot-Api-Secret-Token"
 
 
 def setup_logging(level: str) -> None:
@@ -96,6 +103,23 @@ def build_meta_sender(settings: Settings) -> MetaWhatsAppClient:
         settings.whatsapp_phone_number_id,
         graph_version=settings.meta_graph_version,
     )
+
+
+def build_sender(settings: Settings):
+    """Клиент отправки под провайдера клиента (meta / telegram / bird).
+
+    Провайдер определяет Settings клиента: у WhatsApp-клиентов reestr ставит
+    messaging_provider="meta", у Telegram — "telegram". Все клиенты реализуют
+    один интерфейс send_text(to, text)/close(), поэтому обработчик и
+    уведомления владельцу от транспорта не зависят.
+    """
+    if settings.messaging_provider == "telegram":
+        return TelegramClient(settings.telegram_bot_token)
+    if settings.messaging_provider == "bird":
+        return BirdWhatsAppClient(
+            settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
+        )
+    return build_meta_sender(settings)
 
 
 class TenantBundle:
@@ -138,31 +162,25 @@ class WebhookState:
         self.settings = settings
         self._seen_webhook_ids: OrderedDict[str, None] = OrderedDict()
         self._reload_lock = asyncio.Lock()
-        self.multitenant = bool(settings.clients_dir) and settings.messaging_provider == "meta"
+        # Мультитенант обслуживает оба транспорта: WhatsApp-клиенты (meta) и
+        # Telegram-клиенты (telegram) живут в одном реестре clients/.
+        self.multitenant = bool(settings.clients_dir) and settings.messaging_provider in (
+            "meta", "telegram",
+        )
 
         if not self.multitenant:
-            # Single-tenant: один LLM-клиент и один WhatsApp-клиент на всё
-            # приложение (переиспользуют HTTP-соединения). Провайдер задаёт
-            # MESSAGING_PROVIDER.
+            # Single-tenant: один LLM-клиент и один транспорт на всё приложение.
+            # Провайдер задаёт MESSAGING_PROVIDER (bird / meta / telegram).
             self.registry = None
             self.tenants: dict[str, TenantBundle] = {}
             self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
-            if settings.messaging_provider == "meta":
-                self.sender = MetaWhatsAppClient(
-                    settings.whatsapp_access_token,
-                    settings.whatsapp_phone_number_id,
-                    graph_version=settings.meta_graph_version,
-                )
-            else:
-                self.sender = BirdWhatsAppClient(
-                    settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
-                )
+            self.sender = build_sender(settings)
             self.processor = MessageProcessor(settings, self.llm_client, self.sender)
             return
 
         # Мультитенант: по бандлу на каждого клиента реестра.
         self.registry = ClientRegistry(Path(settings.clients_dir), settings)
-        self.sender_factory = sender_factory or build_meta_sender
+        self.sender_factory = sender_factory or build_sender
         self.tenants: dict[str, TenantBundle] = {
             pid: self._build_tenant(tenant_settings)
             for pid, tenant_settings in self.registry.tenants.items()
@@ -316,8 +334,22 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
 
     app = FastAPI(title="whatsapp-bot-test", lifespan=lifespan)
 
-    if settings.messaging_provider == "meta":
+    if state.multitenant:
+        # В мультитенанте доступны оба транспорта: WhatsApp-вебхук поднимаем
+        # только если заданы Meta-секреты (иначе деплой чисто для Telegram),
+        # Telegram-вебхук — всегда (у каждого бота свой токен).
+        if settings.meta_app_secret and settings.meta_verify_token:
+            _register_meta_webhook(app, settings, state)
+        else:
+            logger.warning(
+                "WhatsApp-вебхук не зарегистрирован: не заданы META_APP_SECRET/"
+                "META_VERIFY_TOKEN — обслуживаются только Telegram-клиенты"
+            )
+        _register_telegram_webhook(app, settings, state)
+    elif settings.messaging_provider == "meta":
         _register_meta_webhook(app, settings, state)
+    elif settings.messaging_provider == "telegram":
+        _register_telegram_webhook(app, settings, state)
     else:
         _register_bird_webhook(app, settings, state)
 
@@ -486,6 +518,67 @@ def _register_meta_webhook(app: FastAPI, settings: Settings, state: WebhookState
                     "Событие для незарегистрированного номера: phone_number_id=%s "
                     "— подтверждено без обработки (клиента нет в clients/)",
                     inbound.phone_number_id or "-",
+                )
+                continue
+            background_tasks.add_task(state.handle_event, inbound, processor)
+        return {"ok": True}
+
+
+def _register_telegram_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
+    """Роут вебхука Telegram: POST /webhooks/telegram/{bot_id}."""
+
+    @app.post("/webhooks/telegram/{bot_id}")
+    async def telegram_webhook(bot_id: str, request: Request,
+                               background_tasks: BackgroundTasks):
+        """Приём апдейта Telegram: проверка секрета -> ack 200 -> обработка в фоне.
+
+        Telegram ждёт быстрый 2xx и повторяет доставку при ошибке, поэтому
+        отвечаем сразу, а сценарий (LLM + отправка) уводим в фоновую задачу.
+        Дедуп — по update_id (Telegram тоже доставляет at-least-once). Клиент
+        ищется по id бота из URL; секрет вебхука — из его конфига.
+        """
+        if state.multitenant:
+            # Реестр подтягивает изменения yaml на лету; бота ищем по id из URL.
+            await state.refresh_tenants()
+            bundle = state.tenants.get(bot_id)
+            if bundle is None:
+                logger.warning("Telegram вебхук: неизвестный бот %s", bot_id)
+                return JSONResponse(status_code=404, content={"ok": False})
+            expected_secret = bundle.settings.telegram_webhook_secret
+        else:
+            expected_secret = settings.telegram_webhook_secret
+            configured = bot_id_from_token(settings.telegram_bot_token)
+            if configured and configured != bot_id:
+                logger.warning("Telegram вебхук: bot_id %s не совпадает с токеном", bot_id)
+                return JSONResponse(status_code=404, content={"ok": False})
+
+        if expected_secret:
+            provided = request.headers.get(TELEGRAM_HEADER_SECRET, "")
+            if not hmac.compare_digest(provided, expected_secret):
+                logger.warning("Telegram вебхук отклонён: секрет не совпал (bot_id=%s)", bot_id)
+                return JSONResponse(status_code=401, content={"ok": False})
+
+        raw_body = await request.body()
+        try:
+            payload = json.loads(raw_body)
+        except ValueError:
+            logger.warning("Telegram вебхук с невалидным JSON: %d байт", len(raw_body))
+            return {"ok": True}
+
+        inbound_messages = parse_telegram_update(payload, bot_id)
+        if not inbound_messages:
+            # Редактирование, статусы и прочие не-наши события — молча ack.
+            return {"ok": True}
+
+        for inbound in inbound_messages:
+            if state.seen_before(inbound.message_id):
+                continue
+            processor = await state.processor_for(inbound)
+            if processor is None:
+                # Неизвестный бот: ack, чтобы Telegram не ретраил доставку.
+                logger.warning(
+                    "Telegram событие для незарегистрированного бота %s — "
+                    "подтверждено без обработки", bot_id,
                 )
                 continue
             background_tasks.add_task(state.handle_event, inbound, processor)

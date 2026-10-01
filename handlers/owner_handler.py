@@ -1,7 +1,8 @@
 """Уведомления владельцу бизнеса о вопросах, требующих живого человека.
 
-Владелец получает WhatsApp-сообщение от бизнес-номера (через Bird) на номер
-owner_whatsapp_phone из конфига клиента (или OWNER_WHATSAPP_NUMBER из .env).
+Владелец получает сообщение тем же транспортом, что и клиенты: у WhatsApp-
+клиента — на owner_whatsapp_phone, у Telegram-клиента — в чат
+owner_telegram_chat_id (см. Settings.owner_notify_target).
 """
 
 import logging
@@ -24,10 +25,12 @@ async def notify_owner(
 
     Возвращает True, если уведомление доставлено.
     """
-    if not settings.owner_phone:
+    target = settings.owner_notify_target()
+    if not target:
         logger.warning(
-            "Уведомление владельцу пропущено: owner_whatsapp_phone не задан "
-            "(в client_config.yaml или OWNER_WHATSAPP_NUMBER в .env)"
+            "Уведомление владельцу пропущено: не задан получатель "
+            "(owner_telegram_chat_id для Telegram или owner_whatsapp_phone "
+            "для WhatsApp — в конфиге клиента)"
         )
         return False
 
@@ -38,9 +41,9 @@ async def notify_owner(
         f"Сообщение: {message_text}"
     )
     try:
-        await sender.send_text(settings.owner_phone, text)
+        await sender.send_text(target, text)
         return True
     except MessagingError:
         # Падение уведомления не должно ломать диалог с клиентом — логируем.
-        logger.exception("Не удалось отправить уведомление владельцу (%s)", settings.owner_phone)
+        logger.exception("Не удалось отправить уведомление владельцу (%s)", target)
         return False

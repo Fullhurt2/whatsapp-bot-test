@@ -121,6 +121,17 @@ class Settings:
     # Токен админ-API (заголовок X-Admin-Token в /admin/*). Не задан ->
     # админ-роуты и панель /admin отключены.
     admin_token: str = ""
+    # --- Telegram ---
+    # Токен бота вида 123456789:AA… — из yaml клиента (мультитенант) или .env
+    # (single-tenant). Приём сообщений — вебхук /webhooks/telegram/{bot_id}.
+    telegram_bot_token: str = ""
+    # Секрет вебхука Telegram (заголовок X-Telegram-Bot-Api-Secret-Token),
+    # per-client; регистрируется через setWebhook вместе с адресом.
+    telegram_webhook_secret: str = ""
+    # Публичный адрес сервиса (env PUBLIC_BASE_URL) — база для setWebhook.
+    public_base_url: str = ""
+    # Chat id владельца в Telegram (provider=tg) — куда слать уведомления.
+    owner_telegram_chat_id: str = ""
     # Служебные ответы бота (передача/таймаут) с переопределением из yaml.
     # Пустая строка = встроенный текст для этого языка; {business_name} подставится.
     fallback_reply_ru: str = ""
@@ -149,6 +160,17 @@ class Settings:
         override = self.timeout_reply_kk if lang == "kk" else self.timeout_reply_ru
         template = override or self._TIMEOUT_TEMPLATES.get(lang, self._TIMEOUT_TEMPLATES["ru"])
         return template.format(business_name=self.business_name)
+
+    def owner_notify_target(self) -> str:
+        """Куда слать уведомление владельцу: chat id в TG или номер в WhatsApp.
+
+        Уведомление уходит тем же sender'ом, что и ответы клиентам, поэтому
+        цель зависит от провайдера тенанта: для telegram — owner_telegram_chat_id,
+        для WhatsApp — owner_phone.
+        """
+        if self.messaging_provider == "telegram":
+            return self.owner_telegram_chat_id
+        return self.owner_phone or ""
 
 
 def _load_config() -> tuple[dict, str]:
@@ -266,6 +288,8 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
             timeout_seconds=15,
         ),
         clients_dir=str(clients_dir),
+        # Публичный адрес сервиса — база для setWebhook Telegram-клиентов.
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
         # Админ-API (панель /admin): полный доступ к clients/*.yaml.
         # Не обязателен — без него админ-роуты просто не регистрируются.
         admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
@@ -277,16 +301,21 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         )
     # Обязательное — только то, без чего сервис в принципе не работает.
     # Per-client обязательные поля (business_name, knowledge_base, токен,
-    # модель) проверяет реестр при загрузке каждого yaml.
+    # модель) проверяет реестр при загрузке каждого yaml. Meta-секреты в
+    # мультитенанте не обязательны: если они не заданы, роут /webhooks/meta
+    # просто не регистрируется (деплой только под Telegram-клиентов).
     required = {
         "LLM_API_URL (.env)": settings.llm_api_url,
         "LLM_API_KEY (.env)": settings.llm_api_key,
-        "META_APP_SECRET (.env)": settings.meta_app_secret,
-        "META_VERIFY_TOKEN (.env)": settings.meta_verify_token,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise RuntimeError(f"Не заданы обязательные настройки: {', '.join(missing)}")
+    if not (settings.meta_app_secret and settings.meta_verify_token):
+        logger.warning(
+            "META_APP_SECRET/META_VERIFY_TOKEN не заданы — WhatsApp-вебхук "
+            "/webhooks/meta отключён (доступны только Telegram-клиенты)"
+        )
     return settings
 
 
@@ -296,13 +325,16 @@ def get_settings() -> Settings:
     Бросает RuntimeError с понятным описанием, если не хватает обязательных полей.
     """
     provider = (os.getenv("MESSAGING_PROVIDER", "bird").strip().lower() or "bird")
-    if provider not in ("bird", "meta"):
+    if provider not in ("bird", "meta", "telegram"):
         raise RuntimeError(
-            f"MESSAGING_PROVIDER={provider!r} не поддерживается: ожидается 'bird' или 'meta'"
+            f"MESSAGING_PROVIDER={provider!r} не поддерживается: "
+            "ожидается 'bird', 'meta' или 'telegram'"
         )
 
     # Мультитенант: CLIENTS_DIR задан или в clients/ есть хотя бы один клиент.
-    if provider == "meta":
+    # Bird остаётся строго single-tenant; meta/telegram обслуживают реестр
+    # (в мультитенанте доступны оба транспорта — провайдер задаёт каждый клиент).
+    if provider in ("meta", "telegram"):
         clients_dir = resolve_clients_dir()
         if clients_dir is not None:
             logger.info("Режим мультитенант: реестр клиентов в %s", clients_dir)
@@ -354,6 +386,10 @@ def get_settings() -> Settings:
         llm=llm,
         style_examples=str(cfg.get("style_examples") or "").strip(),
         config_file=config_file,
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+        owner_telegram_chat_id=str(cfg.get("owner_telegram_chat_id") or "").strip(),
         fallback_reply_ru=str(cfg.get("fallback_reply_ru") or "").strip(),
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
@@ -376,6 +412,11 @@ def get_settings() -> Settings:
             "WHATSAPP_PHONE_NUMBER_ID (.env)": settings.whatsapp_phone_number_id,
             "META_APP_SECRET (.env)": settings.meta_app_secret,
             "META_VERIFY_TOKEN (.env)": settings.meta_verify_token,
+        })
+    elif settings.messaging_provider == "telegram":
+        required.update({
+            "TELEGRAM_BOT_TOKEN (.env)": settings.telegram_bot_token,
+            "PUBLIC_BASE_URL (.env)": settings.public_base_url,
         })
     else:  # bird
         required.update({

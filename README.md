@@ -27,28 +27,32 @@ Python 3.11+, FastAPI + uvicorn, httpx, PyYAML, python-dotenv.
 
 ```
 main.py                  FastAPI: вебхук провайдера, проверка подписи, ack 200, фоновая обработка;
-                         мультитенант: маршрутизация по phone_number_id, hot-reload реестра
+                         мультитенант: маршрутизация по ключу клиента, hot-reload реестра
 admin/
-  api.py                 админ-API: CRUD конфигов clients/, валидация, бэкапы, аудит
+  api.py                 админ-API: CRUD конфигов clients/, валидация, бэкапы, аудит,
+                         setWebhook Telegram при сохранении клиента
   static/index.html      страница панели /admin (админ — все клиенты, клиент — свой)
 config/
   settings.py            .env + YAML-конфиг клиента, fail-fast валидация
-  clients.py             реестр клиентов clients/*.yaml (мультитенант, hot-reload)
+  clients.py             реестр клиентов clients/*.yaml (мультитенант, hot-reload, provider wa|tg)
 clients/
   _example.yaml          образец клиентского yaml (в git, без секретов)
-  <phone_number_id>.yaml один файл на клиента в мультитенант-режиме
+  <key>.yaml             один файл на клиента: phone_number_id (wa) или bot_id (tg)
 handlers/
   message_handler.py     пайплайн: история → keyword → LLM → [HANDOFF] → ответ/передача
   owner_handler.py       уведомление владельцу через активного провайдера
 services/                LLM-клиент, fallback, определение языка (как в оригинале)
 whatsapp/
-  errors.py              общие исключения MessagingError (для обоих провайдеров)
+  errors.py              общие исключения MessagingError (для всех провайдеров)
   meta_client.py         POST /{phone_number_id}/messages (Graph API), чанкинг 4096, retry
   meta_security.py       проверка X-Hub-Signature-256 + GET-верификация подписки
   meta_payload.py        разбор entry/changes/messages (+metadata.phone_number_id)
   bird_client.py         POST /v1/whatsapp/messages, чанкинг 4096, retry 5xx/429
   webhook_security.py    проверка подписи Bird (Standard Webhooks, HMAC-SHA256)
   webhook_payload.py     разбор события whatsapp.received
+  telegram_client.py     Bot API: sendMessage/setWebhook/getMe, чанкинг 4096, retry
+  telegram_payload.py    разбор update (message) → InboundMessage
+  telegram_token.py      разбор токена бота: id бота = ключ клиента
 scripts/send_test.py     тестовая отправка сообщения через активного провайдера
 wa_onboard.py            автономный онбординг клиента (2FA, подписка WABA, печать .env)
 tests/                   тесты (запуск: python tests/<имя>.py)
@@ -66,12 +70,15 @@ python main.py
 
 | Переменная | Описание |
 |---|---|
-| `MESSAGING_PROVIDER` | `meta` (WhatsApp Cloud API) или `bird`. Метa — по умолчанию в примере. |
+| `MESSAGING_PROVIDER` | `meta` (WhatsApp Cloud API), `telegram` или `bird`. В мультитенанте `meta`/`telegram` включают реестр `clients/` и обслуживают оба транспорта одновременно. |
 | `WHATSAPP_ACCESS_TOKEN` | (meta) токен System User с правами `whatsapp_business_messaging`. |
 | `WHATSAPP_PHONE_NUMBER_ID` | (meta) ID бизнес-номера отправителя из дашборда Meta. |
 | `META_APP_SECRET` | (meta) App Secret приложения — проверка `X-Hub-Signature-256`. |
 | `META_VERIFY_TOKEN` | (meta) строка для привязки вебхука в дашборде Meta. |
 | `META_GRAPH_VERSION` | (meta, необязательно) версия Graph API, по умолчанию `v21.0`. |
+| `TELEGRAM_BOT_TOKEN` | (telegram, single-tenant) токен бота от @BotFather. В мультитенанте — у каждого клиента в yaml. |
+| `TELEGRAM_WEBHOOK_SECRET` | (telegram, single-tenant) секрет вебхука; в мультитенанте генерируется автоматически. |
+| `PUBLIC_BASE_URL` | Публичный адрес сервиса — база для `setWebhook` Telegram-клиентов. Не задан → вебхук привязывается вручную. |
 | `BIRD_API_KEY` | (bird) API-ключ Bird (`bk_eu1_...`). Регион выводится из префикса. |
 | `BIRD_WEBHOOK_SECRET` | (bird) секрет вебхука `whsec_...`. |
 | `BIRD_API_URL` | (bird, необязательно) по умолчанию `https://eu1.platform.bird.com`. |
@@ -93,6 +100,8 @@ python main.py
 - `GET /privacy` — памятка о данных клиента (что хранится, как удалить);
   удобно указать её в профиле бизнеса WhatsApp.
 - `POST /webhooks/meta` / `/webhooks/bird` — входящие вебхуки провайдера.
+- `POST /webhooks/telegram/{bot_id}` — входящие апдейты Telegram-бота
+  (проверка `X-Telegram-Bot-Api-Secret-Token`).
 
 ## Как работает
 
@@ -107,8 +116,9 @@ python main.py
 4. Ответ — через активного провайдера (Meta: `POST graph.facebook.com/v21.0/
    {phone_number_id}/messages`, Bird: `POST /v1/whatsapp/messages`); длинные
    ответы бьются по 4096 символов.
-5. Уведомление владельцу — WhatsApp от бизнес-номера на
-   `owner_whatsapp_phone` (yaml) / `OWNER_WHATSAPP_NUMBER` (.env).
+5. Уведомление владельцу — тем же транспортом, что и ответы: WhatsApp на
+   `owner_whatsapp_phone` (yaml) / `OWNER_WHATSAPP_NUMBER` (.env), Telegram —
+   в `owner_telegram_chat_id`.
 
 ## Подключение вебхука Meta (провайдер `meta`)
 
@@ -150,6 +160,40 @@ python scripts/send_test.py --to +77770000000 --text "Тест"
 
 (Провайдер берётся из `MESSAGING_PROVIDER`; у Bird успех = 202, у Meta = 200.)
 
+## Telegram-боты (provider `tg`)
+
+В мультитенанте WhatsApp- и Telegram-клиенты живут вместе: платформа задаётся
+у каждого клиента полем `provider` (`wa` по умолчанию, `tg`). В панели `/admin`
+она выбирается переключателем при создании клиента и потом не меняется — смена
+транспорта означает другого клиента.
+
+Ключ Telegram-клиента — id бота (цифры до `:` в токене), имя файла
+`clients/<bot_id>.yaml`. Обязательные поля: `provider: tg`,
+`telegram_bot_token` (от @BotFather), плюс обычные `business_name` и
+`knowledge_base`. Уведомления владельцу идут в `owner_telegram_chat_id`
+(числовой chat id; узнать у бота @userinfobot).
+
+Приём сообщений — вебхук, как у WhatsApp. При сохранении клиента панель сама
+вызывает `setWebhook` на `PUBLIC_BASE_URL/webhooks/telegram/<bot_id>` и
+регистрирует `telegram_webhook_secret`, по которому проверяются входящие
+(заголовок `X-Telegram-Bot-Api-Secret-Token`). Если `PUBLIC_BASE_URL` не
+задан, панель покажет готовый адрес, а вебхук привязывается вручную:
+
+```bash
+curl "https://api.telegram.org/bot<ТОКЕН>/setWebhook" \
+  -d "url=https://<ваш-домен>/webhooks/telegram/<bot_id>" \
+  -d "secret_token=<telegram_webhook_secret из yaml>" \
+  -d 'allowed_updates=["message"]'
+```
+
+Включить мультитенант: `MESSAGING_PROVIDER=meta` (или `telegram`) и папка
+`clients/` хотя бы с одним клиентом. Meta-секреты для Telegram-клиентов не
+нужны: если `META_APP_SECRET`/`META_VERIFY_TOKEN` пусты, WhatsApp-вебхук просто
+не поднимается, а Telegram продолжает работать.
+
+Single-tenant Telegram (один бот): `MESSAGING_PROVIDER=telegram`,
+`TELEGRAM_BOT_TOKEN`, `PUBLIC_BASE_URL`, бизнес-поля в `CLIENT_CONFIG`.
+
 ## Тесты
 
 ```bash
@@ -165,6 +209,10 @@ python tests/test_meta_webhook.py       # интеграция FastAPI, Meta-р�
 python tests/test_multitenant.py        # мультитенант: маршрутизация/hot-reload (33)
 python tests/test_admin_api.py          # админ-API: auth/маскирование/бэкапы/аудит (40)
 python tests/test_admin_profile.py      # профиль WhatsApp: чтение/правка/аватар (52)
+python tests/test_telegram_token.py     # токен бота: id/формат (10)
+python tests/test_telegram_payload.py   # разбор update Telegram (19)
+python tests/test_telegram_client.py    # Telegram-клиент: чанкинг/ok:false/ретраи (17)
+python tests/test_telegram_webhook.py   # TG-вебхук + сосуществование с WA (26)
 ```
 
 Все тесты автономны: сеть не используется (LLM и провайдеры — стабы/моки).

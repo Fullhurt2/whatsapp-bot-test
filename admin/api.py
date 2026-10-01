@@ -15,9 +15,15 @@
     поля поменял (значения токенов в лог никогда не попадают);
   - после записи реестр перечитывается штатным hot-reload.
 
-Секреты (access_token, management_token) в GET-ответах маскируются
-("EAAY…ab12"); пустое или замаскированное значение в PUT означает
-«оставить прежнее» — токен невозможно затереть случайно.
+Секреты (access_token, management_token, telegram_bot_token,
+telegram_webhook_secret) в GET-ответах маскируются ("EAAY…ab12"); пустое или
+замаскированное значение в PUT означает «оставить прежнее» — токен невозможно
+затереть случайно.
+
+Провайдер клиента (provider: wa|tg) задаётся при создании и не меняется:
+смена транспорта означает другого клиента. Для Telegram-клиента при
+сохранении генерируется telegram_webhook_secret и выполняется best-effort
+setWebhook на PUBLIC_BASE_URL/webhooks/telegram/<bot_id>.
 
 Профиль WhatsApp-номера (тексты рядом с именем и аватар) живёт в Meta, а не
 в clients/*.yaml: /admin/clients/{pid}/profile читает и правит его напрямую
@@ -29,6 +35,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -42,6 +49,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from config.clients import is_client_file, is_valid_phone_number_id, validate_tenant_config
 from config.settings import Settings
 from whatsapp.meta_client import ABOUT_MAX_LENGTH, MetaError, MetaTimeout, MetaWhatsAppClient
+from whatsapp.telegram_client import TelegramClient, TelegramError, TelegramTimeout, webhook_url
+from whatsapp.telegram_token import bot_id_from_token
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +62,23 @@ ADMIN_TOKEN_MIN_LENGTH = 32
 
 # Секретные поля: маскируются в GET, пустое/замаскированное значение в PUT
 # означает «оставить прежнее».
-SECRET_FIELDS = ("access_token", "management_token")
+SECRET_FIELDS = (
+    "access_token",
+    "management_token",
+    "telegram_bot_token",
+    "telegram_webhook_secret",
+)
 
 # Поля, которые клиент с management_token менять не может (только админ):
-# его собственный WABA-токен, токен панели и параметры LLM (лимит расходов).
-RESTRICTED_FIELDS = ("access_token", "management_token", "llm")
+# его собственный транспорт (провайдер и токены) и параметры LLM (лимит расходов).
+RESTRICTED_FIELDS = (
+    "provider",
+    "access_token",
+    "management_token",
+    "telegram_bot_token",
+    "telegram_webhook_secret",
+    "llm",
+)
 
 # Поля, доступные клиенту для правки у себя (бизнес-конфиг).
 CLIENT_EDITABLE_FIELDS = (
@@ -66,6 +87,7 @@ CLIENT_EDITABLE_FIELDS = (
     "language",
     "knowledge_base",
     "owner_whatsapp_phone",
+    "owner_telegram_chat_id",
     "fallback_triggers",
     "style_examples",
     "fallback_reply_ru",
@@ -159,6 +181,58 @@ def _management_token_of(clients_dir: Path, pid: str) -> str | None:
     cfg = _read_cfg(path)
     value = str((cfg or {}).get("management_token") or "").strip()
     return value or None
+
+
+def _client_provider(clients_dir: Path, pid: str) -> str:
+    """Провайдер клиента из его yaml: "tg" или "wa" (по умолчанию "wa")."""
+    path = _client_yaml_path(clients_dir, pid)
+    cfg = _read_cfg(path) if path else None
+    return str((cfg or {}).get("provider") or "wa").strip().lower() or "wa"
+
+
+async def _setup_telegram_webhook(
+    settings: Settings, bot_id: str, bot_token: str, secret: str,
+) -> list[str]:
+    """Привязывает вебхук Telegram-клиента (best-effort) и возвращает предупреждения.
+
+    Сохранение конфига не должно падать из-за недоступного Telegram, поэтому
+    все проблемы возвращаются строками-предупреждениями: панель покажет их
+    рядом с «Готово». Без PUBLIC_BASE_URL привязать вебхук нечем — подсказываем
+    готовый адрес для ручного setWebhook.
+    """
+    base = settings.public_base_url
+    target = webhook_url(base, bot_id)
+    if not base:
+        return [
+            "PUBLIC_BASE_URL не задан — вебхук Telegram не привязан автоматически. "
+            f"Вызовите setWebhook вручную на адрес {target} "
+            "(или задайте PUBLIC_BASE_URL и сохраните ещё раз)."
+        ]
+
+    notes: list[str] = []
+    client = TelegramClient(bot_token)
+    try:
+        try:
+            me = await client.get_me()
+            token_bot_id = str(me.get("id") or "").strip()
+            if token_bot_id and token_bot_id != bot_id:
+                notes.append(
+                    f"Токен принадлежит боту {token_bot_id}, а ключ клиента — {bot_id}. "
+                    "Пересоздайте клиента с правильным токеном."
+                )
+        except (TelegramError, TelegramTimeout) as exc:
+            notes.append(f"Не удалось проверить токен бота: {exc}")
+        try:
+            await client.set_webhook(target, secret)
+            logger.info("Telegram вебхук привязан: %s", target)
+        except (TelegramError, TelegramTimeout) as exc:
+            notes.append(
+                f"Не удалось привязать вебхук Telegram ({target}): {exc}. "
+                "Проверьте, что адрес доступен из интернета по HTTPS."
+            )
+    finally:
+        await client.close()
+    return notes
 
 
 def _authorize(settings: Settings, request: Request, clients_dir: Path,
@@ -475,9 +549,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
                 "phone_number_id": pid,
                 "business_name": str(cfg.get("business_name") or ""),
                 "config_file": name,
+                "provider": str(cfg.get("provider") or "wa").strip().lower() or "wa",
                 "has_own_token": bool(str(cfg.get("access_token") or "").strip()),
                 "has_management_token": bool(str(cfg.get("management_token") or "").strip()),
                 "owner_phone": tenant.owner_phone or "",
+                "owner_chat_id": tenant.owner_telegram_chat_id or "",
             })
         return {"clients": clients, "skipped": skipped}
 
@@ -553,6 +629,18 @@ def register_admin_api(app, settings: Settings, state) -> None:
             incoming = {key: value for key, value in incoming.items() if key in CLIENT_EDITABLE_FIELDS}
 
         merged = _merge_incoming(old_cfg or {}, incoming)
+        # Провайдер задаёт только админ (в т.ч. при создании); у существующего
+        # клиента он берётся из старого конфига. Смена транспорта = другой
+        # клиент, поэтому провайдер фиксируется при создании.
+        provider = str(
+            incoming.get("provider") or (old_cfg or {}).get("provider") or "wa"
+        ).strip().lower() or "wa"
+        merged["provider"] = provider
+        if provider == "tg" and not str(merged.get("telegram_webhook_secret") or "").strip():
+            # Секрет вебхука генерируем сами: он нужен setWebhook и проверке
+            # заголовка X-Telegram-Bot-Api-Secret-Token на входящих.
+            merged["telegram_webhook_secret"] = secrets.token_urlsafe(32)
+
         tenant, problems, warnings = validate_tenant_config(merged, settings, pid, f"{pid}.yaml")
         if tenant is None:
             # Битый конфиг на диск не пишется — текущий файл остаётся рабочим.
@@ -565,8 +653,14 @@ def register_admin_api(app, settings: Settings, state) -> None:
         actor = "admin" if role == "admin" else f"client:{pid}"
         _audit(clients_dir, actor, "put", pid, old_cfg, merged)
         await state.refresh_tenants()
-        logger.info("Админ-API: конфиг %s записан (%s)", pid, role)
-        return {"ok": True, "phone_number_id": pid, "warnings": warnings}
+        if provider == "tg":
+            # Привязка вебхука — best-effort: её сбой не отменяет сохранение,
+            # а возвращается панели предупреждением.
+            warnings = list(warnings) + await _setup_telegram_webhook(
+                settings, pid, tenant.telegram_bot_token, tenant.telegram_webhook_secret,
+            )
+        logger.info("Админ-API: конфиг %s записан (%s, провайдер=%s)", pid, role, provider)
+        return {"ok": True, "phone_number_id": pid, "provider": provider, "warnings": warnings}
 
     @app.delete("/admin/clients/{pid}")
     async def delete_client(pid: str, request: Request):
@@ -598,6 +692,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         if _client_yaml_path(clients_dir, pid) is None:
             return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        if _client_provider(clients_dir, pid) == "tg":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+            )
         async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
             if meta is None:
                 return JSONResponse(
@@ -625,6 +724,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         if _client_yaml_path(clients_dir, pid) is None:
             return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        if _client_provider(clients_dir, pid) == "tg":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+            )
         raw_body = await request.body()
         if len(raw_body) > MAX_BODY_BYTES:
             return JSONResponse(status_code=413, content={"error": "тело запроса слишком большое"})
@@ -683,6 +787,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         if _client_yaml_path(clients_dir, pid) is None:
             return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        if _client_provider(clients_dir, pid) == "tg":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+            )
         content_type = (file.content_type or "").lower()
         suffix = PROFILE_PHOTO_TYPES.get(content_type)
         if suffix is None:

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JAUAP — панель клиентов</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect x='32' y='32' width='440' height='400' rx='112' fill='%23BAEF93'/%3E%3Cpath d='M330 400 L330 432 Q392 436 436 488 Q450 506 460 486 Q468 430 456 372 Z' fill='%23BAEF93'/%3E%3Cpath transform='translate(-55.0 -73.0) scale(0.6)' fill='%23434343' fill-rule='evenodd' d='M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z M754 228 L744 260 L738 270 L729 278 L719 283 L693 291 L693 292 L720 300 L728 304 L737 312 L745 327 L754 355 L756 352 L762 329 L771 312 L780 304 L786 301 L816 292 L814 290 L787 282 L775 275 L770 270 L763 257Z'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect x='32' y='32' width='440' height='400' rx='112' fill='%23BAEF93'/%3E%3Cpath d='M330 400 L330 432 Q392 436 436 488 Q450 506 460 486 Q468 430 456 372 Z' fill='%23BAEF93'/%3E%3Cpath transform='translate(-131.5 -155.8) scale(0.75)' fill='%23434343' fill-rule='evenodd' d='M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #F7F7F5;
@@ -60,6 +60,14 @@
   .btn-danger:hover { background: var(--danger-soft); }
   .btn-sm { padding: 6px 10px; font-size: 12.5px; border-radius: 7px; }
   .btn-block { width: 100%; }
+  /* Переключатель платформы (WhatsApp / Telegram) */
+  .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
+  .seg-btn { background: var(--surface); border: none; padding: 9px 18px; font-weight: 600; font-size: 13.5px; color: var(--text-soft); min-height: 44px; }
+  .seg-btn + .seg-btn { border-left: 1px solid var(--border-strong); }
+  .seg-btn.active { background: var(--accent); color: var(--on-accent); }
+  .seg-btn:hover:not(.active) { color: var(--text); }
+  .provider-badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 7px;
+    border-radius: 5px; background: var(--surface-muted); border: 1px solid var(--border); color: var(--text-soft); }
   button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
     outline: 2px solid var(--accent-ink); outline-offset: 1px;
   }
@@ -190,7 +198,7 @@
 </style>
 </head>
 <body>
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="jauap-logo" viewBox="0 0 512 512"><rect x="32" y="32" width="440" height="400" rx="112" fill="#BAEF93"/><path d="M330 400 L330 432 Q392 436 436 488 Q450 506 460 486 Q468 430 456 372 Z" fill="#BAEF93"/><path transform="translate(-55.0 -73.0) scale(0.6)" fill="#434343" fill-rule="evenodd" d="M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z M754 228 L744 260 L738 270 L729 278 L719 283 L693 291 L693 292 L720 300 L728 304 L737 312 L745 327 L754 355 L756 352 L762 329 L771 312 L780 304 L786 301 L816 292 L814 290 L787 282 L775 275 L770 270 L763 257Z"/></symbol></svg>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="jauap-logo" viewBox="0 0 512 512"><rect x="32" y="32" width="440" height="400" rx="112" fill="#BAEF93"/><path d="M330 400 L330 432 Q392 436 436 488 Q450 506 460 486 Q468 430 456 372 Z" fill="#BAEF93"/><path transform="translate(-131.5 -155.8) scale(0.75)" fill="#434343" fill-rule="evenodd" d="M696 363 L679 348 L657 335 L639 328 L614 323 L586 323 L565 327 L543 335 L518 350 L500 367 L488 383 L478 402 L470 428 L468 441 L468 603 L466 615 L460 629 L451 641 L435 653 L416 659 L395 658 L377 651 L371 647 L360 636 L350 616 L348 599 L293 599 L294 619 L299 638 L307 655 L318 671 L333 686 L347 696 L363 704 L375 708 L395 712 L421 712 L438 709 L465 698 L485 684 L496 673 L508 656 L517 636 L521 621 L523 602 L523 443 L527 427 L539 406 L553 392 L562 386 L575 380 L594 376 L613 377 L630 382 L644 390 L660 405 L665 412 L672 426 L676 443 L676 458 L672 475 L666 488 L657 500 L645 511 L626 521 L609 525 L546 525 L546 609 L541 636 L532 660 L521 678 L515 686 L499 702 L486 711 L486 712 L586 712 L587 711 L586 710 L586 580 L587 579 L618 578 L644 572 L668 561 L685 549 L702 532 L718 508 L725 491 L731 462 L731 440 L728 422 L722 403 L714 387 L707 376Z M358 376 L466 376 L472 366 L484 351 L501 335 L518 323 L358 323Z"/></symbol></svg>
 <div class="wrap">
 
   <div class="topbar">
@@ -239,16 +247,27 @@
       </div>
 
       <div class="card new-client-card hidden" id="newCard">
-        <label>phone_number_id</label>
-        <div class="hint">Цифры из WhatsApp → API Setup</div>
-        <input id="newPid" class="mono" placeholder="например 1354249714436396">
+        <label>Платформа</label>
+        <div class="seg" id="newProviderSeg">
+          <button type="button" class="seg-btn active" data-provider="wa" onclick="setNewProvider('wa')">WhatsApp</button>
+          <button type="button" class="seg-btn" data-provider="tg" onclick="setNewProvider('tg')">Telegram</button>
+        </div>
+
+        <div id="newPidWrap">
+          <label>phone_number_id</label>
+          <div class="hint">Цифры из WhatsApp → API Setup</div>
+          <input id="newPid" class="mono" placeholder="например 1354249714436396">
+        </div>
+
         <label>Название бизнеса</label>
         <input id="newBusiness" placeholder="Кофейня на Абая">
         <label>Информация о бизнесе (можно дополнить позже)</label>
         <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
-        <label>Токен номера клиента, access_token</label>
-        <div class="hint">Можно пусто — будет общий</div>
+
+        <label id="newTokenLabel">Токен номера клиента, access_token</label>
+        <div class="hint" id="newTokenHint">Можно пусто — будет общий</div>
         <input id="newToken" class="mono">
+
         <label>Токен клиента для панели, management_token</label>
         <div class="hint">Можно пусто</div>
         <input id="newMgmtToken" class="mono">
@@ -313,9 +332,16 @@
           <div class="hint">Если клиент напишет что-то из этого, бот не будет отвечать сам — он вежливо сообщит, что передал вопрос, а вам придёт сообщение с текстом клиента. Например: жалоба, возврат, отменить запись, позовите менеджера.</div>
           <input id="f_fallback_triggers" placeholder="жалоба, отменить, предоплата">
 
-          <label>Ваш WhatsApp для уведомлений</label>
-          <div class="hint">Сюда бот присылает вопрос, когда не смог ответить сам. Формат: плюс, код страны, номер — например +77770001122. Можно оставить пустым, если уведомления не нужны.</div>
-          <input id="f_owner_whatsapp_phone" placeholder="+77770001122">
+          <div id="ownerWaWrap">
+            <label>Ваш WhatsApp для уведомлений</label>
+            <div class="hint">Сюда бот присылает вопрос, когда не смог ответить сам. Формат: плюс, код страны, номер — например +77770001122. Можно оставить пустым, если уведомления не нужны.</div>
+            <input id="f_owner_whatsapp_phone" placeholder="+77770001122">
+          </div>
+          <div id="ownerTgWrap" class="hidden">
+            <label>Ваш Telegram chat id для уведомлений</label>
+            <div class="hint">Сюда бот присылает вопрос, когда не смог ответить сам. Это числовой id чата (например 123456789) — узнать можно у бота @userinfobot. Можно оставить пустым, если уведомления не нужны.</div>
+            <input id="f_owner_telegram_chat_id" class="mono" placeholder="например 123456789">
+          </div>
 
           <div class="section-title">Как бот должен отвечать</div>
           <label>Примеры тёплого ответа (необязательно)</label>
@@ -336,9 +362,27 @@
         </section>
 
         <section class="tab-panel hidden" id="tab-admin">
-          <div class="hint">Пустое значение или маска вида "EAAY…ab12" = оставить прежний токен.</div>
-          <label>access_token — токен WABA клиента (пусто = общий токен)</label>
-          <input id="f_access_token" class="mono">
+          <div class="section-title">Платформа</div>
+          <div class="hint" id="providerLine"></div>
+          <div class="hint">Платформа выбирается при создании клиента и не меняется: смена транспорта — это фактически другой клиент.</div>
+
+          <div id="waSecretsWrap">
+            <div class="section-title">Доступ</div>
+            <div class="hint">Пустое значение или маска вида "EAAY…ab12" = оставить прежний токен.</div>
+            <label>access_token — токен WABA клиента (пусто = общий токен)</label>
+            <input id="f_access_token" class="mono">
+          </div>
+
+          <div id="tgSecretsWrap" class="hidden">
+            <div class="section-title">Доступ</div>
+            <div class="hint">Пустое значение или маска = оставить прежний токен.</div>
+            <label>telegram_bot_token — токен бота от @BotFather</label>
+            <input id="f_telegram_bot_token" class="mono">
+            <label>telegram_webhook_secret — секрет вебхука (служебный)</label>
+            <input id="f_telegram_webhook_secret" class="mono" readonly>
+            <div class="hint" id="tgWebhookHint"></div>
+          </div>
+
           <label>management_token — токен клиента для этой панели</label>
           <input id="f_management_token" class="mono">
 
@@ -377,6 +421,8 @@ const STORE_KEY = "wa_panel_token";
 let role = null;
 let currentPid = null;
 let clientsData = [];
+let newProvider = "wa";       // платформа в форме создания клиента
+let currentProvider = "wa";   // платформа открытого клиента (менять нельзя)
 
 const $ = (id) => document.getElementById(id);
 
@@ -397,6 +443,35 @@ function esc(text) {
   return String(text == null ? "" : text).replace(/[&<>"]/g, (ch) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]
   ));
+}
+
+// Переключатель платформы в форме создания: WhatsApp / Telegram.
+function setNewProvider(provider) {
+  newProvider = provider;
+  document.querySelectorAll("#newProviderSeg .seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.provider === provider);
+  });
+  const isTg = provider === "tg";
+  show("newPidWrap", !isTg);
+  $("newTokenLabel").textContent = isTg
+    ? "Токен бота Telegram (от @BotFather)"
+    : "Токен номера клиента, access_token";
+  $("newTokenHint").textContent = isTg
+    ? "Формат 123456789:AA… — ключ клиента определится автоматически"
+    : "Можно пусто — будет общий";
+  $("newToken").placeholder = isTg ? "123456789:AAHh…" : "";
+}
+
+// Поля редактора зависят от платформы клиента (провайдер не меняется).
+function applyProviderUI(provider) {
+  const isTg = provider === "tg";
+  show("waSecretsWrap", !isTg);
+  show("tgSecretsWrap", isTg);
+  show("ownerWaWrap", !isTg);
+  show("ownerTgWrap", isTg);
+  $("providerLine").textContent = isTg
+    ? "Telegram — бот отвечает в Telegram, уведомления приходят в указанный chat id."
+    : "WhatsApp — бот отвечает через WhatsApp Cloud API.";
 }
 
 // Ответ сервера → понятная человеку фраза. Технический код показываем мелкой строкой ниже.
@@ -478,11 +553,15 @@ function renderClientList(filterText) {
   }
   box.innerHTML = list.map((c) => {
     const active = c.phone_number_id === currentPid ? " active" : "";
-    const tokenBits = (c.has_own_token ? "свой токен" : "общий токен") +
+    const isTg = c.provider === "tg";
+    const badge = '<span class="provider-badge">' + (isTg ? "Telegram" : "WhatsApp") + "</span>";
+    const tokenBits = (isTg
+      ? "бот " + c.phone_number_id
+      : (c.has_own_token ? "свой токен" : "общий токен")) +
       (c.has_management_token ? " · панель есть" : "");
     return '<div class="client-row' + active + '" data-pid="' + esc(c.phone_number_id) + '">' +
       '<div class="client-row-name">' + esc(c.business_name || "Без названия") + "</div>" +
-      '<div class="client-row-sub mono">' + esc(c.phone_number_id) + "</div>" +
+      '<div class="client-row-sub">' + badge + ' <span class="mono">' + esc(c.phone_number_id) + "</span></div>" +
       '<div class="client-row-sub">' + esc(tokenBits) + "</div>" +
       "</div>";
   }).join("");
@@ -540,8 +619,9 @@ async function openEditor(pid) {
   currentPid = pid;
   for (const key of [
     "business_name", "tone", "knowledge_base", "owner_whatsapp_phone",
-    "style_examples", "fallback_reply_ru", "fallback_reply_kk",
+    "owner_telegram_chat_id", "style_examples", "fallback_reply_ru", "fallback_reply_kk",
     "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
+    "telegram_bot_token", "telegram_webhook_secret",
   ]) {
     $("f_" + key).value = data[key] != null ? data[key] : "";
   }
@@ -556,6 +636,12 @@ async function openEditor(pid) {
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
+  currentProvider = data.provider === "tg" ? "tg" : "wa";
+  applyProviderUI(currentProvider);
+  $("tgWebhookHint").textContent = currentProvider === "tg"
+    ? "Адрес вебхука: " + location.origin + "/webhooks/telegram/" + pid +
+      " — привязывается автоматически при сохранении, если в .env задан PUBLIC_BASE_URL."
+    : "";
   $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
   $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
   setDirty(false);
@@ -573,6 +659,7 @@ function collectForm() {
     language: value("f_language"),
     knowledge_base: value("f_knowledge_base"),
     owner_whatsapp_phone: normalizeOwnerPhone(value("f_owner_whatsapp_phone")),
+    owner_telegram_chat_id: value("f_owner_telegram_chat_id").trim(),
     fallback_triggers: value("f_fallback_triggers").split(",").map((s) => s.trim()).filter(Boolean),
     style_examples: value("f_style_examples"),
     fallback_reply_ru: value("f_fallback_reply_ru"),
@@ -581,8 +668,15 @@ function collectForm() {
     timeout_reply_kk: value("f_timeout_reply_kk"),
   };
   if (role === "admin") {
-    config.access_token = value("f_access_token").trim();
     config.management_token = value("f_management_token").trim();
+    if (currentProvider === "tg") {
+      // Провайдер не меняем у существующего клиента — передаём только токены;
+      // маскированные/пустые значения сервер сохраняет как есть.
+      config.telegram_bot_token = value("f_telegram_bot_token").trim();
+      config.telegram_webhook_secret = value("f_telegram_webhook_secret").trim();
+    } else {
+      config.access_token = value("f_access_token").trim();
+    }
     config.llm = {
       model: value("f_llm_model").trim(),
       temperature: parseFloat(value("f_llm_temperature")) || 0.6,
@@ -641,15 +735,13 @@ async function deleteCurrent() {
 }
 
 function toggleNew() {
-  show("newCard", $("newCard").classList.contains("hidden"));
+  const opening = $("newCard").classList.contains("hidden");
+  show("newCard", opening);
+  if (opening) setNewProvider(newProvider);
 }
 
 async function createClient() {
-  const pid = $("newPid").value.trim();
-  if (!/^\d{1,20}$/.test(pid)) {
-    status("listStatus", "phone_number_id — только цифры; он показан в WhatsApp → API Setup", true);
-    return;
-  }
+  const token = $("newToken").value.trim();
   const payload = {
     business_name: $("newBusiness").value.trim() || "Новый бизнес",
     tone: "вежливый, дружелюбный, на «вы»",
@@ -658,9 +750,27 @@ async function createClient() {
     owner_whatsapp_phone: "",
     fallback_triggers: [],
     style_examples: "",
-    access_token: $("newToken").value.trim(),
     management_token: $("newMgmtToken").value.trim(),
   };
+  let pid;
+  if (newProvider === "tg") {
+    // Ключ клиента Telegram — id бота из токена (цифры до «:»).
+    if (!/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(token)) {
+      status("listStatus", "Токен бота Telegram выглядит неполным. Скопируйте его целиком из @BotFather (формат 123456789:AA…).", true);
+      return;
+    }
+    pid = token.split(":")[0];
+    payload.provider = "tg";
+    payload.telegram_bot_token = token;
+  } else {
+    pid = $("newPid").value.trim();
+    if (!/^\d{1,20}$/.test(pid)) {
+      status("listStatus", "phone_number_id — только цифры; он показан в WhatsApp → API Setup", true);
+      return;
+    }
+    payload.provider = "wa";
+    payload.access_token = token;
+  }
   const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(pid), payload);
   if (!ok) {
     status("listStatus", humanError(code, data), true);
@@ -671,6 +781,8 @@ async function createClient() {
   $("newMgmtToken").value = "";
   show("newCard", false);
   loadList();
+  const warnings = data.warnings || [];
+  if (warnings.length) status("listStatus", "Клиент создан. " + warnings.join(" "), false);
 }
 
 function login() {

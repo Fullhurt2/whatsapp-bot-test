@@ -1,17 +1,21 @@
 """Реестр клиентов мультитенантного режима: папка clients/, один YAML на клиента.
 
-Имя файла = phone_number_id бизнес-номера клиента в Graph API, например
-clients/1354249714436396.yaml. Из файла собирается полноценный Settings:
-бизнес-поля и access_token — из yaml, глобальные вещи (LLM-ключ, app secret,
-verify token, версия Graph API) — из env. Так MessageProcessor и notify_owner
-работают с per-tenant Settings без изменений в коде обработчиков.
+Имя файла — ключ клиента из цифр: у WhatsApp-клиентов это phone_number_id
+бизнес-номера в Graph API (clients/1354249714436396.yaml), у Telegram-клиентов —
+id бота из токена (clients/123456789.yaml, поле provider: tg). Из файла
+собирается полноценный Settings: бизнес-поля и токен — из yaml, глобальные
+вещи (LLM-ключ, app secret, verify token, версия Graph API) — из env. Так
+MessageProcessor и notify_owner работают с per-tenant Settings без изменений
+в коде обработчиков.
 
 Требования к файлу клиента:
-  - имя файла — цифры (phone_number_id), уникальный ключ клиента;
+  - имя файла — цифры (ключ клиента), уникальный ключ клиента;
   - business_name и knowledge_base обязательны;
   - llm.model — в yaml или глобальный LLM_MODEL из env;
-  - access_token — в yaml или глобальный WHATSAPP_ACCESS_TOKEN (fallback для
-    схемы «все номера под партнёрством и одним общим токеном»).
+  - provider: wa (по умолчанию) или tg;
+  - wa: access_token — в yaml или глобальный WHATSAPP_ACCESS_TOKEN (fallback
+    для схемы «все номера под партнёрством и одним общим токеном»);
+  - tg: telegram_bot_token обязателен, имя файла = id бота из токена.
 Битый/неполный файл не роняет сервис: клиент пропускается с warning-логом.
 
 Hot-reload: снапшот папки (имя, mtime, размер) сверяется при каждом входящем
@@ -27,6 +31,7 @@ from pathlib import Path
 import yaml
 
 from config.settings import LLMParams, Settings, normalize_phone
+from whatsapp.telegram_token import bot_id_from_token
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,7 @@ def _has_client_file(clients_dir: Path) -> bool:
 
 
 def validate_tenant_config(
-    cfg, base: Settings, phone_number_id: str, file_name: str = "",
+    cfg, base: Settings, tenant_key: str, file_name: str = "",
 ) -> tuple[Settings | None, list[str], list[str]]:
     """Проверяет конфиг клиента и собирает его Settings.
 
@@ -96,26 +101,61 @@ def validate_tenant_config(
     не блокирующие работу. Один и тот же валидатор используется реестром при
     загрузке yaml и админ-API перед записью файла — битый конфиг не попадёт
     никуда.
+
+    Провайдер клиента — поле provider ("wa" по умолчанию, либо "tg"):
+      - wa: обязателен access_token (или глобальный WHATSAPP_ACCESS_TOKEN),
+        tenant_key — phone_number_id;
+      - tg: обязателен telegram_bot_token, tenant_key должен совпадать с id
+        бота из токена (id бота — ключ клиента в реестре).
     """
     if not isinstance(cfg, dict):
         return None, ["ожидается словарь с полями бизнеса"], []
 
+    provider = str(cfg.get("provider") or "wa").strip().lower() or "wa"
     llm_block = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
-    access_token = str(cfg.get("access_token") or "").strip() or base.whatsapp_access_token
     model = str(llm_block.get("model") or "").strip() or base.llm.model
     business_name = str(cfg.get("business_name") or "").strip()
 
     problems: list[str] = []
+    if provider not in ("wa", "tg"):
+        problems.append(f"provider={provider!r} не поддерживается (ожидается 'wa' или 'tg')")
     if not business_name:
         problems.append("business_name не задан")
     if not str(cfg.get("knowledge_base") or "").strip():
         problems.append("knowledge_base не задан")
-    if not access_token:
-        problems.append("access_token не задан (yaml или WHATSAPP_ACCESS_TOKEN в .env)")
     if not model:
         problems.append("llm.model не задан (yaml или LLM_MODEL в .env)")
 
-    owner_phone, owner_warning = _resolve_owner_phone(cfg, file_name)
+    # Провайдер и его обязательный секрет. У WA есть глобальный fallback-токен,
+    # у Telegram — нет: у каждого бота свой токен.
+    access_token = ""
+    telegram_bot_token = ""
+    if provider == "tg":
+        telegram_bot_token = str(cfg.get("telegram_bot_token") or "").strip()
+        if not telegram_bot_token:
+            problems.append("telegram_bot_token не задан (токен бота от @BotFather)")
+        else:
+            bot_id = bot_id_from_token(telegram_bot_token)
+            if not bot_id:
+                problems.append(
+                    "telegram_bot_token не похож на токен бота (ожидается «123456789:AA…»)"
+                )
+            elif bot_id != tenant_key:
+                problems.append(
+                    f"ключ клиента {tenant_key} не совпадает с id бота {bot_id} из токена"
+                )
+    else:
+        access_token = str(cfg.get("access_token") or "").strip() or base.whatsapp_access_token
+        if not access_token:
+            problems.append("access_token не задан (yaml или WHATSAPP_ACCESS_TOKEN в .env)")
+
+    # Номер владельца в WhatsApp — только для WA; для TG используется chat id.
+    if provider == "tg":
+        owner_phone = None
+        owner_chat, owner_warning = _resolve_owner_chat(cfg)
+    else:
+        owner_phone, owner_warning = _resolve_owner_phone(cfg, file_name)
+        owner_chat = ""
     warnings = [owner_warning] if owner_warning else []
     if problems:
         return None, problems, warnings
@@ -133,13 +173,19 @@ def validate_tenant_config(
 
     settings = replace(
         base,
-        whatsapp_phone_number_id=phone_number_id,
+        # Транспорт тенанта задаётся его provider, а не глобальным MESSAGING_PROVIDER.
+        messaging_provider="telegram" if provider == "tg" else "meta",
+        # Ключ тенанта: у WA — phone_number_id, у TG — id бота из токена.
+        whatsapp_phone_number_id=tenant_key,
         whatsapp_access_token=access_token,
+        telegram_bot_token=telegram_bot_token,
+        telegram_webhook_secret=str(cfg.get("telegram_webhook_secret") or "").strip(),
         business_name=business_name,
         tone=str(cfg.get("tone") or "").strip(),
         language=str(cfg.get("language") or "ru").strip().lower(),
         knowledge_base=str(cfg.get("knowledge_base") or "").strip(),
         owner_phone=owner_phone,
+        owner_telegram_chat_id=owner_chat,
         fallback_triggers=[
             str(t).strip() for t in (cfg.get("fallback_triggers") or []) if str(t).strip()
         ],
@@ -164,7 +210,7 @@ def load_tenant(path: Path, base: Settings) -> Settings | None:
     один сломанный клиент не должен ронять остальных. Вся валидация —
     в validate_tenant_config, её же использует админ-API перед записью.
     """
-    phone_number_id = path.stem
+    tenant_key = path.stem
     try:
         with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -175,7 +221,7 @@ def load_tenant(path: Path, base: Settings) -> Settings | None:
         logger.warning("Клиент %s пропущен: ожидается YAML-словарь с полями бизнеса", path.name)
         return None
 
-    settings, problems, warnings = validate_tenant_config(cfg, base, phone_number_id, path.name)
+    settings, problems, warnings = validate_tenant_config(cfg, base, tenant_key, path.name)
     for warning in warnings:
         logger.warning("Клиент %s: %s", path.name, warning)
     if settings is None:
@@ -183,8 +229,8 @@ def load_tenant(path: Path, base: Settings) -> Settings | None:
         return None
 
     logger.info(
-        "Клиент загружен | phone_number_id=%s | бизнес=%s | файл=%s",
-        phone_number_id, settings.business_name, path.name,
+        "Клиент загружен | ключ=%s | провайдер=%s | бизнес=%s | файл=%s",
+        tenant_key, settings.messaging_provider, settings.business_name, path.name,
     )
     return settings
 
@@ -207,6 +253,24 @@ def _resolve_owner_phone(cfg: dict, file_name: str) -> tuple[str | None, str | N
             "иначе уведомления владельцу доходить не будут"
         )
     return phone, None
+
+
+def _resolve_owner_chat(cfg: dict) -> tuple[str, str | None]:
+    """(chat id владельца в Telegram, предупреждение) из yaml TG-клиента.
+
+    chat id — числовой (у личных чатов положительный, у групп отрицательный),
+    поэтому допускаем ведущий минус. Опечатка — предупреждение, не отказ.
+    """
+    raw = str(cfg.get("owner_telegram_chat_id") or "").strip()
+    if not raw:
+        return "", None
+    if not re.fullmatch(r"-?\d{5,20}", raw):
+        return "", (
+            f"owner_telegram_chat_id={raw!r} не похож на chat id Telegram. "
+            "Это числовой id (например 123456789); узнать его можно у бота "
+            "@userinfobot — иначе уведомления владельцу доходить не будут"
+        )
+    return raw, None
 
 
 @dataclass(frozen=True)
