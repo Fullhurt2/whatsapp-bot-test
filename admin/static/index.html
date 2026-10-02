@@ -529,7 +529,7 @@ function show(id, visible) {
 }
 
 function status(id, text, isError) {
-  const el = $(id);
+  const el = typeof id === "string" ? $(id) : id;
   if (!el) return;
   el.textContent = text || "";
   el.classList.toggle("error", Boolean(isError));
@@ -1036,8 +1036,6 @@ async function saveProfile() {
     status($("profileStatus"), "Нечего сохранять", true);
     return;
   }
-  const btn = $("saveBtn"); // reuse saveBtn? No, need a different button ID
-  // We'll use a specific save button for profile
   const saveBtn = document.querySelector("#tab-profile .btn-primary");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Сохраняем…"; }
   try {
@@ -1072,7 +1070,6 @@ async function uploadProfilePhoto() {
   } catch (e) {
     status(statusEl, "Ошибка: " + e.message, true);
   }
-}
 }
 
 async function copyZernioLink() {
