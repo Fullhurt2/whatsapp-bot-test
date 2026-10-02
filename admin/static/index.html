@@ -250,13 +250,20 @@
         <label>Платформа</label>
         <div class="seg" id="newProviderSeg">
           <button type="button" class="seg-btn active" data-provider="wa" onclick="setNewProvider('wa')">WhatsApp</button>
+          <button type="button" class="seg-btn" data-provider="zernio" onclick="setNewProvider('zernio')">Zernio</button>
           <button type="button" class="seg-btn" data-provider="tg" onclick="setNewProvider('tg')">Telegram</button>
         </div>
 
         <div id="newPidWrap">
-          <label>phone_number_id</label>
-          <div class="hint">Цифры из WhatsApp → API Setup</div>
+          <label id="newPidLabel">phone_number_id</label>
+          <div class="hint" id="newPidHint">Цифры из WhatsApp → API Setup</div>
           <input id="newPid" class="mono" placeholder="например 1354249714436396">
+        </div>
+
+        <div id="newZernioWrap" class="hidden">
+          <label>zernio_account_id</label>
+          <div class="hint">Id подключённого WhatsApp-аккаунта в Zernio — 24 hex-символа (дашборд Zernio → аккаунт)</div>
+          <input id="newZernioAccount" class="mono" placeholder="например 66b2e19d8c3f5a7e9d0b1c2d">
         </div>
 
         <label>Название бизнеса</label>
@@ -264,9 +271,11 @@
         <label>Информация о бизнесе (можно дополнить позже)</label>
         <textarea id="newKnowledge" rows="3" placeholder="Часы работы, адрес, услуги и цены…"></textarea>
 
-        <label id="newTokenLabel">Токен номера клиента, access_token</label>
-        <div class="hint" id="newTokenHint">Можно пусто — будет общий</div>
-        <input id="newToken" class="mono">
+        <div id="newTokenWrap">
+          <label id="newTokenLabel">Токен номера клиента, access_token</label>
+          <div class="hint" id="newTokenHint">Можно пусто — будет общий</div>
+          <input id="newToken" class="mono">
+        </div>
 
         <label>Токен клиента для панели, management_token</label>
         <div class="hint">Можно пусто</div>
@@ -383,6 +392,41 @@
             <div class="hint" id="tgWebhookHint"></div>
           </div>
 
+          <div id="zernioSecretsWrap" class="hidden">
+            <div class="section-title">Подключение номера</div>
+            <div class="hint">Ссылка открывает страницу Zernio: клиент входит в Meta и выбирает номер. Профиль клиента создаётся автоматически. После подключения нажмите «Проверить и сохранить» — accountId подставится сам.</div>
+            <p>
+              <button type="button" class="btn btn-primary btn-sm" id="zernioLinkBtn" onclick="zernioConnectLink()">Сгенерировать ссылку подключения</button>
+              <button type="button" class="btn btn-sm" id="zernioSyncBtn" onclick="zernioSyncAccount()">Проверить и сохранить</button>
+            </p>
+            <div id="zernioLinkWrap" class="hidden">
+              <label>Ссылка для клиента</label>
+              <div class="row">
+                <input id="zernioLink" class="mono" readonly>
+                <button type="button" class="btn btn-sm" onclick="copyZernioLink()">Копировать</button>
+              </div>
+            </div>
+            <div class="status" id="zernioStatus" role="status"></div>
+
+            <div class="section-title">Данные аккаунта</div>
+            <div class="hint">API-ключ общий и задаётся в .env (ZERNIO_API_KEY).</div>
+            <label>zernio_account_id — id подключённого WhatsApp-аккаунта</label>
+            <input id="f_zernio_account_id" class="mono" placeholder="66b2e19d8c3f5a7e9d0b1c2d">
+            <div class="section-title">Уведомление владельцу шаблоном</div>
+            <div class="hint">Вне 24-часового окна WhatsApp свободный текст запрещён — уведомление уходит approved-шаблоном с двумя переменными тела: {{1}} — отправитель, {{2}} — сообщение.</div>
+            <label>owner_template_name</label>
+            <input id="f_owner_template_name" class="mono" placeholder="owner_alert">
+            <label>owner_template_language</label>
+            <input id="f_owner_template_language" class="mono" placeholder="ru">
+
+            <details>
+              <summary>Вебхук сервиса (один на всех клиентов)</summary>
+              <div class="hint">События всех Zernio-клиентов идут на /webhooks/zernio. Нужны ZERNIO_WEBHOOK_SECRET и PUBLIC_BASE_URL в .env; секрет подписи берётся оттуда.</div>
+              <p><button type="button" class="btn btn-sm" id="zernioWebhookBtn" onclick="zernioRegisterWebhook()">Зарегистрировать вебхук</button></p>
+              <div class="status" id="zernioWebhookStatus" role="status"></div>
+            </details>
+          </div>
+
           <label>management_token — токен клиента для этой панели</label>
           <input id="f_management_token" class="mono">
 
@@ -445,14 +489,26 @@ function esc(text) {
   ));
 }
 
-// Переключатель платформы в форме создания: WhatsApp / Telegram.
+// Переключатель платформы в форме создания: WhatsApp / Zernio / Telegram.
 function setNewProvider(provider) {
   newProvider = provider;
   document.querySelectorAll("#newProviderSeg .seg-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.provider === provider);
   });
   const isTg = provider === "tg";
+  const isZernio = provider === "zernio";
   show("newPidWrap", !isTg);
+  show("newZernioWrap", isZernio);
+  show("newTokenWrap", !isZernio);
+  if (isZernio) {
+    $("newPidLabel").textContent = "Ключ клиента (имя файла, латиницей)";
+    $("newPidHint").textContent = "Например nails-studio — этот же ярлык увидят в админке";
+    $("newPid").placeholder = "например nails-studio";
+  } else {
+    $("newPidLabel").textContent = "phone_number_id";
+    $("newPidHint").textContent = "Цифры из WhatsApp → API Setup";
+    $("newPid").placeholder = "например 1354249714436396";
+  }
   $("newTokenLabel").textContent = isTg
     ? "Токен бота Telegram (от @BotFather)"
     : "Токен номера клиента, access_token";
@@ -465,13 +521,17 @@ function setNewProvider(provider) {
 // Поля редактора зависят от платформы клиента (провайдер не меняется).
 function applyProviderUI(provider) {
   const isTg = provider === "tg";
-  show("waSecretsWrap", !isTg);
+  const isZernio = provider === "zernio";
+  show("waSecretsWrap", !isTg && !isZernio);
   show("tgSecretsWrap", isTg);
+  show("zernioSecretsWrap", isZernio);
   show("ownerWaWrap", !isTg);
   show("ownerTgWrap", isTg);
   $("providerLine").textContent = isTg
     ? "Telegram — бот отвечает в Telegram, уведомления приходят в указанный chat id."
-    : "WhatsApp — бот отвечает через WhatsApp Cloud API.";
+    : (isZernio
+      ? "Zernio — бот отвечает через WhatsApp-аккаунт, подключённый в Zernio. Свободный текст возможен только в 24-часовом окне; уведомление владельцу уходит шаблоном."
+      : "WhatsApp — бот отвечает через WhatsApp Cloud API.");
 }
 
 // Ответ сервера → понятная человеку фраза. Технический код показываем мелкой строкой ниже.
@@ -554,10 +614,14 @@ function renderClientList(filterText) {
   box.innerHTML = list.map((c) => {
     const active = c.phone_number_id === currentPid ? " active" : "";
     const isTg = c.provider === "tg";
-    const badge = '<span class="provider-badge">' + (isTg ? "Telegram" : "WhatsApp") + "</span>";
+    const isZernio = c.provider === "zernio";
+    const badge = '<span class="provider-badge">' +
+      (isTg ? "Telegram" : (isZernio ? "Zernio" : "WhatsApp")) + "</span>";
     const tokenBits = (isTg
       ? "бот " + c.phone_number_id
-      : (c.has_own_token ? "свой токен" : "общий токен")) +
+      : (isZernio
+        ? "аккаунт " + (c.zernio_account_id || "—")
+        : (c.has_own_token ? "свой токен" : "общий токен"))) +
       (c.has_management_token ? " · панель есть" : "");
     return '<div class="client-row' + active + '" data-pid="' + esc(c.phone_number_id) + '">' +
       '<div class="client-row-name">' + esc(c.business_name || "Без названия") + "</div>" +
@@ -622,6 +686,7 @@ async function openEditor(pid) {
     "owner_telegram_chat_id", "style_examples", "fallback_reply_ru", "fallback_reply_kk",
     "timeout_reply_ru", "timeout_reply_kk", "access_token", "management_token",
     "telegram_bot_token", "telegram_webhook_secret",
+    "zernio_account_id", "owner_template_name", "owner_template_language",
   ]) {
     $("f_" + key).value = data[key] != null ? data[key] : "";
   }
@@ -636,8 +701,13 @@ async function openEditor(pid) {
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
-  currentProvider = data.provider === "tg" ? "tg" : "wa";
+  currentProvider = ["tg", "zernio"].includes(data.provider) ? data.provider : "wa";
   applyProviderUI(currentProvider);
+  // Zernio: сбрасываем состояние блока подключения при открытии другого клиента.
+  show("zernioLinkWrap", false);
+  $("zernioLink").value = "";
+  status("zernioStatus", "");
+  status("zernioWebhookStatus", "");
   $("tgWebhookHint").textContent = currentProvider === "tg"
     ? "Адрес вебхука: " + location.origin + "/webhooks/telegram/" + pid +
       " — привязывается автоматически при сохранении, если в .env задан PUBLIC_BASE_URL."
@@ -674,6 +744,10 @@ function collectForm() {
       // маскированные/пустые значения сервер сохраняет как есть.
       config.telegram_bot_token = value("f_telegram_bot_token").trim();
       config.telegram_webhook_secret = value("f_telegram_webhook_secret").trim();
+    } else if (currentProvider === "zernio") {
+      config.zernio_account_id = value("f_zernio_account_id").trim();
+      config.owner_template_name = value("f_owner_template_name").trim();
+      config.owner_template_language = value("f_owner_template_language").trim();
     } else {
       config.access_token = value("f_access_token").trim();
     }
@@ -734,6 +808,60 @@ async function deleteCurrent() {
   status("editorStatus", humanError(code, data), true);
 }
 
+// --- Zernio: подключение аккаунта из панели ---------------------------------
+
+function zernioApi(method, path, body) {
+  return api(method, "/admin/clients/" + encodeURIComponent(currentPid) + path, body);
+}
+
+async function zernioConnectLink() {
+  const btn = $("zernioLinkBtn");
+  btn.disabled = true;
+  status("zernioStatus", "Готовим ссылку…");
+  const { ok, code, data } = await zernioApi("POST", "/zernio/connect-link",
+    { redirect_url: location.origin + "/connect/done" });
+  btn.disabled = false;
+  if (!ok) { status("zernioStatus", humanError(code, data), true); return; }
+  $("zernioLink").value = data.authUrl || "";
+  show("zernioLinkWrap", Boolean(data.authUrl));
+  status("zernioStatus", "Ссылка готова — отправьте её клиенту. После подключения нажмите «Проверить и сохранить».");
+}
+
+async function zernioSyncAccount() {
+  const btn = $("zernioSyncBtn");
+  btn.disabled = true;
+  status("zernioStatus", "Проверяем в Zernio…");
+  const { ok, code, data } = await zernioApi("POST", "/zernio/sync-account");
+  btn.disabled = false;
+  if (!ok) { status("zernioStatus", humanError(code, data), true); return; }
+  $("f_zernio_account_id").value = data.accountId || "";
+  setDirty(false);   // сервер уже записал accountId в конфиг и перечитал реестр
+  status("zernioStatus", "Аккаунт привязан: " + (data.username || data.accountId) + ".");
+}
+
+async function zernioRegisterWebhook() {
+  const btn = $("zernioWebhookBtn");
+  btn.disabled = true;
+  status("zernioWebhookStatus", "Регистрируем…");
+  const { ok, code, data } = await api("POST", "/admin/zernio/register-webhook");
+  btn.disabled = false;
+  if (!ok) { status("zernioWebhookStatus", humanError(code, data), true); return; }
+  status("zernioWebhookStatus", "Вебхук зарегистрирован: " + (data.url || ""));
+}
+
+async function copyZernioLink() {
+  const input = $("zernioLink");
+  if (!input.value) return;
+  try {
+    await navigator.clipboard.writeText(input.value);
+    status("zernioStatus", "Ссылка скопирована.");
+  } catch (e) {
+    input.select();
+    document.execCommand("copy");
+    status("zernioStatus", "Ссылка скопирована.");
+  }
+}
+
 function toggleNew() {
   const opening = $("newCard").classList.contains("hidden");
   show("newCard", opening);
@@ -762,6 +890,20 @@ async function createClient() {
     pid = token.split(":")[0];
     payload.provider = "tg";
     payload.telegram_bot_token = token;
+  } else if (newProvider === "zernio") {
+    // Ключ клиента Zernio — slug (имя файла); accountId задаётся отдельным полем.
+    pid = $("newPid").value.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(pid)) {
+      status("listStatus", "Ключ клиента — латиница, цифры, дефис или подчёркивание (например nails-studio).", true);
+      return;
+    }
+    const account = $("newZernioAccount").value.trim().toLowerCase();
+    if (!/^[0-9a-f]{24}$/.test(account)) {
+      status("listStatus", "zernio_account_id — 24 hex-символа, скопируйте id аккаунта из дашборда Zernio.", true);
+      return;
+    }
+    payload.provider = "zernio";
+    payload.zernio_account_id = account;
   } else {
     pid = $("newPid").value.trim();
     if (!/^\d{1,20}$/.test(pid)) {
@@ -777,6 +919,7 @@ async function createClient() {
     return;
   }
   $("newPid").value = "";
+  $("newZernioAccount").value = "";
   $("newToken").value = "";
   $("newMgmtToken").value = "";
   show("newCard", false);
@@ -823,7 +966,7 @@ window.addEventListener("beforeunload", (event) => {
 
 // Enter отправляет формы входа и создания клиента; Ctrl/Cmd+S сохраняет настройки.
 $("tokenInput").addEventListener("keydown", (event) => { if (event.key === "Enter") login(); });
-["newPid", "newBusiness", "newToken", "newMgmtToken"].forEach((id) => {
+["newPid", "newZernioAccount", "newBusiness", "newToken", "newMgmtToken"].forEach((id) => {
   $(id).addEventListener("keydown", (event) => { if (event.key === "Enter") createClient(); });
 });
 document.addEventListener("keydown", (event) => {

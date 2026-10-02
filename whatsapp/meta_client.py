@@ -1,4 +1,4 @@
-"""Клиент WhatsApp Cloud API (Graph API) — прямой транспорт без Bird.
+"""Клиент WhatsApp Cloud API (Graph API) — прямой транспорт Meta.
 
 Документация: https://developers.facebook.com/docs/whatsapp/cloud-api
 Отправка: POST https://graph.facebook.com/{версия}/{phone_number_id}/messages
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_GRAPH_VERSION = "v21.0"
 
 # Лимит длины одного WhatsApp-текстового сообщения (ограничение Meta):
-# длинные ответы режем на части, как в Bird-клиенте.
+# длинные ответы режем на части, как в Zernio-клиенте.
 WHATSAPP_TEXT_LIMIT = 4096
 
 # Повтор при разовом сбое Graph API (5xx) и лимите (429).
@@ -93,12 +93,15 @@ class MetaWhatsAppClient:
             transport=transport,  # точка для тестов: подменяется на MockTransport
         )
 
-    async def send_text(self, to: str, text: str) -> None:
+    async def send_text(self, to: str, text: str, conversation_id: str = "") -> None:
         """Отправляет текст получателю `to` (номер в любом формате).
 
         Длинные тексты бьёт на части по лимиту WhatsApp. Бросает MetaError
         при любой неудаче — вызывающий код решает, логировать сбой (ответ
         клиенту) или просто пропустить (уведомление владельцу).
+        `conversation_id` — часть общего интерфейса отправки (нужен Zernio,
+        где ответ уходит в диалог); Meta адресует сообщения по номеру и
+        параметр игнорирует.
         """
         text = text or ""
         if not text:

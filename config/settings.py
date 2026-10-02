@@ -1,7 +1,7 @@
 """Загрузка настроек: .env (секреты, инфраструктура) + конфиг клиента (данные бизнеса).
 
 Порядок применения:
-  1. .env          — ключи Bird, номера, LLM (никогда не хардкодятся в код).
+  1. .env          — ключи провайдера, номера, LLM (никогда не хардкодятся в код).
   2. config/client_config*.yaml — всё, что относится к конкретному бизнесу.
 Под нового клиента правится только конфиг в config/; какой из них грузить —
 переменная CLIENT_CONFIG в .env (по умолчанию client_config.yaml).
@@ -45,24 +45,11 @@ def resolve_config_path() -> Path:
     return CONFIG_DIR / Path(name).name
 
 
-def derive_bird_api_url(api_key: str) -> str | None:
-    """Регион Bird из префикса API-ключа: bk_eu1_* -> eu1, bk_us1_* -> us1.
-
-    Оба дата-плейна — https://{region}.platform.bird.com; неправильный регион
-    отвечает 421 Misdirected Request, поэтому надёжнее выводить URL из ключа.
-    """
-    if api_key.startswith("bk_eu1_"):
-        return "https://eu1.platform.bird.com"
-    if api_key.startswith("bk_us1_"):
-        return "https://us1.platform.bird.com"
-    return None
-
-
 def normalize_phone(raw: str) -> str:
     """Приводит номер к E.164 без '+7 777 (123) 45-67' -> '+77771234567'.
 
     Возвращает строку как есть, если номер не похож на телефон, — валидность
-    проверяется на стороне Bird, здесь только косметика.
+    проверяется на стороне провайдера, здесь только косметика.
     """
     digits = re.sub(r"[^\d+]", "", str(raw))
     if digits.startswith("00"):
@@ -86,16 +73,22 @@ class Settings:
     """Сводные настройки бота: секреты из .env + бизнес-конфиг из YAML."""
 
     # из .env
-    messaging_provider: str  # "bird" или "meta" (MESSAGING_PROVIDER)
+    messaging_provider: str  # "meta", "zernio" или "telegram" (MESSAGING_PROVIDER)
     app_host: str
     app_port: int
     llm_api_url: str
     llm_api_key: str
-    # --- провайдер Bird (используется при messaging_provider="bird") ---
-    bird_api_key: str
-    bird_webhook_secret: str
-    bird_api_url: str
-    whatsapp_sender_number: str  # бизнес-номер (поле "from" при отправке)
+    # --- провайдер Zernio (используется при messaging_provider="zernio") ---
+    # Один API-ключ на всю команду Zernio — общий для всех клиентов.
+    zernio_api_key: str
+    # Секрет вебхука (задаётся при POST /v1/webhooks/settings) — проверка
+    # заголовка X-Zernio-Signature.
+    zernio_webhook_secret: str
+    # База API Zernio (задаётся ZERNIO_BASE_URL, по умолчанию боевая).
+    zernio_base_url: str
+    # accountId подключённого WhatsApp-аккаунта: у single-tenant — из .env,
+    # у мультитенант-клиента — из его yaml (ключ маршрутизации).
+    zernio_account_id: str
     # из .env — Meta Cloud API (при messaging_provider="meta")
     whatsapp_access_token: str   # токен System User с правами whatsapp_business_messaging
     whatsapp_phone_number_id: str  # ID бизнес-номера отправителя в Graph API
@@ -132,6 +125,12 @@ class Settings:
     public_base_url: str = ""
     # Chat id владельца в Telegram (provider=tg) — куда слать уведомления.
     owner_telegram_chat_id: str = ""
+    # --- Zernio: уведомление владельцу шаблоном ---
+    # Вне 24-часового окна WhatsApp свободный текст запрещён, поэтому
+    # уведомление владельцу уходит approved-шаблоном с двумя переменными тела
+    # ({{1}} — отправитель, {{2}} — сообщение). Имя и язык — из yaml клиента.
+    owner_template_name: str = ""
+    owner_template_language: str = ""
     # Служебные ответы бота (передача/таймаут) с переопределением из yaml.
     # Пустая строка = встроенный текст для этого языка; {business_name} подставится.
     fallback_reply_ru: str = ""
@@ -229,7 +228,8 @@ def resolve_clients_dir() -> Path | None:
     папка clients/ с хотя бы одним клиентским yaml (имя файла = цифры,
     файлы-образцы с префиксом "_" не считаются) — так текущий single-tenant
     деплой не переключается, пока в clients/ нет ни одного клиента.
-    Актуально только для MESSAGING_PROVIDER=meta; Bird всегда single-tenant.
+    Актуально только для MESSAGING_PROVIDER=meta/zernio/telegram; реестр
+    обслуживает все три транспорта (провайдер задаёт каждый клиент).
     """
     raw = os.getenv("CLIENTS_DIR", "").strip()
     if raw:
@@ -243,7 +243,10 @@ def resolve_clients_dir() -> Path | None:
                 continue
             if name.startswith("_"):
                 continue
-            if Path(name).stem.isdigit():
+            # Клиентский файл: цифры (Meta phone_number_id / Telegram bot id)
+            # либо slug (Zernio-клиент). Содержимое проверит реестр.
+            stem = Path(name).stem
+            if stem.isdigit() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", stem):
                 return default_dir
     except OSError:
         return None
@@ -261,10 +264,10 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         logger.info("CLIENT_CONFIG задан, но включён мультитенант (clients/) — переменная игнорируется")
     settings = Settings(
         messaging_provider=provider,
-        bird_api_key="",
-        bird_webhook_secret="",
-        bird_api_url="",
-        whatsapp_sender_number="",
+        zernio_api_key=os.getenv("ZERNIO_API_KEY", "").strip(),
+        zernio_webhook_secret=os.getenv("ZERNIO_WEBHOOK_SECRET", "").strip(),
+        zernio_base_url=os.getenv("ZERNIO_BASE_URL", "").strip().rstrip("/"),
+        zernio_account_id="",
         # Глобальный токен — fallback для клиентов с пустым access_token
         # (случай «все номера под партнёрством и одним токеном»).
         whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
@@ -316,6 +319,11 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
             "META_APP_SECRET/META_VERIFY_TOKEN не заданы — WhatsApp-вебхук "
             "/webhooks/meta отключён (доступны только Telegram-клиенты)"
         )
+    if not settings.zernio_webhook_secret:
+        logger.warning(
+            "ZERNIO_WEBHOOK_SECRET не задан — вебхук /webhooks/zernio отключён "
+            "(Zernio-клиенты недоступны)"
+        )
     return settings
 
 
@@ -324,17 +332,17 @@ def get_settings() -> Settings:
 
     Бросает RuntimeError с понятным описанием, если не хватает обязательных полей.
     """
-    provider = (os.getenv("MESSAGING_PROVIDER", "bird").strip().lower() or "bird")
-    if provider not in ("bird", "meta", "telegram"):
+    provider = (os.getenv("MESSAGING_PROVIDER", "meta").strip().lower() or "meta")
+    if provider not in ("meta", "zernio", "telegram"):
         raise RuntimeError(
             f"MESSAGING_PROVIDER={provider!r} не поддерживается: "
-            "ожидается 'bird', 'meta' или 'telegram'"
+            "ожидается 'meta', 'zernio' или 'telegram'"
         )
 
     # Мультитенант: CLIENTS_DIR задан или в clients/ есть хотя бы один клиент.
-    # Bird остаётся строго single-tenant; meta/telegram обслуживают реестр
-    # (в мультитенанте доступны оба транспорта — провайдер задаёт каждый клиент).
-    if provider in ("meta", "telegram"):
+    # meta/zernio/telegram обслуживают реестр (в мультитенанте доступны все
+    # транспорты — провайдер задаёт каждый клиент).
+    if provider in ("meta", "zernio", "telegram"):
         clients_dir = resolve_clients_dir()
         if clients_dir is not None:
             logger.info("Режим мультитенант: реестр клиентов в %s", clients_dir)
@@ -351,21 +359,16 @@ def get_settings() -> Settings:
         reasoning_effort=(cfg.get("llm") or {}).get("reasoning_effort") or None,
     )
 
-    bird_api_key = os.getenv("BIRD_API_KEY", "").strip()
-    bird_api_url = (
-        os.getenv("BIRD_API_URL", "").strip().rstrip("/")
-        or derive_bird_api_url(bird_api_key)
-        or ""
-    )
+    zernio_base_url = os.getenv("ZERNIO_BASE_URL", "").strip().rstrip("/") or "https://zernio.com/api/v1"
 
     owner_phone = _resolve_owner_phone(cfg)
 
     settings = Settings(
         messaging_provider=provider,
-        bird_api_key=os.getenv("BIRD_API_KEY", "").strip(),
-        bird_webhook_secret=os.getenv("BIRD_WEBHOOK_SECRET", "").strip(),
-        bird_api_url=bird_api_url or "",
-        whatsapp_sender_number=normalize_phone(os.getenv("WHATSAPP_SENDER_NUMBER", "").strip()),
+        zernio_api_key=os.getenv("ZERNIO_API_KEY", "").strip(),
+        zernio_webhook_secret=os.getenv("ZERNIO_WEBHOOK_SECRET", "").strip(),
+        zernio_base_url=zernio_base_url,
+        zernio_account_id=str(cfg.get("zernio_account_id") or "").strip(),
         whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
         whatsapp_phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip(),
         meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
@@ -390,6 +393,8 @@ def get_settings() -> Settings:
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
         owner_telegram_chat_id=str(cfg.get("owner_telegram_chat_id") or "").strip(),
+        owner_template_name=str(cfg.get("owner_template_name") or "").strip(),
+        owner_template_language=str(cfg.get("owner_template_language") or "").strip(),
         fallback_reply_ru=str(cfg.get("fallback_reply_ru") or "").strip(),
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
@@ -397,8 +402,8 @@ def get_settings() -> Settings:
     )
 
     # Проверяем обязательные поля до старта, чтобы бот падал сразу с внятной ошибкой.
-    # Общие поля (LLM, бизнес) + свои у каждого провайдера: для Meta Bird-ключи
-    # не требуются и наоборот — так можно держать оба набора в .env и переключаться.
+    # Общие поля (LLM, бизнес) + свои у каждого провайдера: так можно держать
+    # несколько наборов в .env и переключаться переменной MESSAGING_PROVIDER.
     required = {
         "LLM_API_URL (.env)": settings.llm_api_url,
         "LLM_API_KEY (.env)": settings.llm_api_key,
@@ -418,12 +423,11 @@ def get_settings() -> Settings:
             "TELEGRAM_BOT_TOKEN (.env)": settings.telegram_bot_token,
             "PUBLIC_BASE_URL (.env)": settings.public_base_url,
         })
-    else:  # bird
+    else:  # zernio
         required.update({
-            "BIRD_API_KEY (.env)": settings.bird_api_key,
-            "BIRD_WEBHOOK_SECRET (.env)": settings.bird_webhook_secret,
-            "BIRD_API_URL (.env или авто по префиксу ключа)": settings.bird_api_url,
-            "WHATSAPP_SENDER_NUMBER (.env)": settings.whatsapp_sender_number,
+            "ZERNIO_API_KEY (.env)": settings.zernio_api_key,
+            "ZERNIO_WEBHOOK_SECRET (.env)": settings.zernio_webhook_secret,
+            "zernio_account_id (.env или клиентский yaml)": settings.zernio_account_id,
         })
     missing = [name for name, value in required.items() if not value]
     if missing:

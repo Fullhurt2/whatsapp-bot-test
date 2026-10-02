@@ -20,15 +20,17 @@ telegram_webhook_secret) в GET-ответах маскируются ("EAAY…a
 замаскированное значение в PUT означает «оставить прежнее» — токен невозможно
 затереть случайно.
 
-Провайдер клиента (provider: wa|tg) задаётся при создании и не меняется:
-смена транспорта означает другого клиента. Для Telegram-клиента при
-сохранении генерируется telegram_webhook_secret и выполняется best-effort
-setWebhook на PUBLIC_BASE_URL/webhooks/telegram/<bot_id>.
+Провайдер клиента (provider: wa|tg|zernio) задаётся при создании и не
+меняется: смена транспорта означает другого клиента. Для Telegram-клиента
+при сохранении генерируется telegram_webhook_secret и выполняется
+best-effort setWebhook на PUBLIC_BASE_URL/webhooks/telegram/<bot_id>.
 
-Профиль WhatsApp-номера (тексты рядом с именем и аватар) живёт в Meta, а не
-в clients/*.yaml: /admin/clients/{pid}/profile читает и правит его напрямую
-через Graph API. Правится тем же токеном, что и конфиг, — клиент может менять
-профиль своего номера, админ — любого.
+Профиль WhatsApp-номера (тексты рядом с именем и аватар) не хранится в
+clients/*.yaml: /admin/clients/{pid}/profile читает и правит его напрямую
+у провайдера — у Meta через Graph API (токеном клиента), у Zernio через его
+API (accountId клиента + общий ZERNIO_API_KEY). Правится тем же токеном, что
+и конфиг, — клиент может менять профиль своего номера, админ — любого. У
+Telegram-клиентов такого прямого доступа нет (409).
 """
 
 import hmac
@@ -46,11 +48,13 @@ import yaml
 from fastapi import File, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from config.clients import is_client_file, is_valid_phone_number_id, validate_tenant_config
+from config.clients import is_valid_client_id, validate_tenant_config
 from config.settings import Settings
-from whatsapp.meta_client import ABOUT_MAX_LENGTH, MetaError, MetaTimeout, MetaWhatsAppClient
+from whatsapp.meta_client import ABOUT_MAX_LENGTH, MetaWhatsAppClient
+from whatsapp.errors import MessagingError, MessagingTimeout
 from whatsapp.telegram_client import TelegramClient, TelegramError, TelegramTimeout, webhook_url
 from whatsapp.telegram_token import bot_id_from_token
+from whatsapp.zernio_client import ZernioApiClient, ZernioWhatsAppClient
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,9 @@ RESTRICTED_FIELDS = (
     "management_token",
     "telegram_bot_token",
     "telegram_webhook_secret",
+    "zernio_account_id",
+    "owner_template_name",
+    "owner_template_language",
     "llm",
 )
 
@@ -184,7 +191,7 @@ def _management_token_of(clients_dir: Path, pid: str) -> str | None:
 
 
 def _client_provider(clients_dir: Path, pid: str) -> str:
-    """Провайдер клиента из его yaml: "tg" или "wa" (по умолчанию "wa")."""
+    """Провайдер клиента из его yaml: "wa" (по умолчанию), "tg" или "zernio"."""
     path = _client_yaml_path(clients_dir, pid)
     cfg = _read_cfg(path) if path else None
     return str((cfg or {}).get("provider") or "wa").strip().lower() or "wa"
@@ -405,6 +412,23 @@ def _validate_profile_fields(incoming: dict) -> tuple[dict, list[str]]:
 
 
 @asynccontextmanager
+async def _profile_client(state, settings: Settings, clients_dir: Path, pid: str):
+    """Клиент профиля под провайдера клиента: Meta или Zernio.
+
+    У Meta профиль живёт в Graph API (токен WABA), у Zernio — в его API
+    (accountId + общий ZERNIO_API_KEY). Оба клиента реализуют один интерфейс
+    get/update_business_profile + upload_profile_photo, поэтому роуты панели
+    о транспорте не знают. None — править нечем (нет токена/accountId).
+    """
+    if _client_provider(clients_dir, pid) == "zernio":
+        async with _profile_zernio_client(state, settings, clients_dir, pid) as client:
+            yield client
+        return
+    async with _profile_meta_client(state, settings, clients_dir, pid) as client:
+        yield client
+
+
+@asynccontextmanager
 async def _profile_meta_client(state, settings: Settings, clients_dir: Path, pid: str):
     """Meta-клиент для правки профиля: бандл клиента или одноразовый.
 
@@ -431,6 +455,38 @@ async def _profile_meta_client(state, settings: Settings, clients_dir: Path, pid
         await client.close()
 
 
+@asynccontextmanager
+async def _profile_zernio_client(state, settings: Settings, clients_dir: Path, pid: str):
+    """Zernio-клиент для правки профиля: accountId из yaml + общий API-ключ.
+
+    Ключ Zernio один на всю команду (ZERNIO_API_KEY), поэтому профиль правится
+    даже там, где у клиента своего токена нет; править нечем только если в
+    yaml не задан zernio_account_id.
+    """
+    path = _client_yaml_path(clients_dir, pid)
+    cfg = _read_cfg(path) if path else None
+    account_id = str((cfg or {}).get("zernio_account_id") or "").strip().lower()
+    if not account_id:
+        yield None
+        return
+    await state.refresh_tenants()
+    bundle = state.tenants.get(account_id)
+    if bundle is not None and isinstance(bundle.sender, ZernioWhatsAppClient):
+        yield bundle.sender
+        return
+    factory = getattr(state, "sender_factory", None)
+    if factory is not None:
+        client = factory(replace(settings, zernio_account_id=account_id))
+    else:
+        client = ZernioWhatsAppClient(
+            settings.zernio_api_key, account_id, base_url=settings.zernio_base_url,
+        )
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
 def _make_meta_client(state, settings: Settings, access_token: str, pid: str) -> MetaWhatsAppClient:
     """Одноразовый Meta-клиент номера — через фабрику приложения, если она есть.
 
@@ -447,15 +503,57 @@ def _make_meta_client(state, settings: Settings, access_token: str, pid: str) ->
     ))
 
 
-def _meta_failure(exc: MetaError | MetaTimeout) -> JSONResponse:
-    """Ошибка Meta наружу: 504 на таймаут, 502 на отказ API — с текстом Meta.
+def _profile_failure(exc: MessagingError | MessagingTimeout) -> JSONResponse:
+    """Ошибка профиля наружу: 504 на таймаут, 502 на отказ API — с текстом.
 
-    Текст показываем в панели как есть: в нём Meta пишет, чего именно не
-    хватило (чаще всего — прав токена на whatsapp_business_management).
+    Текст показываем в панели как есть: провайдер пишет, чего именно не
+    хватило (чаще всего — прав токена на whatsapp_business_management у Meta
+    или accountId, недоступного этому API-ключу у Zernio).
     """
-    if isinstance(exc, MetaTimeout):
+    if isinstance(exc, MessagingTimeout):
         return JSONResponse(status_code=504, content={"error": str(exc)})
     return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+# --- Zernio: подключение аккаунта из панели -----------------------------------
+
+
+def _zernio_api_client(state, settings: Settings) -> ZernioApiClient:
+    """Клиент Zernio на уровне API-ключа (профили/аккаунты/ссылка/вебхук).
+
+    Фабрика на state (zernio_api_factory) — точка подмены транспорта в тестах;
+    без неё собираем клиент напрямую из настроек.
+    """
+    factory = getattr(state, "zernio_api_factory", None)
+    if factory is not None:
+        return factory(settings)
+    return ZernioApiClient(settings.zernio_api_key, base_url=settings.zernio_base_url)
+
+
+def _client_editable_cfg(clients_dir: Path, pid: str, cfg: dict,
+                         fields: dict, actor: str, action: str, state) -> dict:
+    """Дописывает поля в yaml клиента: бэкап -> атомарная запись -> аудит.
+
+    Возвращает итоговый конфиг. Значения — только служебные id (без секретов),
+    поэтому в аудит идут имена полей, как и везде.
+    """
+    path = _client_yaml_path(clients_dir, pid)
+    if path is None:
+        raise FileNotFoundError(pid)
+    merged = dict(cfg)
+    merged.update(fields)
+    _backup(path, clients_dir, pid)
+    _atomic_write(path, merged)
+    _audit(clients_dir, actor, action, pid, cfg, merged)
+    return merged
+
+
+def _validate_redirect_url(raw: str) -> str | None:
+    """Абсолютный http(s) адрес возврата или None (проверяем до вызова Zernio)."""
+    url = str(raw or "").strip()
+    if not url.startswith(("https://", "http://")):
+        return None
+    return url
 
 
 # --- роуты --------------------------------------------------------------------
@@ -532,9 +630,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
             if not name.lower().endswith((".yaml", ".yml")) or name.startswith("_"):
                 continue
             pid = Path(name).stem
-            if not is_valid_phone_number_id(pid):
+            if not is_valid_client_id(pid):
                 skipped.append({"file": name, "problems": [
-                    "имя файла должно быть phone_number_id (цифры)",
+                    "имя файла — цифры (Meta phone_number_id / Telegram bot id) "
+                    "или slug (Zernio)",
                 ]})
                 continue
             cfg = _read_cfg(clients_dir / name)
@@ -550,6 +649,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
                 "business_name": str(cfg.get("business_name") or ""),
                 "config_file": name,
                 "provider": str(cfg.get("provider") or "wa").strip().lower() or "wa",
+                "zernio_account_id": str(cfg.get("zernio_account_id") or "").strip(),
                 "has_own_token": bool(str(cfg.get("access_token") or "").strip()),
                 "has_management_token": bool(str(cfg.get("management_token") or "").strip()),
                 "owner_phone": tenant.owner_phone or "",
@@ -588,10 +688,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
-        if not is_valid_phone_number_id(pid):
+        if not is_valid_client_id(pid):
             return JSONResponse(
                 status_code=400,
-                content={"error": "phone_number_id должен состоять из цифр"},
+                content={"error": "ключ клиента — цифры (Meta/TG) или slug (Zernio)"},
             )
         raw_body = await request.body()
         if len(raw_body) > MAX_BODY_BYTES:
@@ -682,10 +782,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
     @app.get("/admin/clients/{pid}/profile")
     async def get_client_profile(pid: str, request: Request):
-        """Профиль WhatsApp-номера из Meta — что сейчас видно рядом с именем.
+        """Профиль WhatsApp-номера (Meta или Zernio) — что видно рядом с именем.
 
-        Кэша нет: источник истины — Meta, и панель зовёт его на каждый заход
-        в редактор. Отказ Meta уходит клиенту как 502 с её текстом.
+        Кэша нет: источник истины — провайдер, и панель зовёт его на каждый
+        заход в редактор. Отказ провайдера уходит клиенту как 502 с его текстом.
         """
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
@@ -695,18 +795,18 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if _client_provider(clients_dir, pid) == "tg":
             return JSONResponse(
                 status_code=409,
-                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов (wa/zernio)"},
             )
-        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
-            if meta is None:
+        async with _profile_client(state, settings, clients_dir, pid) as profile_client:
+            if profile_client is None:
                 return JSONResponse(
                     status_code=409,
-                    content={"error": "у клиента нет токена для работы с профилем"},
+                    content={"error": "у клиента нет доступа для работы с профилем"},
                 )
             try:
-                profile = await meta.get_business_profile()
-            except (MetaError, MetaTimeout) as exc:
-                return _meta_failure(exc)
+                profile = await profile_client.get_business_profile()
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
         return {
             key: profile.get(key, [] if key == "websites" else "")
             for key in PROFILE_RESPONSE_FIELDS
@@ -714,10 +814,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
     @app.patch("/admin/clients/{pid}/profile")
     async def patch_client_profile(pid: str, request: Request):
-        """Текстовые поля профиля: валидация -> PATCH в Meta -> строка аудита.
+        """Текстовые поля профиля: валидация -> запись провайдеру -> аудит.
 
         Конфиг клиента при этом не меняется — в clients/*.yaml профиля нет,
-        профиль живёт в Meta, и source of truth там.
+        профиль живёт у провайдера (Meta/Zernio), и source of truth там.
         """
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
@@ -727,7 +827,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if _client_provider(clients_dir, pid) == "tg":
             return JSONResponse(
                 status_code=409,
-                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов (wa/zernio)"},
             )
         raw_body = await request.body()
         if len(raw_body) > MAX_BODY_BYTES:
@@ -759,16 +859,16 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(
                 status_code=400, content={"error": "нечего менять — пришлите хотя бы одно поле"},
             )
-        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
-            if meta is None:
+        async with _profile_client(state, settings, clients_dir, pid) as profile_client:
+            if profile_client is None:
                 return JSONResponse(
                     status_code=409,
-                    content={"error": "у клиента нет токена для работы с профилем"},
+                    content={"error": "у клиента нет доступа для работы с профилем"},
                 )
             try:
-                await meta.update_business_profile(payload)
-            except (MetaError, MetaTimeout) as exc:
-                return _meta_failure(exc)
+                await profile_client.update_business_profile(payload)
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
         actor = "admin" if role == "admin" else f"client:{pid}"
         _audit(clients_dir, actor, "profile", pid, {}, payload)
         logger.info("Админ-API: профиль %s обновлён (%s): %s", pid, role, ", ".join(sorted(payload)))
@@ -777,10 +877,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
     @app.post("/admin/clients/{pid}/profile/photo")
     async def upload_client_profile_photo(pid: str, request: Request,
                                           file: UploadFile = File(...)):
-        """Аватар номера: файл уходит в Meta и здесь нигде не остаётся.
+        """Аватар номера: файл уходит провайдеру и здесь нигде не остаётся.
 
-        Расширение для Meta берём из content-type, а не из имени файла: в
-        имени может быть что угодно, а Graph API ждёт имя с .jpg/.png/.webp.
+        Расширение берём из content-type, а не из имени файла: в имени может
+        быть что угодно, а провайдер ждёт имя с .jpg/.png/.webp.
         """
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
@@ -790,7 +890,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if _client_provider(clients_dir, pid) == "tg":
             return JSONResponse(
                 status_code=409,
-                content={"error": "профиль и аватар есть только у WhatsApp-клиентов"},
+                content={"error": "профиль и аватар есть только у WhatsApp-клиентов (wa/zernio)"},
             )
         content_type = (file.content_type or "").lower()
         suffix = PROFILE_PHOTO_TYPES.get(content_type)
@@ -806,19 +906,181 @@ def register_admin_api(app, settings: Settings, state) -> None:
             )
         if not content:
             return JSONResponse(status_code=400, content={"error": "файл пустой"})
-        async with _profile_meta_client(state, settings, clients_dir, pid) as meta:
-            if meta is None:
+        async with _profile_client(state, settings, clients_dir, pid) as profile_client:
+            if profile_client is None:
                 return JSONResponse(
                     status_code=409,
-                    content={"error": "у клиента нет токена для работы с профилем"},
+                    content={"error": "у клиента нет доступа для работы с профилем"},
                 )
             try:
-                await meta.upload_profile_photo(
+                await profile_client.upload_profile_photo(
                     f"whatsapp-profile{suffix}", content, content_type,
                 )
-            except (MetaError, MetaTimeout) as exc:
-                return _meta_failure(exc)
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
         actor = "admin" if role == "admin" else f"client:{pid}"
         _audit(clients_dir, actor, "profile_photo", pid, {}, {"photo": "avatar"})
         logger.info("Админ-API: аватар %s обновлён (%s)", pid, role)
         return {"ok": True}
+
+    # --- Zernio: подключение аккаунта без скриптов --------------------------
+
+    def _zernio_guard(pid: str, request: Request):
+        """Общая проверка для Zernio-роутов клиента: (role, cfg, ошибка-ответ)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return None, None, JSONResponse(status_code=error, content={"error": "нет доступа"})
+        path = _client_yaml_path(clients_dir, pid)
+        if path is None:
+            return None, None, JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        if _client_provider(clients_dir, pid) != "zernio":
+            return None, None, JSONResponse(
+                status_code=409,
+                content={"error": "подключение Zernio доступно только клиентам provider: zernio"},
+            )
+        if not settings.zernio_api_key:
+            return None, None, JSONResponse(
+                status_code=409,
+                content={"error": "не задан ZERNIO_API_KEY в .env"},
+            )
+        return role, _read_cfg(path) or {}, None
+
+    @app.post("/admin/clients/{pid}/zernio/connect-link")
+    async def zernio_connect_link(pid: str, request: Request):
+        """Ссылка Embedded Signup для клиента: профиль создаётся сам при нужде.
+
+        Тело: {"redirect_url": "..."} — куда вернуть клиента (обычно наш
+        /connect/done). Профиль Zernio клиента берём из yaml (zernio_profile_id),
+        если его нет — создаём и сохраняем. Возвращаем authUrl: отправьте его
+        клиенту; после подключения нажмите «Проверить подключение».
+        """
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        if not isinstance(incoming, dict):
+            return JSONResponse(status_code=400, content={"error": "ожидается JSON-объект"})
+        redirect_url = _validate_redirect_url(incoming.get("redirect_url") or "")
+        if not redirect_url:
+            redirect_url = _validate_redirect_url(
+                f"{settings.public_base_url}/connect/done" if settings.public_base_url else ""
+            )
+        if not redirect_url:
+            return JSONResponse(status_code=400, content={"error": (
+                "не задан redirect_url и PUBLIC_BASE_URL — некуда вернуть клиента "
+                "после подключения")})
+
+        client = _zernio_api_client(state, settings)
+        try:
+            profile_id = str(cfg.get("zernio_profile_id") or "").strip()
+            if not profile_id:
+                name = str(cfg.get("business_name") or "").strip() or pid
+                profile = await client.create_profile(name)
+                profile_id = str(profile.get("_id") or "").strip()
+                if not profile_id:
+                    return JSONResponse(status_code=502, content={
+                        "error": "Zernio не вернул id созданного профиля"})
+                actor = "admin" if role == "admin" else f"client:{pid}"
+                cfg = _client_editable_cfg(
+                    clients_dir, pid, cfg, {"zernio_profile_id": profile_id},
+                    actor, "zernio_profile", state,
+                )
+                await state.refresh_tenants()
+            auth_url = await client.whatsapp_connect_url(
+                profile_id, redirect_url,
+                onboarding="api", hosted=True,
+                brand_name=str(cfg.get("business_name") or "").strip(),
+            )
+        except (MessagingError, MessagingTimeout) as exc:
+            return _profile_failure(exc)
+        finally:
+            await client.close()
+        if not auth_url:
+            return JSONResponse(status_code=502, content={"error": "Zernio не вернул ссылку подключения"})
+        return {"ok": True, "authUrl": auth_url, "profileId": profile_id,
+                "redirectUrl": redirect_url}
+
+    @app.post("/admin/clients/{pid}/zernio/sync-account")
+    async def zernio_sync_account(pid: str, request: Request):
+        """Сохраняет accountId клиента из Zernio после подключения по ссылке.
+
+        Смотрит аккаунты профиля клиента (zernio_profile_id) и, если там ровно
+        один WhatsApp-аккаунт, пишет его _id в yaml как zernio_account_id.
+        """
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        profile_id = str(cfg.get("zernio_profile_id") or "").strip()
+        if not profile_id:
+            return JSONResponse(status_code=409, content={"error": (
+                "у клиента нет zernio_profile_id — сначала сгенерируйте ссылку "
+                "подключения")})
+        client = _zernio_api_client(state, settings)
+        try:
+            accounts = await client.list_accounts(profile_id)
+        except (MessagingError, MessagingTimeout) as exc:
+            return _profile_failure(exc)
+        finally:
+            await client.close()
+        whatsapp = [
+            a for a in accounts
+            if str(a.get("platform") or "").lower() == "whatsapp" and a.get("_id")
+        ]
+        if not whatsapp:
+            return JSONResponse(status_code=409, content={"error": (
+                "в этом профиле Zernio пока нет подключённого WhatsApp-номера — "
+                "отправьте клиенту ссылку и повторите после подключения")})
+        if len(whatsapp) > 1:
+            return JSONResponse(status_code=409, content={"error": (
+                "в профиле больше одного WhatsApp-аккаунта — оставьте один "
+                "или впишите zernio_account_id вручную")})
+        account_id = str(whatsapp[0]["_id"]).strip().lower()
+        actor = "admin" if role == "admin" else f"client:{pid}"
+        _client_editable_cfg(
+            clients_dir, pid, cfg, {"zernio_account_id": account_id},
+            actor, "zernio_account", state,
+        )
+        await state.refresh_tenants()
+        logger.info("Админ-API: Zernio-аккаунт %s привязан к %s", account_id, pid)
+        return {"ok": True, "accountId": account_id,
+                "username": str(whatsapp[0].get("username") or "")}
+
+    @app.post("/admin/zernio/register-webhook")
+    async def zernio_register_webhook(request: Request):
+        """Регистрирует вебхук сервиса на /webhooks/zernio (только админ).
+
+        Секрет берётся из ZERNIO_WEBHOOK_SECRET (env) — тот же, которым бот
+        проверяет подпись. Нужен ZERNIO_WEBHOOK_SECRET и PUBLIC_BASE_URL.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid=None)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нужен админ-токен"})
+        if role != "admin":
+            return JSONResponse(status_code=403, content={"error": "только для администратора"})
+        if not settings.zernio_api_key:
+            return JSONResponse(status_code=409, content={"error": "не задан ZERNIO_API_KEY в .env"})
+        if not settings.zernio_webhook_secret:
+            return JSONResponse(status_code=409, content={"error": (
+                "не задан ZERNIO_WEBHOOK_SECRET в .env — задайте и перезапустите сервис")})
+        if not settings.public_base_url:
+            return JSONResponse(status_code=409, content={"error": (
+                "не задан PUBLIC_BASE_URL в .env — вебхук должен указывать на "
+                "публичный адрес сервиса")})
+        target = f"{settings.public_base_url}/webhooks/zernio"
+        client = _zernio_api_client(state, settings)
+        try:
+            webhook = await client.create_webhook(
+                "whatsapp-bot", target, settings.zernio_webhook_secret,
+                ["message.received"],
+            )
+        except (MessagingError, MessagingTimeout) as exc:
+            return _profile_failure(exc)
+        finally:
+            await client.close()
+        logger.info("Админ-API: вебхук Zernio зарегистрирован на %s", target)
+        return {"ok": True, "url": target,
+                "webhookId": str(webhook.get("_id") or "")}
+

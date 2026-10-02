@@ -1,14 +1,14 @@
-"""Точка входа: FastAPI-сервер, принимающий вебхуки WhatsApp (Bird или Meta).
+"""Точка входа: FastAPI-сервер, принимающий вебхуки WhatsApp (Zernio или Meta).
 
 Запуск: python main.py
 Все настройки берутся из .env; конфиги клиентов — из config/ (single-tenant,
 CLIENT_CONFIG) или из папки clients/ (мультитенант, один файл на клиента,
-имя файла = phone_number_id; включается переменной CLIENTS_DIR или наличием
+имя файла = ключ клиента; включается переменной CLIENTS_DIR или наличием
 непустой папки clients/).
 
-Схема работы: провайдер POST'ит входящие сообщения на /webhooks/{bird|meta}.
-Мы проверяем подпись, сразу отвечаем 200 (у провайдера лимит 15 секунд на
-ack) и обрабатываем сообщение в фоновой задаче: ключевые слова -> LLM ->
+Схема работы: провайдер POST'ит входящие сообщения на /webhooks/{zernio|meta}.
+Мы проверяем подпись, сразу отвечаем 200 (у провайдера лимит на быстрый ack)
+и обрабатываем сообщение в фоновой задаче: ключевые слова -> LLM ->
 [HANDOFF] -> ответ клиенту и уведомление владельцу.
 """
 
@@ -25,14 +25,13 @@ from typing import Callable
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from admin.api import register_admin_api
 from config.clients import ClientRegistry
 from config.settings import Settings, get_settings
 from handlers.message_handler import MessageProcessor
 from services.llm_client import LLMClient
-from whatsapp.bird_client import BirdWhatsAppClient
 from whatsapp.meta_client import MetaWhatsAppClient
 from whatsapp.meta_payload import parse_meta_events
 from whatsapp.meta_security import (
@@ -46,12 +45,12 @@ from whatsapp.meta_security import (
 from whatsapp.telegram_client import TelegramClient
 from whatsapp.telegram_payload import parse_telegram_update
 from whatsapp.telegram_token import bot_id_from_token
-from whatsapp.webhook_payload import parse_incoming_event
-from whatsapp.webhook_security import (
-    HEADER_SIGNATURE,
-    HEADER_TIMESTAMP,
-    HEADER_WEBHOOK_ID,
-    verify_signature,
+from whatsapp.zernio_client import ZernioWhatsAppClient
+from whatsapp.zernio_payload import parse_zernio_events
+from whatsapp.zernio_security import (
+    HEADER_SIGNATURE as ZERNIO_HEADER_SIGNATURE,
+    HEADER_SIGNATURE_LEGACY as ZERNIO_HEADER_SIGNATURE_LEGACY,
+    verify_zernio_signature,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,8 +59,8 @@ BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "bot.log"
 
-# Дедупликация доставок Bird: они приходят at-least-once, при ретрае у
-# доставки тот же webhook-id — второй раз отвечать клиенту нельзя.
+# Дедупликация доставок: провайдеры доставляют at-least-once, при ретрае у
+# события тот же id — второй раз отвечать клиенту нельзя.
 # Храним только последние id, чтобы словарь не рос бесконечно.
 SEEN_WEBHOOK_IDS_MAX = 4096
 
@@ -106,18 +105,20 @@ def build_meta_sender(settings: Settings) -> MetaWhatsAppClient:
 
 
 def build_sender(settings: Settings):
-    """Клиент отправки под провайдера клиента (meta / telegram / bird).
+    """Клиент отправки под провайдера клиента (meta / zernio / telegram).
 
     Провайдер определяет Settings клиента: у WhatsApp-клиентов reestr ставит
-    messaging_provider="meta", у Telegram — "telegram". Все клиенты реализуют
-    один интерфейс send_text(to, text)/close(), поэтому обработчик и
-    уведомления владельцу от транспорта не зависят.
+    messaging_provider="meta" или "zernio", у Telegram — "telegram". Все
+    клиенты реализуют один интерфейс send_text(to, text, conversation_id)/close(),
+    поэтому обработчик и уведомления владельцу от транспорта не зависят.
     """
     if settings.messaging_provider == "telegram":
         return TelegramClient(settings.telegram_bot_token)
-    if settings.messaging_provider == "bird":
-        return BirdWhatsAppClient(
-            settings.bird_api_key, settings.bird_api_url, settings.whatsapp_sender_number
+    if settings.messaging_provider == "zernio":
+        return ZernioWhatsAppClient(
+            settings.zernio_api_key,
+            settings.zernio_account_id,
+            base_url=settings.zernio_base_url,
         )
     return build_meta_sender(settings)
 
@@ -162,15 +163,15 @@ class WebhookState:
         self.settings = settings
         self._seen_webhook_ids: OrderedDict[str, None] = OrderedDict()
         self._reload_lock = asyncio.Lock()
-        # Мультитенант обслуживает оба транспорта: WhatsApp-клиенты (meta) и
-        # Telegram-клиенты (telegram) живут в одном реестре clients/.
+        # Мультитенант обслуживает все транспорты: WhatsApp-клиенты (meta или
+        # zernio) и Telegram-клиенты (telegram) живут в одном реестре clients/.
         self.multitenant = bool(settings.clients_dir) and settings.messaging_provider in (
-            "meta", "telegram",
+            "meta", "zernio", "telegram",
         )
 
         if not self.multitenant:
             # Single-tenant: один LLM-клиент и один транспорт на всё приложение.
-            # Провайдер задаёт MESSAGING_PROVIDER (bird / meta / telegram).
+            # Провайдер задаёт MESSAGING_PROVIDER (meta / zernio / telegram).
             self.registry = None
             self.tenants: dict[str, TenantBundle] = {}
             self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
@@ -237,11 +238,12 @@ class WebhookState:
     # --- маршрутизация -----------------------------------------------------------
 
     async def processor_for(self, inbound):
-        """Процессор клиента для входящего сообщения по его phone_number_id.
+        """Процессор клиента для входящего сообщения по ключу маршрутизации.
 
         В single-tenant процессор всегда один. В мультитенанте перед поиском
         сверяется снапшот папки clients/ (hot-reload), затем клиент ищется
-        по inbound.phone_number_id; None — номер не зарегистрирован.
+        по inbound.phone_number_id (у Meta — ID бизнес-номера, у Zernio —
+        accountId); None — номер/аккаунт не зарегистрирован.
         """
         if not self.multitenant:
             return self.processor
@@ -254,9 +256,9 @@ class WebhookState:
     def seen_before(self, webhook_id: str) -> bool:
         """True, если доставку с таким id уже обрабатывали.
 
-        Регистрирует новую доставку и вытесняет самые старые id — кэш
-        ограничен, чтобы не рос бесконечно. Для Meta сюда идёт id сообщения
-        (wamid...), для Bird — заголовок webhook-id.
+        Регистрирует только последние id, чтобы кэш не рос бесконечно. Для Meta
+        сюда идёт id сообщения (wamid...), для Zernio — id события/сообщения,
+        для Telegram — update_id.
         """
         if not webhook_id:
             return False
@@ -277,16 +279,19 @@ class WebhookState:
         здесь: сбой обработки не должен ронять воркер.
         """
         processor = processor or self.processor
+        conversation_id = getattr(inbound, "conversation_id", "")
         try:
             if inbound.text.strip("/").casefold() == "start":
-                await processor.handle_greeting(inbound.phone)
+                await processor.handle_greeting(inbound.phone, conversation_id=conversation_id)
             elif inbound.text:
                 await processor.handle_incoming(
-                    inbound.phone, inbound.display_name, inbound.text
+                    inbound.phone, inbound.display_name, inbound.text,
+                    conversation_id=conversation_id,
                 )
             else:
                 await processor.handle_non_text(
-                    inbound.phone, inbound.display_name, inbound.content_kind
+                    inbound.phone, inbound.display_name, inbound.content_kind,
+                    conversation_id=conversation_id,
                 )
         except Exception:
             # Падение обработки не должно крашить сервер: провайдер при не-2xx
@@ -308,9 +313,9 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     settings передаётся явно — так тесты подсовывают тестовые настройки
     без .env (см. tests/), а при запуске python main.py их даёт get_settings().
     Провайдер выбирается переменной MESSAGING_PROVIDER: "meta" -> /webhooks/meta
-    (Graph API), "bird" -> /webhooks/bird (Standard Webhooks). Мультитенант
-    включён, если settings.clients_dir задан: тогда маршрутизация идёт по
-    phone_number_id из clients/ (sender_factory — точка подмены для тестов).
+    (Graph API), "zernio" -> /webhooks/zernio, "telegram" -> /webhooks/telegram.
+    Мультитенант включён, если settings.clients_dir задан: тогда маршрутизация
+    идёт по ключу клиента из clients/ (sender_factory — точка подмены для тестов).
     """
     if settings.clients_dir:
         logger.info(
@@ -335,23 +340,30 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     app = FastAPI(title="whatsapp-bot-test", lifespan=lifespan)
 
     if state.multitenant:
-        # В мультитенанте доступны оба транспорта: WhatsApp-вебхук поднимаем
-        # только если заданы Meta-секреты (иначе деплой чисто для Telegram),
-        # Telegram-вебхук — всегда (у каждого бота свой токен).
+        # В мультитенанте доступны все транспорты: WhatsApp-вебхук поднимаем
+        # только если заданы секреты провайдера (иначе деплой чисто для
+        # Telegram), Telegram-вебхук — всегда (у каждого бота свой токен).
         if settings.meta_app_secret and settings.meta_verify_token:
             _register_meta_webhook(app, settings, state)
         else:
             logger.warning(
-                "WhatsApp-вебхук не зарегистрирован: не заданы META_APP_SECRET/"
-                "META_VERIFY_TOKEN — обслуживаются только Telegram-клиенты"
+                "Вебхук Meta не зарегистрирован: не заданы META_APP_SECRET/"
+                "META_VERIFY_TOKEN — Meta-клиенты не обслуживаются"
+            )
+        if settings.zernio_webhook_secret:
+            _register_zernio_webhook(app, settings, state)
+        else:
+            logger.warning(
+                "Вебхук Zernio не зарегистрирован: не задан ZERNIO_WEBHOOK_SECRET "
+                "— Zernio-клиенты не обслуживаются"
             )
         _register_telegram_webhook(app, settings, state)
     elif settings.messaging_provider == "meta":
         _register_meta_webhook(app, settings, state)
+    elif settings.messaging_provider == "zernio":
+        _register_zernio_webhook(app, settings, state)
     elif settings.messaging_provider == "telegram":
         _register_telegram_webhook(app, settings, state)
-    else:
-        _register_bird_webhook(app, settings, state)
 
     # Админ-API и панель /admin: только в мультитенанте и с заданным
     # ADMIN_TOKEN (иначе роуты не существуют — см. admin/api.py).
@@ -375,6 +387,23 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         if state.multitenant:
             return _multitenant_privacy()
         return _single_tenant_privacy(settings)
+
+    @app.get("/connect/done")
+    async def connect_done():
+        """Страница возврата после Embedded Signup (redirect_url у Zernio).
+
+        Клиент попадает сюда из браузера после подключения номера: показываем
+        нейтральное «готово, закройте окно». Сам accountId панель забирает из
+        Zernio кнопкой «Проверить подключение».
+        """
+        return HTMLResponse(
+            "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+            "<title>Готово</title></head><body style='font-family:sans-serif;"
+            "max-width:32rem;margin:4rem auto;text-align:center'>"
+            "<h1>Подключение завершено</h1>"
+            "<p>Номер подключён. Можно закрыть эту страницу и вернуться в бот.</p>"
+            "</body></html>"
+        )
 
     return app
 
@@ -421,45 +450,51 @@ def _multitenant_privacy() -> dict:
     }
 
 
-def _register_bird_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
-    @app.post("/webhooks/bird")
-    async def bird_webhook(request: Request, background_tasks: BackgroundTasks):
-        """Приём вебхука Bird: проверка подписи -> ack 200 -> обработка в фоне.
+def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
+    @app.post("/webhooks/zernio")
+    async def zernio_webhook(request: Request, background_tasks: BackgroundTasks):
+        """Приём вебхука Zernio: проверка X-Zernio-Signature -> ack 200 -> фон.
 
-        Bird ждёт 2xx за 15 секунд, а обработка (LLM + отправка) может
+        Zernio ждёт 2xx за 5 секунд, а обработка (LLM + отправка) может
         длиться дольше — поэтому отвечаем 200 сразу, а полный сценарий
-        уходит в фоновую задачу.
+        уходит в фоновую задачу. Дедуп — по id сообщения (доставка
+        at-least-once): повтор вебхука не должен слать ответ второй раз.
         """
         raw_body = await request.body()
-        signature_ok = verify_signature(
-            secret=settings.bird_webhook_secret,
-            webhook_id=request.headers.get(HEADER_WEBHOOK_ID, ""),
-            timestamp=request.headers.get(HEADER_TIMESTAMP, ""),
-            signature_header=request.headers.get(HEADER_SIGNATURE, ""),
-            raw_body=raw_body,
+        signature = (
+            request.headers.get(ZERNIO_HEADER_SIGNATURE, "")
+            or request.headers.get(ZERNIO_HEADER_SIGNATURE_LEGACY, "")
         )
-        if not signature_ok:
-            # Чужой запрос: Bird такое не пришлёт, отвечает 401 без ретрая.
-            logger.warning("Вебхук отклонён: подпись не прошла проверку")
+        if not verify_zernio_signature(settings.zernio_webhook_secret, raw_body, signature):
+            logger.warning("Вебхук Zernio отклонён: подпись не прошла проверку")
             return JSONResponse(status_code=401, content={"error": "invalid signature"})
-
-        webhook_id = request.headers.get(HEADER_WEBHOOK_ID, "")
-        if state.seen_before(webhook_id):
-            return {"ok": True, "deduplicated": True}
 
         try:
             payload = json.loads(raw_body)
         except ValueError:
-            # Битый JSON от Bird бессмысленно ретраить — ack, чтобы не было ретрая.
-            logger.warning("Вебхук с невалидным JSON: %d байт", len(raw_body))
+            # Битый JSON бессмысленно ретраить — ack, чтобы не было ретрая.
+            logger.warning("Вебхук Zernio с невалидным JSON: %d байт", len(raw_body))
             return {"ok": True}
 
-        inbound = parse_incoming_event(payload)
-        if inbound is None:
-            # Не наше событие (статусы доставки и т.п.) — молча подтверждаем.
+        inbound_messages = parse_zernio_events(payload)
+        if not inbound_messages:
+            # Статусы доставки и прочие не-наши события — подтверждаем молча.
             return {"ok": True}
 
-        background_tasks.add_task(state.handle_event, inbound)
+        for inbound in inbound_messages:
+            if state.seen_before(inbound.message_id or ""):
+                continue
+            processor = await state.processor_for(inbound)
+            if processor is None:
+                # Аккаунт не зарегистрирован: не наш клиент — ack, чтобы
+                # Zernio не ретраил.
+                logger.warning(
+                    "Событие для незарегистрированного аккаунта Zernio: "
+                    "account_id=%s — подтверждено без обработки",
+                    inbound.phone_number_id or inbound.account_id or "-",
+                )
+                continue
+            background_tasks.add_task(state.handle_event, inbound, processor)
         return {"ok": True}
 
 
@@ -488,7 +523,7 @@ def _register_meta_webhook(app: FastAPI, settings: Settings, state: WebhookState
     async def meta_webhook(request: Request, background_tasks: BackgroundTasks):
         """Приём вебхука Meta: проверка X-Hub-Signature-256 -> ack 200 -> фон.
 
-        Требование Meta то же, что у Bird: ответить 2xx быстро, обработка —
+        Требование Meta то же, что у Zernio: ответить 2xx быстро, обработка —
         в фоновой задаче (LLM + отправка могут длиться дольше).
         """
         raw_body = await request.body()

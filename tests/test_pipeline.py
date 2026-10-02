@@ -1,5 +1,5 @@
 # Тесты пайплайна обработки (адаптация tests/test_history.py из chat-bot-demo):
-# Telegram-фейки (FakeUpdate/FakeBot) заменены на FakeBird + handle_incoming.
+# Telegram-фейки (FakeUpdate/FakeBot) заменены на FakeBird (фейковый sender) + handle_incoming.
 # Запуск: python tests/test_pipeline.py
 
 import asyncio
@@ -24,16 +24,16 @@ CLIENT_PHONE = "+77770000001"
 
 # ---------- Фейки ----------
 class FakeBird:
-    """Подменяет BirdWhatsAppClient: собирает отправки, умеет ломаться."""
+    """Подменяет ZernioWhatsAppClient: собирает отправки, умеет ломаться."""
 
     def __init__(self):
         self.sent = []          # список (to, text)
-        self.fail_for = set()   # номера, для которых send_text бросает BirdError
+        self.fail_for = set()   # номера, для которых send_text бросает MessagingError
 
-    async def send_text(self, to, text):
+    async def send_text(self, to, text, conversation_id=""):
         if to in self.fail_for:
-            # Тот же тип исключения, что у реального клиента: путь except BirdError.
-            raise MessagingError("fake bird failure")
+            # Тот же тип исключения, что у реального клиента: путь except MessagingError.
+            raise MessagingError("fake zernio failure")
         self.sent.append((to, text))
 
 
@@ -69,16 +69,16 @@ SlowStubLLM = lambda replies: StubLLM(replies, delay=0.15)
 # Настройки целиком из кода: тесты не зависят от .env и конфига клиента.
 def _base_settings():
     return Settings(
-        messaging_provider="bird",
+        messaging_provider="zernio",
         whatsapp_access_token="",
         whatsapp_phone_number_id="",
         meta_app_secret="",
         meta_verify_token="",
         meta_graph_version="v21.0",
-        bird_api_key="test-key",
-        bird_webhook_secret="whsec_test",
-        bird_api_url="https://eu1.platform.bird.com",
-        whatsapp_sender_number="+77000000000",
+        zernio_api_key="test-key",
+        zernio_webhook_secret="whsec_test",
+        zernio_base_url="https://zernio.com/api/v1",
+        zernio_account_id="66b2e19d8c3f5a7e9d0b1c2d",
         app_host="127.0.0.1",
         app_port=8000,
         llm_api_url="https://llm.test/v1",
@@ -190,7 +190,7 @@ async def main():
     owner8 = [t for to, t in proc8.sender.sent if to == OWNER_PHONE]
     check("владелец уведомлён при таймауте", len(owner8) == 1)
 
-    print("[9] чанкинг длинного ответа: не в процессоре, а в BirdWhatsAppClient (см. test_bird_client.py)")
+    print("[9] чанкинг длинного ответа: не в процессоре, а в ZernioWhatsAppClient (см. test_zernio_client.py)")
     # Здесь проверяем только то, что длинный ответ целиком передан клиенту.
     proc9 = make_processor(["x" * 9000])
     await proc9.handle_incoming(CLIENT_PHONE, "Аня", "дай длинный ответ")

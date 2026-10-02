@@ -4,9 +4,10 @@
 ключевых слов -> LLM (с краткой историей диалога) -> проверка [HANDOFF] ->
 ответ клиенту ИЛИ вежливое сообщение о передаче + уведомление владельцу.
 
-Отличие от Telegram-версии: транспорт — Bird WhatsApp API. Приём через
-вебхук (см. main.py), отправка — whatsapp.bird_client.BirdWhatsAppClient;
-ключом диалога служит номер телефона клиента.
+Отличие от Telegram-версии: транспорт — WhatsApp (Zernio или Meta Cloud API).
+Приём через вебхук (см. main.py), отправка — соответствующий клиент из
+whatsapp/; ключом диалога служит номер телефона клиента, а для Zernio ответ
+уходит в диалог по conversation_id (прокидывается из входящего сообщения).
 
 При [HANDOFF] по записи модель формирует сводку «ЗАПИСЬ: услуга — …,
 желаемое время — …» — владельцу уходит она, а не сырое последнее
@@ -184,7 +185,7 @@ class MessageProcessor:
 
     # --- приветствие -------------------------------------------------------------
 
-    async def handle_greeting(self, phone: str) -> None:
+    async def handle_greeting(self, phone: str, conversation_id: str = "") -> None:
         """Приветствие по слову start (аналог /start) + сброс памяти диалога."""
         self._histories.pop(phone, None)
         await self.sender.send_text(
@@ -192,9 +193,13 @@ class MessageProcessor:
             f"Здравствуйте! Это помощник {self.settings.business_name}.\n"
             "Задайте вопрос — отвечу на основе информации о нас. "
             "Если не смогу, передам ваш вопрос коллегам. 😊",
+            conversation_id=conversation_id,
         )
 
-    async def handle_non_text(self, phone: str, display_name: str, content_kind: str) -> None:
+    async def handle_non_text(
+        self, phone: str, display_name: str, content_kind: str,
+        conversation_id: str = "",
+    ) -> None:
         """Ответ на нетекстовый контент (фото, голосовые и т.п.): просим текстом.
 
         Определять язык не по чему — текста нет, поэтому ответ двуязычный
@@ -206,17 +211,22 @@ class MessageProcessor:
             phone, display_name or "-", content_kind,
         )
         try:
-            await self.sender.send_text(phone, NON_TEXT_REPLY)
+            await self.sender.send_text(
+                phone, NON_TEXT_REPLY, conversation_id=conversation_id,
+            )
         except MessagingError:
             logger.exception("Не удалось отправить просьбу написать текстом (%s)", phone)
 
     # --- основной сценарий -------------------------------------------------------
 
-    async def handle_incoming(self, phone: str, display_name: str, text: str) -> None:
+    async def handle_incoming(
+        self, phone: str, display_name: str, text: str, conversation_id: str = "",
+    ) -> None:
         """Главный обработчик текстовых сообщений клиентов.
 
-        Выполняется в фоновой задаче после ответа 200 вебхуку Bird, поэтому
-        здесь допустимы долгие ожидания (LLM, отправка сообщений).
+        Выполняется в фоновой задаче после ответа 200 вебхуку провайдера,
+        поэтому здесь допустимы долгие ожидания (LLM, отправка сообщений).
+        conversation_id нужен Zernio: ответ уходит в диалог, а не на номер.
         """
         text = (text or "").strip()
         if not text:
@@ -227,13 +237,19 @@ class MessageProcessor:
         # Слово «start» (с «/» или без) — приветствие и сброс памяти диалога,
         # как команда /start в Telegram-версии.
         if text.strip("/").casefold() == "start":
-            await self.handle_greeting(phone)
+            await self.handle_greeting(phone, conversation_id=conversation_id)
             return
 
         async with self._lock_for(phone):
-            await self._process(phone, display_name, text, self._history_for(phone))
+            await self._process(
+                phone, display_name, text, self._history_for(phone),
+                conversation_id=conversation_id,
+            )
 
-    async def _process(self, phone: str, display_name: str, text: str, history: deque) -> None:
+    async def _process(
+        self, phone: str, display_name: str, text: str, history: deque,
+        conversation_id: str = "",
+    ) -> None:
         """Сценарий обработки одного сообщения (вызывается под локом чата)."""
 
         # Фиксируем входящее в историю сразу: дальше каждая ветка
@@ -254,6 +270,7 @@ class MessageProcessor:
                 text_for_owner=text,
                 reply=reply,
                 reason=f"ключевое слово «{trigger}»",
+                conversation_id=conversation_id,
             )
             self._remember(history, "assistant", reply)
             return
@@ -273,6 +290,7 @@ class MessageProcessor:
                 text_for_owner=text,
                 reply=reply,
                 reason=f"таймаут LLM ({self.settings.llm.timeout_seconds} сек)",
+                conversation_id=conversation_id,
             )
             self._remember(history, "assistant", reply)
             return
@@ -287,6 +305,7 @@ class MessageProcessor:
                 text_for_owner=text,
                 reply=reply,
                 reason=f"ошибка LLM: {exc}",
+                conversation_id=conversation_id,
             )
             self._remember(history, "assistant", reply)
             return
@@ -312,13 +331,14 @@ class MessageProcessor:
                 text_for_owner=summary or text,
                 reply=reply,
                 reason="модель не уверена ([HANDOFF])",
+                conversation_id=conversation_id,
             )
             self._remember(history, "assistant", reply)
             return
 
         # 4. Успех: отправляем ответ. Полный текст ответа не логируем.
         try:
-            await self.sender.send_text(phone, reply)
+            await self.sender.send_text(phone, reply, conversation_id=conversation_id)
         except MessagingError:
             # Ответ не ушёл, но и в историю его добавлять нельзя: клиент его
             # не видел, и на следующий вопрос модель ответит без контекста.
@@ -331,14 +351,14 @@ class MessageProcessor:
         )
 
     async def _do_fallback(self, phone: str, display_name: str, text_for_owner: str,
-                           reply: str, reason: str) -> None:
+                           reply: str, reason: str, conversation_id: str = "") -> None:
         """Сообщает клиенту о передаче и пересылает владельцу текст для оператора.
 
         text_for_owner — структурированная сводка «ЗАПИСЬ: …», если модель её
         сформировала, иначе исходное сообщение клиента.
         """
         try:
-            await self.sender.send_text(phone, reply)
+            await self.sender.send_text(phone, reply, conversation_id=conversation_id)
         except MessagingError:
             # Ответ клиенту не ушёл, но владельца предупредить всё равно стоит.
             logger.exception("Не удалось отправить fallback-ответ клиенту (%s)", phone)

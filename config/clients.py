@@ -1,21 +1,24 @@
 """Реестр клиентов мультитенантного режима: папка clients/, один YAML на клиента.
 
-Имя файла — ключ клиента из цифр: у WhatsApp-клиентов это phone_number_id
-бизнес-номера в Graph API (clients/1354249714436396.yaml), у Telegram-клиентов —
-id бота из токена (clients/123456789.yaml, поле provider: tg). Из файла
-собирается полноценный Settings: бизнес-поля и токен — из yaml, глобальные
-вещи (LLM-ключ, app secret, verify token, версия Graph API) — из env. Так
-MessageProcessor и notify_owner работают с per-tenant Settings без изменений
-в коде обработчиков.
+Имя файла — ключ клиента: у Meta-клиентов это phone_number_id бизнес-номера
+в Graph API (clients/1354249714436396.yaml), у Telegram-клиентов — id бота из
+токена (clients/123456789.yaml, поле provider: tg), у Zernio-клиентов —
+произвольный slug (clients/nails-studio.yaml, поле provider: zernio), а
+accountId задаётся полем zernio_account_id внутри. Из файла собирается
+полноценный Settings: бизнес-поля и токен — из yaml, глобальные вещи
+(LLM-ключ, app secret, verify token, ключ Zernio, версия Graph API) — из env.
+Так MessageProcessor и notify_owner работают с per-tenant Settings без
+изменений в коде обработчиков.
 
 Требования к файлу клиента:
-  - имя файла — цифры (ключ клиента), уникальный ключ клиента;
+  - имя файла — цифры (Meta/TG) или slug (Zernio);
   - business_name и knowledge_base обязательны;
   - llm.model — в yaml или глобальный LLM_MODEL из env;
-  - provider: wa (по умолчанию) или tg;
+  - provider: wa (по умолчанию), tg или zernio;
   - wa: access_token — в yaml или глобальный WHATSAPP_ACCESS_TOKEN (fallback
     для схемы «все номера под партнёрством и одним общим токеном»);
-  - tg: telegram_bot_token обязателен, имя файла = id бота из токена.
+  - tg: telegram_bot_token обязателен, имя файла = id бота из токена;
+  - zernio: zernio_account_id обязателен (24 hex), ключ маршрутизации = он.
 Битый/неполный файл не роняет сервис: клиент пропускается с warning-логом.
 
 Hot-reload: снапшот папки (имя, mtime, размер) сверяется при каждом входящем
@@ -35,8 +38,18 @@ from whatsapp.telegram_token import bot_id_from_token
 
 logger = logging.getLogger(__name__)
 
-# phone_number_id в Graph API — числовой идентификатор; имя файла клиента = он же.
+# phone_number_id в Graph API — числовой идентификатор; у Meta-клиента
+# (provider: wa) имя файла = он же. У Telegram-клиента (tg) — id бота (тоже
+# цифры). У Zernio-клиента (zernio) имя файла — произвольный slug, а
+# accountId (24 hex) задаётся полем zernio_account_id внутри yaml.
 _PHONE_NUMBER_ID_RE = re.compile(r"\d{1,20}")
+
+# Slug имени файла клиента Zernio: буквы/цифры/точка/дефис/подчёркивание,
+# без разделителей пути. accountId — тоже валидный slug, можно использовать его.
+_CLIENT_ID_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+# accountId подключённого аккаунта Zernio — 24 hex-символа (Mongo ObjectId).
+_ZERNIO_ACCOUNT_ID_RE = re.compile(r"[0-9a-f]{24}")
 
 # Файлы-образцы (префикс "_") в реестр не попадают.
 EXAMPLE_PREFIX = "_"
@@ -45,17 +58,33 @@ YAML_SUFFIXES = (".yaml", ".yml")
 
 
 def is_client_file(path: Path) -> bool:
-    """Похоже ли имя файла на ключ клиента: <цифры>.yaml (не _example.yaml)."""
+    """Похоже ли имя файла на ключ клиента: <цифры|slug>.yaml (не _example.yaml)."""
     return (
         path.suffix.lower() in YAML_SUFFIXES
         and not path.name.startswith(EXAMPLE_PREFIX)
-        and bool(_PHONE_NUMBER_ID_RE.fullmatch(path.stem))
+        and bool(
+            _PHONE_NUMBER_ID_RE.fullmatch(path.stem)
+            or _CLIENT_ID_SLUG_RE.fullmatch(path.stem)
+        )
     )
 
 
 def is_valid_phone_number_id(value: str) -> bool:
-    """Строка похожа на phone_number_id: только цифры (ключ клиента)."""
+    """Строка похожа на phone_number_id: только цифры (ключ Meta/TG-клиента)."""
     return bool(_PHONE_NUMBER_ID_RE.fullmatch(value))
+
+
+def is_valid_client_id(value: str) -> bool:
+    """Ключ клиента для имён файлов и админ-API: цифры (Meta/TG) или slug (Zernio)."""
+    return bool(
+        _PHONE_NUMBER_ID_RE.fullmatch(value)
+        or _CLIENT_ID_SLUG_RE.fullmatch(value)
+    )
+
+
+def is_valid_zernio_account_id(value: str) -> bool:
+    """accountId Zernio: 24 hex-символа (например 66b2e19d8c3f5a7e9d0b1c2d)."""
+    return bool(_ZERNIO_ACCOUNT_ID_RE.fullmatch(value.strip().lower()))
 
 
 def resolve_clients_dir(base_dir: Path) -> Path | None:
@@ -102,11 +131,14 @@ def validate_tenant_config(
     загрузке yaml и админ-API перед записью файла — битый конфиг не попадёт
     никуда.
 
-    Провайдер клиента — поле provider ("wa" по умолчанию, либо "tg"):
+    Провайдер клиента — поле provider ("wa" по умолчанию, "tg" или "zernio"):
       - wa: обязателен access_token (или глобальный WHATSAPP_ACCESS_TOKEN),
-        tenant_key — phone_number_id;
+        tenant_key — phone_number_id (цифры);
       - tg: обязателен telegram_bot_token, tenant_key должен совпадать с id
-        бота из токена (id бота — ключ клиента в реестре).
+        бота из токена (id бота — ключ клиента в реестре);
+      - zernio: обязателен zernio_account_id (24 hex) — он и есть ключ
+        маршрутизации; имя файла может быть любым slug, глобальный
+        ZERNIO_API_KEY один на всех клиентов.
     """
     if not isinstance(cfg, dict):
         return None, ["ожидается словарь с полями бизнеса"], []
@@ -117,8 +149,10 @@ def validate_tenant_config(
     business_name = str(cfg.get("business_name") or "").strip()
 
     problems: list[str] = []
-    if provider not in ("wa", "tg"):
-        problems.append(f"provider={provider!r} не поддерживается (ожидается 'wa' или 'tg')")
+    if provider not in ("wa", "tg", "zernio"):
+        problems.append(
+            f"provider={provider!r} не поддерживается (ожидается 'wa', 'tg' или 'zernio')"
+        )
     if not business_name:
         problems.append("business_name не задан")
     if not str(cfg.get("knowledge_base") or "").strip():
@@ -126,10 +160,11 @@ def validate_tenant_config(
     if not model:
         problems.append("llm.model не задан (yaml или LLM_MODEL в .env)")
 
-    # Провайдер и его обязательный секрет. У WA есть глобальный fallback-токен,
-    # у Telegram — нет: у каждого бота свой токен.
+    # Провайдер и его обязательный секрет/идентификатор. У WA есть глобальный
+    # fallback-токен, у Telegram — нет, у Zernio ключ общий, но нужен accountId.
     access_token = ""
     telegram_bot_token = ""
+    zernio_account_id = ""
     if provider == "tg":
         telegram_bot_token = str(cfg.get("telegram_bot_token") or "").strip()
         if not telegram_bot_token:
@@ -144,7 +179,22 @@ def validate_tenant_config(
                 problems.append(
                     f"ключ клиента {tenant_key} не совпадает с id бота {bot_id} из токена"
                 )
+    elif provider == "zernio":
+        zernio_account_id = str(cfg.get("zernio_account_id") or "").strip().lower()
+        if not zernio_account_id:
+            problems.append("zernio_account_id не задан (id аккаунта из Zernio)")
+        elif not is_valid_zernio_account_id(zernio_account_id):
+            problems.append(
+                "zernio_account_id не похож на id аккаунта Zernio "
+                "(ожидается 24 hex-символа, например 66b2e19d8c3f5a7e9d0b1c2d)"
+            )
     else:
+        # Имя файла Meta-клиента — phone_number_id (цифры): это ключ маршрутизации.
+        if not is_valid_phone_number_id(tenant_key):
+            problems.append(
+                f"для provider: wa имя файла должно быть phone_number_id (цифры), "
+                f"сейчас {tenant_key!r}"
+            )
         access_token = str(cfg.get("access_token") or "").strip() or base.whatsapp_access_token
         if not access_token:
             problems.append("access_token не задан (yaml или WHATSAPP_ACCESS_TOKEN в .env)")
@@ -174,10 +224,12 @@ def validate_tenant_config(
     settings = replace(
         base,
         # Транспорт тенанта задаётся его provider, а не глобальным MESSAGING_PROVIDER.
-        messaging_provider="telegram" if provider == "tg" else "meta",
-        # Ключ тенанта: у WA — phone_number_id, у TG — id бота из токена.
-        whatsapp_phone_number_id=tenant_key,
+        messaging_provider={"tg": "telegram", "zernio": "zernio"}.get(provider, "meta"),
+        # Ключ маршрутизации тенанта: у WA — phone_number_id (имя файла),
+        # у TG — id бота из токена, у Zernio — accountId аккаунта.
+        whatsapp_phone_number_id=zernio_account_id or tenant_key,
         whatsapp_access_token=access_token,
+        zernio_account_id=zernio_account_id,
         telegram_bot_token=telegram_bot_token,
         telegram_webhook_secret=str(cfg.get("telegram_webhook_secret") or "").strip(),
         business_name=business_name,
@@ -186,6 +238,8 @@ def validate_tenant_config(
         knowledge_base=str(cfg.get("knowledge_base") or "").strip(),
         owner_phone=owner_phone,
         owner_telegram_chat_id=owner_chat,
+        owner_template_name=str(cfg.get("owner_template_name") or "").strip(),
+        owner_template_language=str(cfg.get("owner_template_language") or "").strip(),
         fallback_triggers=[
             str(t).strip() for t in (cfg.get("fallback_triggers") or []) if str(t).strip()
         ],
@@ -329,8 +383,12 @@ class ClientRegistry:
                     continue
                 if name.startswith(EXAMPLE_PREFIX):
                     continue
-                if not _PHONE_NUMBER_ID_RE.fullmatch(Path(name).stem):
-                    logger.warning("Файл %s в clients/ пропущен: имя файла должно быть phone_number_id (цифры)", name)
+                if not is_valid_client_id(Path(name).stem):
+                    logger.warning(
+                        "Файл %s в clients/ пропущен: имя файла — цифры "
+                        "(Meta phone_number_id / Telegram bot id) или slug (Zernio)",
+                        name,
+                    )
                     continue
                 stat = entry.stat()
                 snapshot[name] = _FileInfo(mtime_ns=stat.st_mtime_ns, size=stat.st_size)

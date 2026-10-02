@@ -1,7 +1,8 @@
 """Общие исключения транспорта WhatsApp.
 
-Один тип ошибок для обоих провайдеров (Bird и Meta Cloud API): хендлеры
-ловят MessagingError и не зависят от того, какой провайдер включён в .env.
+Один тип ошибок для всех провайдеров (Zernio, Meta Cloud API, Telegram):
+хендлеры ловят MessagingError и не зависят от того, какой провайдер включён
+в .env.
 """
 
 from __future__ import annotations

@@ -4,10 +4,12 @@ WhatsApp-версия FAQ-бота [chat-bot-demo](../chat-bot-demo): тот ж�
 (база знаний → LLM → `[HANDOFF]` → передача человеку). Транспорт переключается
 переменной `MESSAGING_PROVIDER`:
 
-- **`meta`** (рекомендуется) — WhatsApp Cloud API напрямую от Meta. Ответы
-  клиентам в 24-часовом окне бесплатны; платно только шаблонные рассылки,
-  боту они не нужны.
-- **`bird`** — Bird API (bird.com). Нужен пополненный кошелёк Bird.
+- **`zernio`** (рекомендуется) — WhatsApp через Zernio API. Один API-ключ на
+  команду, аккаунты подключаются в дашборде Zernio. Ответы клиентам в
+  24-часовом окне свободным текстом; вне окна нужен approved-шаблон.
+- **`meta`** — WhatsApp Cloud API напрямую от Meta. Ответы клиентам в
+  24-часовом окне бесплатны; платно только шаблонные рассылки.
+- **`telegram`** — Telegram Bot API (бот отвечает в Telegram).
 
 ## Что делает бот
 
@@ -34,26 +36,27 @@ admin/
   static/index.html      страница панели /admin (админ — все клиенты, клиент — свой)
 config/
   settings.py            .env + YAML-конфиг клиента, fail-fast валидация
-  clients.py             реестр клиентов clients/*.yaml (мультитенант, hot-reload, provider wa|tg)
+  clients.py             реестр клиентов clients/*.yaml (мультитенант, hot-reload, provider wa|zernio|tg)
 clients/
   _example.yaml          образец клиентского yaml (в git, без секретов)
-  <key>.yaml             один файл на клиента: phone_number_id (wa) или bot_id (tg)
+  <key>.yaml             один файл на клиента: slug (zernio), phone_number_id (wa) или bot_id (tg)
 handlers/
   message_handler.py     пайплайн: история → keyword → LLM → [HANDOFF] → ответ/передача
   owner_handler.py       уведомление владельцу через активного провайдера
 services/                LLM-клиент, fallback, определение языка (как в оригинале)
 whatsapp/
   errors.py              общие исключения MessagingError (для всех провайдеров)
+  zernio_client.py       reply в диалог (conversations/{id}/messages) + шаблон, retry 5xx/429
+  zernio_security.py     проверка X-Zernio-Signature (HMAC-SHA256 от raw body)
+  zernio_payload.py      разбор message.received → InboundMessage (+conversationId/accountId)
   meta_client.py         POST /{phone_number_id}/messages (Graph API), чанкинг 4096, retry
   meta_security.py       проверка X-Hub-Signature-256 + GET-верификация подписки
   meta_payload.py        разбор entry/changes/messages (+metadata.phone_number_id)
-  bird_client.py         POST /v1/whatsapp/messages, чанкинг 4096, retry 5xx/429
-  webhook_security.py    проверка подписи Bird (Standard Webhooks, HMAC-SHA256)
-  webhook_payload.py     разбор события whatsapp.received
   telegram_client.py     Bot API: sendMessage/setWebhook/getMe, чанкинг 4096, retry
   telegram_payload.py    разбор update (message) → InboundMessage
   telegram_token.py      разбор токена бота: id бота = ключ клиента
 scripts/send_test.py     тестовая отправка сообщения через активного провайдера
+scripts/zernio_connect.py подключение WhatsApp к Zernio: профиль, ссылка Embedded Signup, вебхук
 wa_onboard.py            автономный онбординг клиента (2FA, подписка WABA, печать .env)
 tests/                   тесты (запуск: python tests/<имя>.py)
 ```
@@ -70,7 +73,10 @@ python main.py
 
 | Переменная | Описание |
 |---|---|
-| `MESSAGING_PROVIDER` | `meta` (WhatsApp Cloud API), `telegram` или `bird`. В мультитенанте `meta`/`telegram` включают реестр `clients/` и обслуживают оба транспорта одновременно. |
+| `MESSAGING_PROVIDER` | `zernio` (WhatsApp через Zernio), `meta` (WhatsApp Cloud API) или `telegram`. В мультитенанте эти значения включают реестр `clients/` и обслуживают все транспорты одновременно. |
+| `ZERNIO_API_KEY` | (zernio) API-ключ Zernio (`sk_…`) — один на всю команду. |
+| `ZERNIO_WEBHOOK_SECRET` | (zernio) секрет вебхука — проверка `X-Zernio-Signature`. |
+| `ZERNIO_BASE_URL` | (zernio, необязательно) по умолчанию `https://zernio.com/api/v1`. |
 | `WHATSAPP_ACCESS_TOKEN` | (meta) токен System User с правами `whatsapp_business_messaging`. |
 | `WHATSAPP_PHONE_NUMBER_ID` | (meta) ID бизнес-номера отправителя из дашборда Meta. |
 | `META_APP_SECRET` | (meta) App Secret приложения — проверка `X-Hub-Signature-256`. |
@@ -79,10 +85,6 @@ python main.py
 | `TELEGRAM_BOT_TOKEN` | (telegram, single-tenant) токен бота от @BotFather. В мультитенанте — у каждого клиента в yaml. |
 | `TELEGRAM_WEBHOOK_SECRET` | (telegram, single-tenant) секрет вебхука; в мультитенанте генерируется автоматически. |
 | `PUBLIC_BASE_URL` | Публичный адрес сервиса — база для `setWebhook` Telegram-клиентов. Не задан → вебхук привязывается вручную. |
-| `BIRD_API_KEY` | (bird) API-ключ Bird (`bk_eu1_...`). Регион выводится из префикса. |
-| `BIRD_WEBHOOK_SECRET` | (bird) секрет вебхука `whsec_...`. |
-| `BIRD_API_URL` | (bird, необязательно) по умолчанию `https://eu1.platform.bird.com`. |
-| `WHATSAPP_SENDER_NUMBER` | (bird) бизнес-номер отправителя (E.164, с `+`). |
 | `OWNER_WHATSAPP_NUMBER` | Номер владельца для уведомлений (перекрывает yaml; только single-tenant). |
 | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL` | OpenAI-совместимый LLM. |
 | `CLIENT_CONFIG` | (single-tenant) какой yaml из `config/` грузить (по умолчанию `client_config.yaml`). |
@@ -99,23 +101,24 @@ python main.py
   single-tenant, `{"status": "ok", "clients": N}` в мультитенанте.
 - `GET /privacy` — памятка о данных клиента (что хранится, как удалить);
   удобно указать её в профиле бизнеса WhatsApp.
-- `POST /webhooks/meta` / `/webhooks/bird` — входящие вебхуки провайдера.
+- `POST /webhooks/zernio` / `/webhooks/meta` — входящие вебхуки WhatsApp-провайдера.
 - `POST /webhooks/telegram/{bot_id}` — входящие апдейты Telegram-бота
   (проверка `X-Telegram-Bot-Api-Secret-Token`).
+- `GET /connect/done` — страница возврата после Embedded Signup (redirect_url).
 
 ## Как работает
 
-1. Провайдер POST'ит входящее сообщение на `/webhooks/meta` (meta) или
-   `/webhooks/bird` (bird).
-2. Проверяем подпись: Meta — `X-Hub-Signature-256` (HMAC-SHA256 от raw body
-   с App Secret), Bird — Standard Webhooks (`webhook-id.webhook-timestamp.<raw
-   body>`, ключ из `whsec_`). Дедуп по id сообщения/доставки — и сразу `200`
-   (у обоих провайдеров ~15 секунд на ack).
+1. Провайдер POST'ит входящее сообщение на `/webhooks/zernio` (zernio) или
+   `/webhooks/meta` (meta).
+2. Проверяем подпись: Zernio — `X-Zernio-Signature` (hex HMAC-SHA256 от raw
+   body с секретом эндпоинта), Meta — `X-Hub-Signature-256` (HMAC-SHA256 от raw
+   body с App Secret). Дедуп по id сообщения/события — и сразу `200`
+   (Zernio ждёт 2xx за 5 секунд, Meta — за 15).
 3. В фоне: keyword-fallback → LLM с историей диалога (8 сообщений, в памяти)
    → токен `[HANDOFF]` → ответ клиенту либо передача владельцу.
-4. Ответ — через активного провайдера (Meta: `POST graph.facebook.com/v21.0/
-   {phone_number_id}/messages`, Bird: `POST /v1/whatsapp/messages`); длинные
-   ответы бьются по 4096 символов.
+4. Ответ — через активного провайдера (Zernio: `POST /v1/inbox/conversations/
+   {conversationId}/messages` с `accountId`; Meta: `POST graph.facebook.com/
+   v21.0/{phone_number_id}/messages`); длинные ответы бьются по 4096 символов.
 5. Уведомление владельцу — тем же транспортом, что и ответы: WhatsApp на
    `owner_whatsapp_phone` (yaml) / `OWNER_WHATSAPP_NUMBER` (.env), Telegram —
    в `owner_telegram_chat_id`.
@@ -139,33 +142,63 @@ python main.py
 (WhatsApp → API Setup → To). Для реальных клиентов подключите свой номер
 и пройдите верификацию бизнеса.
 
-## Подключение вебхука Bird (провайдер bird)
+## Подключение Zernio (провайдер zernio)
 
-1. Запустите бота и откройте туннель для локального теста:
+1. В дашборде Zernio создайте API-ключ (мы храним его хэш, показывается один
+   раз) → `.env` → `ZERNIO_API_KEY`.
+2. Подключите WhatsApp-аккаунт. Проще всего — кнопками в панели `/admin`
+   (вкладка «Служебное» у Zernio-клиента):
+   - **«Сгенерировать ссылку подключения»** — создаёт профиль клиента в Zernio
+     (id сохраняется в yaml как `zernio_profile_id`) и отдаёт ссылку Embedded
+     Signup (`onboarding=api`, `signup=hosted`). Отправьте её клиенту.
+   - **«Проверить и сохранить»** — после подключения забирает `accountId` из
+     профиля и записывает его в yaml как `zernio_account_id`.
+   Без панели то же самое делает скрипт:
    ```bash
-   ngrok http 8000
+   python scripts/zernio_connect.py link \
+     --client clients/nails-studio.yaml \
+     --redirect-url https://<ваш-домен>/connect/done \
+     --onboarding api --hosted --name "Nails Studio"
    ```
-2. В дашборде Bird (**Developers → Webhooks → Create**) укажите:
-   - URL: `https://<ваш-домен>/webhooks/bird`
-   - Events: `whatsapp.received`
-   - Скопируйте выданный секрет `whsec_...` в `.env` → `BIRD_WEBHOOK_SECRET`.
-3. Или через API: `POST /v1/webhooks` с `{"url": "...", "events": ["whatsapp.received"]}`.
+   Вариант без браузера: `POST /v1/connect/whatsapp/credentials` (System User
+   token + wabaId + phoneNumberId).
+3. Зарегистрируйте вебхук. В панели — кнопка **«Зарегистрировать вебхук»**
+   (в том же блоке, один на весь сервис): использует `ZERNIO_WEBHOOK_SECRET` и
+   `PUBLIC_BASE_URL` из `.env`. Или скриптом / вручную:
+   ```bash
+   python scripts/zernio_connect.py register-webhook \
+     --url https://<ваш-домен>/webhooks/zernio --secret <секрет>
+   # вручную: POST /v1/webhooks/settings
+   ```
+   Секрет должен совпадать с `ZERNIO_WEBHOOK_SECRET` (им проверяется заголовок
+   `X-Zernio-Signature`).
 4. Напишите с телефона на бизнес-номер — в `logs/bot.log` появится обработка.
 
-Проверка исходящих без вебхука:
+Ссылка подключения возвращает клиента на `/connect/done` (нейтральная страница
+«готово»); сам `accountId` в конфиг попадает кнопкой «Проверить и сохранить» —
+руками ничего вводить не нужно.
+
+Профиль номера (что видно рядом с именем и аватар) у Zernio-клиентов правится
+через API-роуты `/admin/clients/{pid}/profile` так же, как у Meta: панель
+обращается к `GET/POST /v1/whatsapp/business-profile` и
+`POST /v1/whatsapp/business-profile/photo`. На coexistence-номерах аватар
+заперт самим WhatsApp Business app (Zernio отвечает `422`).
+
+Проверка исходящих без вебхука (вне 24-часового окна Zernio требует шаблон):
 
 ```bash
 python scripts/send_test.py --to +77770000000 --text "Тест"
 ```
 
-(Провайдер берётся из `MESSAGING_PROVIDER`; у Bird успех = 202, у Meta = 200.)
+Успех: Zernio/Meta — 200, Telegram — 200.
 
 ## Telegram-боты (provider `tg`)
 
-В мультитенанте WhatsApp- и Telegram-клиенты живут вместе: платформа задаётся
-у каждого клиента полем `provider` (`wa` по умолчанию, `tg`). В панели `/admin`
-она выбирается переключателем при создании клиента и потом не меняется — смена
-транспорта означает другого клиента.
+В мультитенанте WhatsApp-клиенты (Meta и Zernio) и Telegram-клиенты живут
+вместе: платформа задаётся у каждого клиента полем `provider` (`wa` —
+Meta, `zernio` — Zernio, `tg` — Telegram; не задано = `wa`). В панели
+`/admin` она выбирается переключателем при создании клиента и потом не
+меняется — смена транспорта означает другого клиента.
 
 Ключ Telegram-клиента — id бота (цифры до `:` в токене), имя файла
 `clients/<bot_id>.yaml`. Обязательные поля: `provider: tg`,
@@ -186,10 +219,10 @@ curl "https://api.telegram.org/bot<ТОКЕН>/setWebhook" \
   -d 'allowed_updates=["message"]'
 ```
 
-Включить мультитенант: `MESSAGING_PROVIDER=meta` (или `telegram`) и папка
-`clients/` хотя бы с одним клиентом. Meta-секреты для Telegram-клиентов не
-нужны: если `META_APP_SECRET`/`META_VERIFY_TOKEN` пусты, WhatsApp-вебхук просто
-не поднимается, а Telegram продолжает работать.
+Включить мультитенант: `MESSAGING_PROVIDER=zernio` (или `meta`/`telegram`) и
+папка `clients/` хотя бы с одним клиентом. Секреты чужого транспорта не нужны:
+если `ZERNIO_WEBHOOK_SECRET` пуст, вебхук `/webhooks/zernio` просто не
+поднимается, а остальные клиенты продолжают работать.
 
 Single-tenant Telegram (один бот): `MESSAGING_PROVIDER=telegram`,
 `TELEGRAM_BOT_TOKEN`, `PUBLIC_BASE_URL`, бизнес-поля в `CLIENT_CONFIG`.
@@ -197,18 +230,20 @@ Single-tenant Telegram (один бот): `MESSAGING_PROVIDER=telegram`,
 ## Тесты
 
 ```bash
-python tests/test_webhook_security.py   # подпись Bird (16)
-python tests/test_webhook_payload.py    # разбор событий Bird (19)
 python tests/test_pipeline.py           # пайплайн обработки (38)
-python tests/test_bird_client.py        # Bird-клиент: чанкинг/ретраи (14)
-python tests/test_webhook_server.py     # интеграция FastAPI, Bird-роут (13)
+python tests/test_zernio_security.py    # подпись Zernio (10)
+python tests/test_zernio_payload.py     # разбор message.received (23)
+python tests/test_zernio_client.py      # Zernio-клиент: reply/шаблон/чанинг/ретраи (23)
+python tests/test_zernio_webhook.py     # Zernio-вебхук: маршрутизация/дедуп/шаблон (27)
+python tests/test_zernio_profile.py     # профиль Zernio: клиент + админ-роуты (16)
+python tests/test_zernio_admin_connect.py # подключение из панели: ссылка/account/вебхук (20)
 python tests/test_meta_security.py      # подпись Meta + верификация (13)
 python tests/test_meta_payload.py       # разбор событий Meta + phone_number_id (22)
 python tests/test_meta_client.py        # Meta-клиент: чанкинг/ретраи (14)
 python tests/test_meta_webhook.py       # интеграция FastAPI, Meta-роуты (12)
 python tests/test_multitenant.py        # мультитенант: маршрутизация/hot-reload (33)
 python tests/test_admin_api.py          # админ-API: auth/маскирование/бэкапы/аудит (40)
-python tests/test_admin_profile.py      # профиль WhatsApp: чтение/правка/аватар (52)
+python tests/test_admin_profile.py      # профиль WhatsApp: чтение/правка/аватар (54)
 python tests/test_telegram_token.py     # токен бота: id/формат (10)
 python tests/test_telegram_payload.py   # разбор update Telegram (19)
 python tests/test_telegram_client.py    # Telegram-клиент: чанкинг/ok:false/ретраи (17)
@@ -223,56 +258,67 @@ python tests/test_telegram_webhook.py   # TG-вебхук + сосущество
    `app` лениво, так что `uvicorn main:app` работает.
 2. Переменные окружения в дашборде: активного провайдера (см. `.env.example`)
    + `LLM_API_URL`, `LLM_API_KEY`. В single-tenant дополнительно `CLIENT_CONFIG`
-   и `WHATSAPP_PHONE_NUMBER_ID`; в мультитенанте — только `META_APP_SECRET`,
-   `META_VERIFY_TOKEN` и (при fallback-схеме токенов) `WHATSAPP_ACCESS_TOKEN`.
+   и `zernio_account_id` (в yaml); в мультитенанте — только
+   `ZERNIO_WEBHOOK_SECRET` (Zernio) и/или `META_APP_SECRET`, `META_VERIFY_TOKEN`
+   (Meta), и (при fallback-схеме токенов) `WHATSAPP_ACCESS_TOKEN`.
    `PORT` Railway подставляет сам — он имеет приоритет над `APP_PORT`;
    `APP_HOST` уже `0.0.0.0`.
 3. В Settings → Networking задайте порт, который слушает приложение
    (PORT из окружения), и подключите домен.
 4. Вебхук провайдера укажите на публичный домен:
+   - Zernio: `https://<домен>/webhooks/zernio` (events: `message.received`,
+     секрет = `ZERNIO_WEBHOOK_SECRET`);
    - Meta: `https://<домен>/webhooks/meta` (Callback URL в настройках приложения,
-     Verify token = `META_VERIFY_TOKEN`, подписка на поле `messages`);
-   - Bird: `https://<домен>/webhooks/bird` (events: `whatsapp.received`).
+     Verify token = `META_VERIFY_TOKEN`, подписка на поле `messages`).
 
 ## Мультитенант: один деплой на 20+ клиентов
 
-Один деплой обслуживает много номеров: событие каждого входящего сообщения
-несёт `phone_number_id`, по которому оно маршрутизируется к конфигу клиента.
+Один деплой обслуживает много номеров: входящее событие несёт ключ клиента
+(Zernio — `accountId`, Meta — `phone_number_id`), по которому оно
+маршрутизируется к конфигу клиента.
 Режим включается, если задан `CLIENTS_DIR` **или** существует папка `clients/`
 хотя бы с одним клиентским yaml — так старый single-tenant деплой не
 переключается, пока в `clients/` нет ни одного клиента.
 
-**Формат:** один yaml на клиента, имя файла = `phone_number_id` (цифры):
+**Формат:** один yaml на клиента; имя файла — ключ клиента: slug у Zernio,
+`phone_number_id` (цифры) у Meta, id бота у Telegram:
 
 ```
 clients/
   _example.yaml             # образец с комментариями (в git, без секретов)
-  1354249714436396.yaml     # Nails Studio — первый клиент (в git, токен пустой)
-  <phone_number_id>.yaml    # остальные клиенты (не в git — там токены)
+  nails-studio.yaml         # Zernio-клиент: accountId внутри yaml
+  1354249714436396.yaml     # Meta-клиент: имя = phone_number_id
+  123456789.yaml            # Telegram-клиент: имя = id бота
 ```
 
-Скопируйте `clients/_example.yaml` под именем `<phone_number_id>.yaml` и
+Скопируйте `clients/_example.yaml` под именем `<key>.yaml` и
 заполните: `business_name`, `knowledge_base`, `tone`, `language`,
 `fallback_triggers`, `style_examples`, `owner_whatsapp_phone`, опционально
-блок `llm` (пустой `model` = глобальный `LLM_MODEL`) и `access_token`.
+блок `llm` (пустой `model` = глобальный `LLM_MODEL`). Для Zernio-клиента
+обязателен `zernio_account_id` (плюс `owner_template_name`/`owner_template_language`
+для уведомлений владельцу), для Meta — `access_token`.
 
 Правила:
 
-- **`access_token`** — токен System User с доступом к WABA клиента. Если поле
-  пустое, используется глобальный `WHATSAPP_ACCESS_TOKEN` из env (случай «все
-  номера под партнёрством и одним токеном»). Токены в git не попадают: папка
-  `clients/` закрыта целиком, кроме `_example.yaml`. Конфиги клиентов живут
-  на деплое (volume из `CLIENTS_DIR`) и локально — в репозитории их нет.
+- **Zernio (`provider: zernio`)** — `zernio_account_id` (24 hex-символа) задаёт
+  и аккаунт, и ключ маршрутизации входящих. API-ключ общий (`ZERNIO_API_KEY`),
+  per-tenant токенов нет.
+- **`access_token` (Meta `provider: wa`)** — токен System User с доступом к WABA
+  клиента. Если поле пустое, используется глобальный `WHATSAPP_ACCESS_TOKEN` из
+  env (случай «все номера под партнёрством и одним токеном»). Токены в git не
+  попадают: папка `clients/` закрыта целиком, кроме `_example.yaml`. Конфиги
+  клиентов живут на деплое (volume из `CLIENTS_DIR`) и локально — в репозитории
+  их нет.
 - **Hot-reload:** новый/изменённый/удалённый yaml подхватывается без рестарта
   (сверка mtime при каждом входящем событии). Изменение конфига пересоздаёт
   обработчик клиента — история его диалогов начинается заново.
 - **Изоляция:** битый yaml или клиент без обязательных полей пропускается с
-  warning, остальные клиенты работают; у каждого клиента свой
-  `MetaWhatsAppClient` (его токен), свой system prompt и своя история.
+  warning, остальные клиенты работают; у каждого клиента свой транспорт, свой
+  system prompt и своя история.
 - `App Secret` и `META_VERIFY_TOKEN` — глобальные, одни на весь деплой:
-  события всех клиентов идут через одно приложение разработчика.
-- Событие с незарегистрированным `phone_number_id` подтверждается `200`
-  без обработки (warning в логе).
+  события всех Meta-клиентов идут через одно приложение разработчика.
+- Событие с незарегистрированным ключом клиента (`phone_number_id` /
+  `accountId`) подтверждается `200` без обработки (warning в логе).
 - `OWNER_WHATSAPP_NUMBER` в мультитенанте не применяется — номер владельца
   задаётся в yaml каждого клиента.
 
@@ -298,9 +344,12 @@ clients/
 | `GET /admin/clients/{id}` | админ или свой клиент | конфиг с замаскированными секретами |
 | `PUT /admin/clients/{id}` | админ / свой клиент | создать/обновить: валидация → бэкап → атомарная запись → hot-reload |
 | `DELETE /admin/clients/{id}` | админ | отключение клиента (бэкап + удаление yaml) |
-| `GET /admin/clients/{id}/profile` | админ / свой клиент | профиль WhatsApp-номера из Meta |
+| `GET /admin/clients/{id}/profile` | админ / свой клиент | профиль WhatsApp-номера (Meta или Zernio) |
 | `PATCH /admin/clients/{id}/profile` | админ / свой клиент | изменить «о компании», контакты, сайт |
 | `POST /admin/clients/{id}/profile/photo` | админ / свой клиент | заменить аватар номера (jpg/png/webp, ≤ 5 МБ) |
+| `POST /admin/clients/{id}/zernio/connect-link` | админ / свой клиент | ссылка Embedded Signup (профиль создаётся сам) |
+| `POST /admin/clients/{id}/zernio/sync-account` | админ / свой клиент | забрать `accountId` из Zernio и записать в yaml |
+| `POST /admin/zernio/register-webhook` | админ | зарегистрировать вебхук на `/webhooks/zernio` (секрет из env) |
 
 Гарантии записи: перед сохранением конфиг валидируется тем же кодом, что ест
 реестр (битый yaml на диск не попадёт); запись атомарная; предыдущая версия
@@ -417,7 +466,7 @@ FastAPI для приёма файла аватара.
 
 ## Отличия от chat-bot-demo (Telegram)
 
-- Вместо long polling — вебхук с проверкой подписи (Meta или Bird),
+- Вместо long polling — вебхук с проверкой подписи (Zernio или Meta),
   переключение провайдера через `MESSAGING_PROVIDER` без изменения логики.
 - Владелец получает уведомления в WhatsApp (номер в `owner_whatsapp_phone`).
 - `start` словом (не `/start`), нетекстовый контент → просьба написать текстом.

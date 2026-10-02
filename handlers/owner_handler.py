@@ -3,6 +3,12 @@
 Владелец получает сообщение тем же транспортом, что и клиенты: у WhatsApp-
 клиента — на owner_whatsapp_phone, у Telegram-клиента — в чат
 owner_telegram_chat_id (см. Settings.owner_notify_target).
+
+Особенность Zernio: свободный текст вне 24-часового окна WhatsApp запрещён,
+поэтому уведомление уходит approved-шаблоном (owner_template_name/
+owner_template_language из yaml клиента, две переменные тела: отправитель
+и сообщение). Если шаблон не задан или у sender нет send_template — пробуем
+обычный send_text (в диалоге, где окно открыто, это сработает).
 """
 
 import logging
@@ -41,7 +47,18 @@ async def notify_owner(
         f"Сообщение: {message_text}"
     )
     try:
-        await sender.send_text(target, text)
+        template_name = settings.owner_template_name
+        if template_name and hasattr(sender, "send_template"):
+            # Zernio: пишем владельцу первым — нужен approved-шаблон.
+            # Переменные тела: {{1}} — отправитель, {{2}} — сообщение.
+            await sender.send_template(
+                to=target,
+                template_name=template_name,
+                language=settings.owner_template_language or "ru",
+                params=[who, message_text],
+            )
+        else:
+            await sender.send_text(target, text)
         return True
     except MessagingError:
         # Падение уведомления не должно ломать диалог с клиентом — логируем.

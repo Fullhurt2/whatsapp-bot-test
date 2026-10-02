@@ -79,11 +79,13 @@ class TelegramClient:
             transport=transport,  # точка для тестов: подменяется на MockTransport
         )
 
-    async def send_text(self, to: str, text: str) -> None:
+    async def send_text(self, to: str, text: str, conversation_id: str = "") -> None:
         """Отправляет текст получателю `to` (chat_id в любом формате).
 
         Длинные тексты бьёт на части по лимиту Bot API. Бросает TelegramError
         при любой неудаче — вызывающий код решает, логировать сбой или нет.
+        `conversation_id` — часть общего интерфейса отправки (нужен Zernio);
+        Telegram адресует сообщения по chat_id и параметр игнорирует.
         """
         text = text or ""
         if not text:

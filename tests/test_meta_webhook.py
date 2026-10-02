@@ -52,10 +52,10 @@ def build_settings() -> Settings:
         meta_app_secret=APP_SECRET,
         meta_verify_token=VERIFY_TOKEN,
         meta_graph_version="v21.0",
-        bird_api_key="",
-        bird_webhook_secret="",
-        bird_api_url="",
-        whatsapp_sender_number="",
+        zernio_api_key="",
+        zernio_webhook_secret="",
+        zernio_base_url="https://zernio.com/api/v1",
+        zernio_account_id="",
         app_host="127.0.0.1",
         app_port=8000,
         llm_api_url="https://llm.test/v1",
@@ -75,7 +75,7 @@ class FakeBird:
     def __init__(self):
         self.sent = []
 
-    async def send_text(self, to, text):
+    async def send_text(self, to, text, conversation_id=""):
         self.sent.append((to, text))
 
     async def close(self):
@@ -93,7 +93,7 @@ class FakeSender:
     def __init__(self):
         self.sent = []
 
-    async def send_text(self, to, text):
+    async def send_text(self, to, text, conversation_id=""):
         self.sent.append((to, text))
 
     async def close(self):

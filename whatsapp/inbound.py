@@ -1,6 +1,6 @@
-"""Общая модель входящего сообщения для обоих провайдеров.
+"""Общая модель входящего сообщения для всех провайдеров.
 
-Оба вебхука (Bird и Meta) разбираются в один и тот же InboundMessage —
+Вебхуки Meta, Zernio и Telegram разбираются в один и тот же InboundMessage —
 хендлеры и память диалога работают только с ним.
 """
 
@@ -16,6 +16,11 @@ class InboundMessage:
     text: str           # текст сообщения; "" для нетекстового контента
     content_kind: str   # text / interactive / image / ... / unknown
     message_id: str     # id сообщения провайдера (wam_... / wamid....) — для логов
-    # ID бизнес-номера, на который пришло сообщение (Meta: value.metadata).
-    # В мультитенанте — ключ маршрутизации к конфигу клиента; "" для Bird.
+    # Ключ маршрутизации клиента: у Meta — ID бизнес-номера (value.metadata),
+    # у Zernio — accountId подключённого аккаунта; "" для Telegram.
     phone_number_id: str = ""
+    # Zernio: id диалога, в который уходит ответ (POST .../conversations/{id}/
+    # messages). Без него Zernio не может отправить свободный текст.
+    conversation_id: str = ""
+    # Zernio: accountId аккаунта-получателя (обязателен в теле запросов).
+    account_id: str = ""
