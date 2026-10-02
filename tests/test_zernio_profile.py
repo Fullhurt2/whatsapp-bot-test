@@ -19,11 +19,12 @@ import yaml
 from fastapi.testclient import TestClient
 
 from config.settings import LLMParams, Settings
-from whatsapp.zernio_client import ZernioWhatsAppClient
+from whatsapp.zernio_client import ZernioApiClient, ZernioWhatsAppClient
 
 API_KEY = "sk_test_key"
 SECRET = "whsec_test"
 ACCOUNT_A = "66b2e19d8c3f5a7e9d0b1c2d"
+PROFILE_A = "66a1f0c2a4b9d3e8f1a2b3c4"
 SLUG_A = "nails-studio"
 SLUG_TG = "123456789"
 ADMIN_TOKEN = "unit-admin-token-0123456789abcdef"
@@ -52,6 +53,7 @@ class ZernioCapture:
     def __init__(self):
         self.calls: list[dict] = []
         self.error = None
+        self.accounts_api: list[dict] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         record = {
@@ -71,6 +73,18 @@ class ZernioCapture:
         if self.error is not None:
             return httpx.Response(self.error.get("status", 400),
                                   json=self.error.get("body", {}))
+        if request.url.path == "/api/v1/accounts":
+            return httpx.Response(200, json={"accounts": self.accounts_api})
+        if request.url.path.endswith("/whatsapp/register"):
+            return httpx.Response(200, json={"registered": True, "accountId": ACCOUNT_A,
+                                             "phoneNumberId": "1875844705851813"})
+        if request.url.path.endswith("/whatsapp/number-info"):
+            return httpx.Response(200, json={
+                "phone": {"status": "CONNECTED", "display_phone_number": "+7 700 123 45 67",
+                          "name_status": "APPROVED", "quality_rating": "GREEN",
+                          "messaging_limit_tier": "TIER_1K", "platform_type": "CLOUD_API"},
+                "waba": {"name": "Acme WABA"},
+            })
         if request.url.path.endswith("/photo"):
             return httpx.Response(200, json={"success": True, "message": "ok"})
         if request.method == "GET":
@@ -93,6 +107,13 @@ class ZernioCapture:
             transport=httpx.MockTransport(self.handler),
         )
 
+    def make_api_client(self, settings: Settings) -> ZernioApiClient:
+        return ZernioApiClient(
+            settings.zernio_api_key or API_KEY,
+            base_url="https://zernio.com/api/v1",
+            transport=httpx.MockTransport(self.handler),
+        )
+
     def profile_calls(self) -> list[dict]:
         return [c for c in self.calls if "/whatsapp/business-profile" in c["path"]]
 
@@ -101,6 +122,7 @@ def write_zernio_client(tmp: Path, slug: str, account_id: str, business: str) ->
     (tmp / f"{slug}.yaml").write_text(yaml.safe_dump({
         "provider": "zernio",
         "zernio_account_id": account_id,
+        "zernio_profile_id": PROFILE_A,
         "business_name": business,
         "tone": "вежливый",
         "language": "ru",
@@ -179,6 +201,28 @@ def unit_tests(capture: ZernioCapture) -> None:
           b'name="accountId"' in call["body"] and ACCOUNT_A.encode() in call["body"]
           and b'name="file"; filename=' in call["body"] and PNG_BYTES in call["body"])
 
+    print("[3b] клиент: регистрация номера с PIN")
+    capture.calls.clear()
+    result = asyncio.run(client.register_number("481902"))
+    check("registered=true", result.get("registered") is True)
+    call = capture.calls[-1]
+    check("POST в /accounts/{id}/whatsapp/register с pin",
+          call["path"] == f"/api/v1/accounts/{ACCOUNT_A}/whatsapp/register"
+          and call["json"] == {"pin": "481902"})
+    capture.calls.clear()
+    asyncio.run(client.register_number(""))
+    check("пустой pin -> пустое тело (дефолт Zernio)",
+          capture.calls[-1]["json"] == {})
+
+    print("[3c] клиент: статус номера")
+    capture.calls.clear()
+    info = asyncio.run(client.get_number_info())
+    check("phone.status=CONNECTED", info["phone"]["status"] == "CONNECTED")
+    check("waba прочитана", info["waba"]["name"] == "Acme WABA")
+    check("GET number-info с accountId",
+          capture.calls[-1]["path"] == "/api/v1/whatsapp/number-info"
+          and f"accountId={ACCOUNT_A}" in capture.calls[-1]["query"])
+
 
 def admin_tests(capture: ZernioCapture) -> None:
     from main import create_app
@@ -240,6 +284,39 @@ def admin_tests(capture: ZernioCapture) -> None:
             print("[8] Telegram-клиент: профиль недоступен (409)")
             r = client.get(f"/admin/clients/{SLUG_TG}/profile", headers=headers)
             check("409 для provider: tg", r.status_code == 409)
+
+            print("[9] админ: регистрация номера с PIN")
+            capture.calls.clear()
+            r = client.post(f"/admin/clients/{SLUG_A}/zernio/register-number",
+                            headers=headers, json={"pin": "481902"})
+            check("200 registered", r.status_code == 200 and r.json()["registered"] is True)
+            call = [c for c in capture.calls
+                    if c["path"].endswith("/whatsapp/register")][-1]
+            check("pin ушёл в Zernio",
+                  call["json"] == {"pin": "481902"}
+                  and call["path"] == f"/api/v1/accounts/{ACCOUNT_A}/whatsapp/register")
+            audit = json.loads((tmp / ".audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            check("аудит: zernio_register", audit["action"] == "zernio_register")
+            r = client.post(f"/admin/clients/{SLUG_A}/zernio/register-number",
+                            headers=headers, json={"pin": "12"})
+            check("кривой PIN -> 400", r.status_code == 400)
+
+            print("[10] админ: статус номера из Meta")
+            r = client.get(f"/admin/clients/{SLUG_A}/zernio/number-info", headers=headers)
+            check("200 и CONNECTED", r.status_code == 200
+                  and r.json()["status"] == "CONNECTED"
+                  and r.json()["qualityRating"] == "GREEN")
+            check("wabaName показан", r.json()["wabaName"] == "Acme WABA")
+
+            print("[11] админ: список аккаунтов профиля (диагностика)")
+            capture.accounts_api = [{"_id": ACCOUNT_A, "platform": "whatsapp",
+                                     "username": "+77001234567", "isActive": True}]
+            app.state.state.zernio_api_factory = capture.make_api_client
+            r = client.get(f"/admin/clients/{SLUG_A}/zernio/accounts", headers=headers)
+            check("200 и аккаунт в списке", r.status_code == 200
+                  and r.json()["accounts"][0]["accountId"] == ACCOUNT_A)
+            check("запрошен профиль клиента",
+                  f"profileId={PROFILE_A}" in capture.calls[-1]["query"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -128,6 +128,41 @@ class ZernioWhatsAppClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    # --- регистрация номера в Cloud API ----------------------------------------
+
+    async def register_number(self, pin: str = "") -> dict:
+        """POST /accounts/{accountId}/whatsapp/register: регистрация номера в Meta.
+
+        Нужна, когда у номера свой two-step PIN: connect-флоу регистрирует его с
+        дефолтным PIN, Meta отвечает ошибкой 133005, номер остаётся «На
+        рассмотрении» и любая отправка падает с (#200). Пере-регистрация с
+        правильным 6-значным PIN включает номер. Пустой pin = дефолт Zernio.
+        PIN используется только для этого вызова и не сохраняется.
+        """
+        payload = {"pin": str(pin)} if pin else {}
+        response = await self._call(
+            "POST", f"{self._base}/accounts/{self._account_id}/whatsapp/register",
+            json=payload,
+        )
+        if response.status_code != 200:
+            raise ZernioError(_zernio_error_text(response))
+        return _json_dict(response)
+
+    async def get_number_info(self) -> dict:
+        """GET /whatsapp/number-info: живой статус номера из Meta.
+
+        Возвращает {phone, waba}: статус канала (CONNECTED и т.п.), name_status,
+        quality_rating, messaging_limit_tier, platform_type. Позволяет отличить
+        «номер не подключён» от «подключён, но не зарегистрирован».
+        """
+        response = await self._call(
+            "GET", f"{self._base}/whatsapp/number-info",
+            params={"accountId": self._account_id},
+        )
+        if response.status_code != 200:
+            raise ZernioError(_zernio_error_text(response))
+        return _json_dict(response)
+
     # --- профиль бизнес-номера -------------------------------------------------
     # Тот же интерфейс, что у MetaWhatsAppClient (get/update_business_profile,
     # upload_profile_photo): админ-API правит профиль одинаково для Meta и Zernio.

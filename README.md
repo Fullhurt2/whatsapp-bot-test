@@ -179,6 +179,15 @@ python main.py
 «готово»); сам `accountId` в конфиг попадает кнопкой «Проверить и сохранить» —
 руками ничего вводить не нужно.
 
+**Номер висит «На рассмотрении» в Meta.** Если у номера был свой two-step PIN
+(например, номер уже подключали к Cloud API вручную), connect-флоу регистрирует
+его с дефолтным PIN, Meta отклоняет это (error `133005`), и отправка падает с
+`(#200) You do not have the necessary permission`. В панели у Zernio-клиента
+есть блок **«Регистрация номера в Cloud API»**: кнопка **«Статус номера»**
+(живой статус из Meta), **«Аккаунты профиля»** (диагностика — видно, подключён
+ли аккаунт вообще) и поле PIN + **«Зарегистрировать номер»** (тот же 6-значный
+PIN, что в WhatsApp Business). Это POST `/v1/accounts/{accountId}/whatsapp/register`.
+
 Профиль номера (что видно рядом с именем и аватар) у Zernio-клиентов правится
 через API-роуты `/admin/clients/{pid}/profile` так же, как у Meta: панель
 обращается к `GET/POST /v1/whatsapp/business-profile` и
@@ -350,6 +359,9 @@ clients/
 | `POST /admin/clients/{id}/profile/photo` | админ / свой клиент | заменить аватар номера (jpg/png/webp, ≤ 5 МБ) |
 | `POST /admin/clients/{id}/zernio/connect-link` | админ / свой клиент | ссылка Embedded Signup (профиль создаётся сам) |
 | `POST /admin/clients/{id}/zernio/sync-account` | админ / свой клиент | забрать `accountId` из Zernio и записать в yaml |
+| `POST /admin/clients/{id}/zernio/register-number` | админ / свой клиент | регистрация номера в Cloud API с 6-значным PIN |
+| `GET /admin/clients/{id}/zernio/number-info` | админ / свой клиент | живой статус номера из Meta (CONNECTED и т.п.) |
+| `GET /admin/clients/{id}/zernio/accounts` | админ / свой клиент | диагностика: аккаунты профиля в Zernio |
 | `POST /admin/zernio/register-webhook` | админ | зарегистрировать вебхук на `/webhooks/zernio` (секрет из env) |
 
 Гарантии записи: перед сохранением конфиг валидируется тем же кодом, что ест

@@ -406,6 +406,19 @@
             <div class="hint">API-ключ общий и задаётся в .env (ZERNIO_API_KEY).</div>
             <label>zernio_account_id — id подключённого WhatsApp-аккаунта</label>
             <input id="f_zernio_account_id" class="mono" placeholder="66b2e19d8c3f5a7e9d0b1c2d">
+
+            <div class="section-title">Регистрация номера в Cloud API</div>
+            <div class="hint">Если в Meta номер висит «На рассмотрении» (у номера свой two-step PIN), connect-флоу регистрирует его с дефолтным PIN, Meta отклоняет (error 133005), и любая отправка падает с (#200). Зарегистрируйте номер тем же 6-значным PIN, что ставили в WhatsApp Business. Пустое поле = дефолтная регистрация Zernio.</div>
+            <p>
+              <button type="button" class="btn btn-sm" id="zernioInfoBtn" onclick="zernioNumberInfo()">Статус номера</button>
+              <button type="button" class="btn btn-sm" id="zernioAccountsBtn" onclick="zernioListAccounts()">Аккаунты профиля</button>
+            </p>
+            <div class="row">
+              <input id="zernioPin" class="mono" placeholder="PIN, 6 цифр" inputmode="numeric" maxlength="6">
+              <button type="button" class="btn btn-primary btn-sm" id="zernioRegisterBtn" onclick="zernioRegisterNumber()">Зарегистрировать номер</button>
+            </div>
+            <div class="status" id="zernioNumberStatus" role="status"></div>
+
             <div class="section-title">Уведомление владельцу шаблоном</div>
             <div class="hint">Вне 24-часового окна WhatsApp свободный текст запрещён — уведомление уходит approved-шаблоном с двумя переменными тела: {{1}} — отправитель, {{2}} — сообщение.</div>
             <label>owner_template_name</label>
@@ -701,6 +714,8 @@ async function openEditor(pid) {
   $("zernioLink").value = "";
   status("zernioStatus", "");
   status("zernioWebhookStatus", "");
+  status("zernioNumberStatus", "");
+  $("zernioPin").value = "";
   if (currentProvider === "zernio" && !$("f_zernio_account_id").value.trim()) {
     status("zernioStatus", "Номер ещё не подключён — нажмите «Сгенерировать ссылку подключения» и отправьте её клиенту.");
   }
@@ -843,6 +858,59 @@ async function zernioRegisterWebhook() {
   btn.disabled = false;
   if (!ok) { status("zernioWebhookStatus", humanError(code, data), true); return; }
   status("zernioWebhookStatus", "Вебхук зарегистрирован: " + (data.url || ""));
+}
+
+async function zernioNumberInfo() {
+  const btn = $("zernioInfoBtn");
+  btn.disabled = true;
+  status("zernioNumberStatus", "Запрашиваем статус у Meta…");
+  const { ok, code, data } = await zernioApi("GET", "/zernio/number-info");
+  btn.disabled = false;
+  if (!ok) { status("zernioNumberStatus", humanError(code, data), true); return; }
+  const parts = [
+    data.displayPhoneNumber,
+    "статус: " + (data.status || "—"),
+    "имя: " + (data.nameStatus || "—"),
+    "качество: " + (data.qualityRating || "—"),
+    "лимит: " + (data.messagingLimitTier || "—"),
+  ].filter(Boolean);
+  status("zernioNumberStatus", parts.join(" · "));
+}
+
+async function zernioListAccounts() {
+  const btn = $("zernioAccountsBtn");
+  btn.disabled = true;
+  status("zernioNumberStatus", "Смотрим профиль в Zernio…");
+  const { ok, code, data } = await zernioApi("GET", "/zernio/accounts");
+  btn.disabled = false;
+  if (!ok) { status("zernioNumberStatus", humanError(code, data), true); return; }
+  const list = data.accounts || [];
+  if (!list.length) {
+    status("zernioNumberStatus", "В профиле Zernio нет аккаунтов — клиент не довёл подключение до конца. Отправьте ссылку заново.", true);
+    return;
+  }
+  status("zernioNumberStatus", list.map((a) =>
+    a.platform + " " + (a.username || a.accountId) + (a.isActive ? "" : " (неактивен)")).join("; "));
+}
+
+async function zernioRegisterNumber() {
+  const btn = $("zernioRegisterBtn");
+  const pin = $("zernioPin").value.trim();
+  if (pin && !/^\d{6}$/.test(pin)) {
+    status("zernioNumberStatus", "PIN — ровно 6 цифр (или оставьте пустым для дефолтной регистрации).", true);
+    return;
+  }
+  btn.disabled = true;
+  status("zernioNumberStatus", "Регистрируем номер в Meta…");
+  const { ok, code, data } = await zernioApi("POST", "/zernio/register-number", { pin: pin });
+  btn.disabled = false;
+  if (!ok) {
+    status("zernioNumberStatus", humanError(code, data) +
+      "\nПроверьте PIN: он задаётся в WhatsApp Business (Настройки → Аккаунт → Подтверждение в два шага).", true);
+    return;
+  }
+  status("zernioNumberStatus", "Готово, номер зарегистрирован" +
+    (data.phoneNumberId ? " (phoneNumberId " + data.phoneNumberId + ")" : "") + ". Проверьте статус кнопкой выше.");
 }
 
 async function copyZernioLink() {

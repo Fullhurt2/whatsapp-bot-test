@@ -37,6 +37,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 from contextlib import asynccontextmanager
@@ -1047,6 +1048,100 @@ def register_admin_api(app, settings: Settings, state) -> None:
         logger.info("Админ-API: Zernio-аккаунт %s привязан к %s", account_id, pid)
         return {"ok": True, "accountId": account_id,
                 "username": str(whatsapp[0].get("username") or "")}
+
+    @app.get("/admin/clients/{pid}/zernio/number-info")
+    async def zernio_number_info(pid: str, request: Request):
+        """Живой статус номера из Meta (подключён / зарегистрирован).
+
+        Помогает отличить «номера нет в аккаунте» от «номер ждёт регистрации»
+        (status не CONNECTED, name_status PENDING_REVIEW и т.п.).
+        """
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        if not str(cfg.get("zernio_account_id") or "").strip():
+            return JSONResponse(status_code=409, content={"error": (
+                "номер ещё не подключён — сначала сгенерируйте ссылку и нажмите "
+                "«Проверить и сохранить»")})
+        async with _profile_zernio_client(state, settings, clients_dir, pid) as client:
+            if client is None:
+                return JSONResponse(status_code=409, content={"error": "нет доступа к Zernio"})
+            try:
+                info = await client.get_number_info()
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
+        phone = info.get("phone") if isinstance(info.get("phone"), dict) else {}
+        waba = info.get("waba") if isinstance(info.get("waba"), dict) else {}
+        return {
+            "ok": True,
+            "status": str(phone.get("status") or ""),
+            "displayPhoneNumber": str(phone.get("display_phone_number") or ""),
+            "verifiedName": str(phone.get("verified_name") or ""),
+            "nameStatus": str(phone.get("name_status") or ""),
+            "qualityRating": str(phone.get("quality_rating") or ""),
+            "messagingLimitTier": str(phone.get("messaging_limit_tier") or ""),
+            "platformType": str(phone.get("platform_type") or ""),
+            "wabaName": str(waba.get("name") or "") if waba else "",
+        }
+
+    @app.post("/admin/clients/{pid}/zernio/register-number")
+    async def zernio_register_number(pid: str, request: Request):
+        """Регистрирует номер в Cloud API (шестизначный PIN).
+
+        Нужно, если у номера свой two-step PIN: без этого он висит «На
+        рассмотрении» и отправка падает с (#200) / error 133005. Тело:
+        {"pin": "123456"}; пустой pin — дефолтная регистрация Zernio.
+        """
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        if not str(cfg.get("zernio_account_id") or "").strip():
+            return JSONResponse(status_code=409, content={"error": (
+                "номер ещё не подключён — сначала сгенерируйте ссылку и нажмите "
+                "«Проверить и сохранить»")})
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        pin = str((incoming or {}).get("pin") or "").strip() if isinstance(incoming, dict) else ""
+        if pin and not re.fullmatch(r"\d{6}", pin):
+            return JSONResponse(status_code=400, content={"error": "PIN — ровно 6 цифр"})
+        async with _profile_zernio_client(state, settings, clients_dir, pid) as client:
+            if client is None:
+                return JSONResponse(status_code=409, content={"error": "нет доступа к Zernio"})
+            try:
+                result = await client.register_number(pin)
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
+        actor = "admin" if role == "admin" else f"client:{pid}"
+        _audit(clients_dir, actor, "zernio_register", pid, {}, {"registered": True})
+        logger.info("Админ-API: номер %s зарегистрирован в Cloud API", pid)
+        return {"ok": True, "registered": bool(result.get("registered")),
+                "phoneNumberId": str(result.get("phoneNumberId") or "")}
+
+    @app.get("/admin/clients/{pid}/zernio/accounts")
+    async def zernio_profile_accounts(pid: str, request: Request):
+        """Диагностика: что реально лежит в профиле Zernio у этого клиента.
+
+        Если в панели «номер не появился», здесь видно, подключён ли аккаунт и
+        активен ли он. Пустой список — клиент не довёл Embedded Signup до конца.
+        """
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        profile_id = str(cfg.get("zernio_profile_id") or "").strip()
+        client = _zernio_api_client(state, settings)
+        try:
+            accounts = await client.list_accounts(profile_id) if profile_id else []
+        except (MessagingError, MessagingTimeout) as exc:
+            return _profile_failure(exc)
+        finally:
+            await client.close()
+        return {"ok": True, "profileId": profile_id, "accounts": [
+            {"accountId": str(a.get("_id") or ""), "platform": str(a.get("platform") or ""),
+             "username": str(a.get("username") or ""), "isActive": bool(a.get("isActive"))}
+            for a in accounts
+        ]}
 
     @app.post("/admin/zernio/register-webhook")
     async def zernio_register_webhook(request: Request):
