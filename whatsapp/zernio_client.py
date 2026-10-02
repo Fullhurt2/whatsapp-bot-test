@@ -322,7 +322,7 @@ class ZernioApiClient:
         redirect_url: str,
         *,
         onboarding: str = "api",
-        hosted: bool = True,
+        hosted: bool = False,
         brand_name: str = "",
         language: str = "",
     ) -> str:

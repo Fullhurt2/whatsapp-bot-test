@@ -155,9 +155,9 @@ def main():
             check("profileId сохранён в yaml",
                   read_cfg(tmp, SLUG_A).get("zernio_profile_id") == PROFILE_A)
             call = capture.calls_to("/connect/whatsapp")[-1]
-            check("ссылка: profileId+redirect+hosted+api",
+            check("ссылка: profileId+redirect+api (без signup=hosted)",
                   f"profileId={PROFILE_A}" in call["query"]
-                  and "signup=hosted" in call["query"]
+                  and "signup=hosted" not in call["query"]
                   and "onboarding=api" in call["query"]
                   and "redirect_url=" in call["query"])
             audit = json.loads((tmp / ".audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])

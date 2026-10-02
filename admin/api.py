@@ -992,7 +992,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
                 await state.refresh_tenants()
             auth_url = await client.whatsapp_connect_url(
                 profile_id, redirect_url,
-                onboarding="api", hosted=True,
+                onboarding="api",
                 brand_name=str(cfg.get("business_name") or "").strip(),
             )
         except (MessagingError, MessagingTimeout) as exc:

@@ -138,16 +138,8 @@ def cmd_link(client: httpx.Client, args) -> None:
         "redirect_url": args.redirect_url,
         "onboarding": args.onboarding,
     }
-    if args.hosted:
-        # Хостинговая страница Zernio: сама открывает попап Meta и запоминает
-        # выбранный номер — удобно, когда у клиента несколько WABA/номеров.
-        query["signup"] = "hosted"
-        if name:
-            query["brandName"] = name
-        if args.color:
-            query["primaryColor"] = args.color
-        if args.language:
-            query["language"] = args.language
+    if name:
+        query["brandName"] = name
     if args.headless:
         query["headless"] = "true"
 
@@ -204,13 +196,8 @@ def main() -> None:
     p.add_argument("--profile-id", default="")
     p.add_argument("--client", default="", help="путь к clients/<slug>.yaml")
     p.add_argument("--redirect-url", required=True, help="куда вернуть клиента после подключения")
-    p.add_argument("--name", default="", help="бренд на странице (signup=hosted)")
     p.add_argument("--onboarding", choices=["api", "business_app"], default="api",
                    help="api = только Cloud API (рекомендуется), business_app = coexistence")
-    p.add_argument("--hosted", action="store_true", help="хостинговая страница Zernio")
-    p.add_argument("--headless", action="store_true", help="свой выбор номера")
-    p.add_argument("--color", default="", help="акцент, #RRGGBB (с --hosted)")
-    p.add_argument("--language", default="", help="язык страницы: en|es|pt-BR (с --hosted)")
     p.set_defaults(func=cmd_link)
 
     p = sub.add_parser("register-webhook", help="создать вебхук на наш сервис")
