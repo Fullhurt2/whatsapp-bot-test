@@ -400,14 +400,15 @@ def main():
             finally:
                 shutil.rmtree(tmp_b, ignore_errors=True)
 
-            print("[9] панель: профиль удалён, есть только конфиг")
+            print("[9] панель: профиль доступен для WA/Zernio, скрыт для TG")
             r = client.get("/admin")
             check("страница отдаётся", r.status_code == 200)
-            check("нет вкладки профиля",
-                  'id="f_description"' not in r.text
-                  and 'id="descriptionCounter"' not in r.text
-                  and 'id="f_profile_photo"' not in r.text
-                  and 'id="avatarCurrent"' not in r.text)
+            # Профиль теперь доступен для WA/Zernio клиентов — элементы есть в DOM (скрыты, пока клиент не выбран)
+            check("есть вкладка профиля в DOM",
+                  'id="f_description"' in r.text
+                  and 'id="descriptionCounter"' in r.text
+                  and 'id="f_profile_photo"' in r.text
+                  and 'id="avatarCurrent"' in r.text)
             check("есть вкладки конфига",
                   'id="f_business_name"' in r.text
                   and 'id="f_knowledge_base"' in r.text)

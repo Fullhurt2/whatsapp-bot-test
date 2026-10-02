@@ -306,6 +306,7 @@
           <button class="tab-btn active" data-tab="business" onclick="switchTab('business')">О бизнесе</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
+          <button class="tab-btn hidden" id="tabProfileBtn" data-tab="profile" onclick="switchTab('profile')">Профиль</button>
           <button class="tab-btn hidden" id="tabAdminBtn" data-tab="admin" onclick="switchTab('admin')">Служебное</button>
         </nav>
 
@@ -362,6 +363,51 @@
             <textarea id="f_timeout_reply_ru" class="auto-resize" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
             <label>… по-казахски</label><textarea id="f_timeout_reply_kk" class="auto-resize"></textarea>
           </details>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-profile">
+          <div class="section-title">Профиль WhatsApp</div>
+          <div class="hint">Что видят клиенты рядом с именем: описание, контакты, аватар. Правится через Zernio/Meta API.</div>
+
+          <div class="section-title">О компании</div>
+          <label for="f_about">Кратко (до 139 символов)</label>
+          <input id="f_about" class="mono" placeholder="Кофе и десерты" maxlength="139">
+          <div id="aboutCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/139</div>
+
+          <label for="f_description">Подробно (до 512 символов)</label>
+          <textarea id="f_description" class="auto-resize" placeholder="Описание бизнеса…" maxlength="512"></textarea>
+          <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
+
+          <label for="f_email">Email</label>
+          <input id="f_email" class="mono" placeholder="hello@example.com">
+
+          <label for="f_websites">Сайты (до 2, по одному на строку)</label>
+          <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://shop.example.com" rows="2"></textarea>
+
+          <label for="f_vertical">Вертикаль (категория бизнеса)</label>
+          <input id="f_vertical" class="mono" placeholder="RETAIL">
+
+          <label for="f_address">Адрес</label>
+          <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
+
+          <div class="section-title">Аватар</div>
+          <div class="hint">JPG/PNG/WebP, до 5 МБ. Рекомендуется 640×640.</div>
+          <div class="row">
+            <div style="flex:1">
+              <label>Текущий аватар</label>
+              <div id="avatarCurrent" class="hint">не загружен</div>
+            </div>
+            <div>
+              <label>Загрузить новый</label>
+              <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp">
+              <button type="button" class="btn btn-primary btn-sm" onclick="uploadProfilePhoto()">Загрузить</button>
+            </div>
+          </div>
+
+          <p>
+            <button type="button" class="btn btn-primary" onclick="saveProfile()">Сохранить профиль</button>
+          </p>
+          <div class="status" id="profileStatus" role="status"></div>
         </section>
 
         <section class="tab-panel hidden" id="tab-admin">
@@ -661,6 +707,11 @@ function switchTab(name) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("hidden", panel.id !== "tab-" + name);
   });
+  // Load profile data when Profile tab is opened
+  if (name === "profile") {
+    loadProfile();
+    setupProfileCounters();
+  }
 }
 
 function backToList(skipConfirm) {
@@ -707,6 +758,9 @@ async function openEditor(pid) {
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
+  // Show Profile tab for WhatsApp (wa) and Zernio clients
+  const isWhatsApp = ["wa", "zernio"].includes(data.provider);
+  show("tabProfileBtn", isWhatsApp);
   currentProvider = ["tg", "zernio"].includes(data.provider) ? data.provider : "wa";
   applyProviderUI(currentProvider);
   // Zernio: сбрасываем состояние блока подключения при открытии другого клиента.
@@ -911,6 +965,114 @@ async function zernioRegisterNumber() {
   }
   status("zernioNumberStatus", "Готово, номер зарегистрирован" +
     (data.phoneNumberId ? " (phoneNumberId " + data.phoneNumberId + ")" : "") + ". Проверьте статус кнопкой выше.");
+}
+
+// --- WhatsApp Profile (Meta/Zernio) ------------------------------------------
+
+function updateCounter(inputId, counterId, maxLen) {
+  const input = $(inputId);
+  const counter = $(counterId);
+  if (input && counter) {
+    const len = (input.value || "").length;
+    counter.textContent = len + "/" + maxLen;
+    counter.style.color = len > maxLen ? "var(--danger)" : "#666";
+  }
+}
+
+function setupProfileCounters() {
+  const aboutInput = $("f_about");
+  const descInput = $("f_description");
+  if (aboutInput) aboutInput.addEventListener("input", () => updateCounter("f_about", "aboutCounter", 139));
+  if (descInput) descInput.addEventListener("input", () => updateCounter("f_description", "descriptionCounter", 512));
+}
+
+async function loadProfile() {
+  const statusEl = $("profileStatus");
+  status(statusEl, "Загружаем профиль…");
+  try {
+    const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile");
+    if (!ok) {
+      if (code === 409) {
+        status(statusEl, "Профиль недоступен для этого провайдера", true);
+      } else {
+        status(statusEl, humanError(code, data), true);
+      }
+      return;
+    }
+    // Fill form
+    $("f_about").value = data.about || "";
+    $("f_description").value = data.description || "";
+    $("f_email").value = data.email || "";
+    $("f_websites").value = (data.websites || []).join("\n");
+    $("f_vertical").value = data.vertical || "";
+    $("f_address").value = data.address || "";
+    // Avatar
+    const avatarEl = $("avatarCurrent");
+    if (data.photo_url) {
+      avatarEl.innerHTML = '<img src="' + esc(data.photo_url) + '" style="max-width:100px;max-height:100px;border-radius:8px">';
+    } else {
+      avatarEl.textContent = "не загружен";
+    }
+    updateCounter("f_about", "aboutCounter", 139);
+    updateCounter("f_description", "descriptionCounter", 512);
+    status(statusEl, "Профиль загружен", false);
+  } catch (e) {
+    status(statusEl, "Ошибка загрузки: " + e.message, true);
+  }
+}
+
+async function saveProfile() {
+  const payload = {
+    about: $("f_about").value.trim(),
+    description: $("f_description").value.trim(),
+    email: $("f_email").value.trim(),
+    websites: $("f_websites").value.split("\n").map(s => s.trim()).filter(Boolean),
+    vertical: $("f_vertical").value.trim(),
+    address: $("f_address").value.trim(),
+  };
+  // Remove empty fields
+  Object.keys(payload).forEach(k => { if (!payload[k]) delete payload[k]; });
+  if (Object.keys(payload).length === 0) {
+    status($("profileStatus"), "Нечего сохранять", true);
+    return;
+  }
+  const btn = $("saveBtn"); // reuse saveBtn? No, need a different button ID
+  // We'll use a specific save button for profile
+  const saveBtn = document.querySelector("#tab-profile .btn-primary");
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Сохраняем…"; }
+  try {
+    const { ok, code, data } = await api("PATCH", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile", payload);
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
+    if (!ok) { status($("profileStatus"), humanError(code, data), true); return; }
+    status($("profileStatus"), "Профиль сохранён", false);
+  } catch (e) {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
+    status($("profileStatus"), "Ошибка: " + e.message, true);
+  }
+}
+
+async function uploadProfilePhoto() {
+  const input = $("f_profile_photo");
+  if (!input || !input.files.length) { status($("profileStatus"), "Выберите файл", true); return; }
+  const file = input.files[0];
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(file.type)) { status($("profileStatus"), "Только JPG/PNG/WebP", true); return; }
+  if (file.size > 5 * 1024 * 1024) { status($("profileStatus"), "Файл больше 5 МБ", true); return; }
+  const formData = new FormData();
+  formData.append("file", file);
+  const statusEl = $("profileStatus");
+  status(statusEl, "Загружаем аватар…");
+  try {
+    const { ok, code, data } = await api("POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile/photo", formData, { headers: {} });
+    if (!ok) { status(statusEl, humanError(code, data), true); return; }
+    // Reload profile to show new avatar
+    await loadProfile();
+    input.value = "";
+    status(statusEl, "Аватар загружен", false);
+  } catch (e) {
+    status(statusEl, "Ошибка: " + e.message, true);
+  }
+}
 }
 
 async function copyZernioLink() {
