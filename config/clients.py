@@ -136,8 +136,11 @@ def validate_tenant_config(
         tenant_key — phone_number_id (цифры);
       - tg: обязателен telegram_bot_token, tenant_key должен совпадать с id
         бота из токена (id бота — ключ клиента в реестре);
-      - zernio: обязателен zernio_account_id (24 hex) — он и есть ключ
-        маршрутизации; имя файла может быть любым slug, глобальный
+      - zernio: zernio_account_id (24 hex) — ключ маршрутизации, но он
+        появляется только после подключения номера. Пока аккаунт не подключён,
+        поле можно не задавать (warning): клиент создаётся, ссылка Embedded
+        Signup выдаётся кнопкой в панели, а accountId подставляет
+        «Проверить и сохранить». Имя файла — произвольный slug; глобальный
         ZERNIO_API_KEY один на всех клиентов.
     """
     if not isinstance(cfg, dict):
@@ -149,6 +152,7 @@ def validate_tenant_config(
     business_name = str(cfg.get("business_name") or "").strip()
 
     problems: list[str] = []
+    warnings: list[str] = []
     if provider not in ("wa", "tg", "zernio"):
         problems.append(
             f"provider={provider!r} не поддерживается (ожидается 'wa', 'tg' или 'zernio')"
@@ -161,7 +165,8 @@ def validate_tenant_config(
         problems.append("llm.model не задан (yaml или LLM_MODEL в .env)")
 
     # Провайдер и его обязательный секрет/идентификатор. У WA есть глобальный
-    # fallback-токен, у Telegram — нет, у Zernio ключ общий, но нужен accountId.
+    # fallback-токен, у Telegram — нет, у Zernio ключ общий; accountId у Zernio
+    # появляется после подключения номера, поэтому до него это лишь warning.
     access_token = ""
     telegram_bot_token = ""
     zernio_account_id = ""
@@ -181,12 +186,16 @@ def validate_tenant_config(
                 )
     elif provider == "zernio":
         zernio_account_id = str(cfg.get("zernio_account_id") or "").strip().lower()
-        if not zernio_account_id:
-            problems.append("zernio_account_id не задан (id аккаунта из Zernio)")
-        elif not is_valid_zernio_account_id(zernio_account_id):
+        if zernio_account_id and not is_valid_zernio_account_id(zernio_account_id):
             problems.append(
                 "zernio_account_id не похож на id аккаунта Zernio "
                 "(ожидается 24 hex-символа, например 66b2e19d8c3f5a7e9d0b1c2d)"
+            )
+        elif not zernio_account_id:
+            warnings.append(
+                "Zernio-аккаунт ещё не подключён: откройте клиента в панели и "
+                "нажмите «Сгенерировать ссылку подключения», затем «Проверить и "
+                "сохранить» — accountId подставится сам"
             )
     else:
         # Имя файла Meta-клиента — phone_number_id (цифры): это ключ маршрутизации.
@@ -206,7 +215,8 @@ def validate_tenant_config(
     else:
         owner_phone, owner_warning = _resolve_owner_phone(cfg, file_name)
         owner_chat = ""
-    warnings = [owner_warning] if owner_warning else []
+    if owner_warning:
+        warnings.append(owner_warning)
     if problems:
         return None, problems, warnings
 

@@ -141,6 +141,9 @@ def main():
     try:
         with TestClient(app) as client:
             app.state.state.zernio_api_factory = capture.factory
+            print("[0] Zernio-клиент без accountId зарегистрирован (номер ещё не подключён)")
+            check("клиент в реестре по slug", SLUG_A in app.state.state.tenants)
+
             print("[1] connect-link: профиль создаётся и сохраняется, ссылка отдана")
             r = client.post(link_url, headers=headers,
                             json={"redirect_url": PUBLIC + "/connect/done"})
@@ -209,6 +212,15 @@ def main():
             check("без токена -> 401", r.status_code == 401)
             r = client.post(f"/admin/clients/{SLUG_TG}/zernio/connect-link", headers=headers)
             check("не zernio-клиент -> 409", r.status_code == 409)
+
+            print("[7b] создание Zernio-клиента без accountId через PUT")
+            r = client.put("/admin/clients/new-shop", headers=headers, json={
+                "provider": "zernio", "business_name": "Новый", "tone": "в",
+                "language": "ru", "knowledge_base": "тест", "llm": {}})
+            check("200 и warning про подключение", r.status_code == 200
+                  and any("Сгенерировать ссылку" in w for w in r.json().get("warnings", [])))
+            check("новый клиент в реестре по slug",
+                  "new-shop" in app.state.state.tenants)
 
             print("[8] вебхук сервиса")
             r = client.post("/admin/zernio/register-webhook",

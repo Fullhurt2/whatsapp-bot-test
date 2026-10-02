@@ -260,12 +260,6 @@
           <input id="newPid" class="mono" placeholder="например 1354249714436396">
         </div>
 
-        <div id="newZernioWrap" class="hidden">
-          <label>zernio_account_id</label>
-          <div class="hint">Id подключённого WhatsApp-аккаунта в Zernio — 24 hex-символа (дашборд Zernio → аккаунт)</div>
-          <input id="newZernioAccount" class="mono" placeholder="например 66b2e19d8c3f5a7e9d0b1c2d">
-        </div>
-
         <label>Название бизнеса</label>
         <input id="newBusiness" placeholder="Кофейня на Абая">
         <label>Информация о бизнесе (можно дополнить позже)</label>
@@ -498,11 +492,10 @@ function setNewProvider(provider) {
   const isTg = provider === "tg";
   const isZernio = provider === "zernio";
   show("newPidWrap", !isTg);
-  show("newZernioWrap", isZernio);
   show("newTokenWrap", !isZernio);
   if (isZernio) {
     $("newPidLabel").textContent = "Ключ клиента (имя файла, латиницей)";
-    $("newPidHint").textContent = "Например nails-studio — этот же ярлык увидят в админке";
+    $("newPidHint").textContent = "Например nails-studio. Номер подключите после создания — кнопкой в карточке клиента";
     $("newPid").placeholder = "например nails-studio";
   } else {
     $("newPidLabel").textContent = "phone_number_id";
@@ -620,7 +613,7 @@ function renderClientList(filterText) {
     const tokenBits = (isTg
       ? "бот " + c.phone_number_id
       : (isZernio
-        ? "аккаунт " + (c.zernio_account_id || "—")
+        ? (c.zernio_account_id ? "аккаунт " + c.zernio_account_id : "номер не подключён")
         : (c.has_own_token ? "свой токен" : "общий токен"))) +
       (c.has_management_token ? " · панель есть" : "");
     return '<div class="client-row' + active + '" data-pid="' + esc(c.phone_number_id) + '">' +
@@ -708,6 +701,9 @@ async function openEditor(pid) {
   $("zernioLink").value = "";
   status("zernioStatus", "");
   status("zernioWebhookStatus", "");
+  if (currentProvider === "zernio" && !$("f_zernio_account_id").value.trim()) {
+    status("zernioStatus", "Номер ещё не подключён — нажмите «Сгенерировать ссылку подключения» и отправьте её клиенту.");
+  }
   $("tgWebhookHint").textContent = currentProvider === "tg"
     ? "Адрес вебхука: " + location.origin + "/webhooks/telegram/" + pid +
       " — привязывается автоматически при сохранении, если в .env задан PUBLIC_BASE_URL."
@@ -891,19 +887,14 @@ async function createClient() {
     payload.provider = "tg";
     payload.telegram_bot_token = token;
   } else if (newProvider === "zernio") {
-    // Ключ клиента Zernio — slug (имя файла); accountId задаётся отдельным полем.
+    // Ключ клиента Zernio — slug (имя файла); номер подключается позже
+    // кнопкой «Сгенерировать ссылку подключения» в карточке клиента.
     pid = $("newPid").value.trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(pid)) {
       status("listStatus", "Ключ клиента — латиница, цифры, дефис или подчёркивание (например nails-studio).", true);
       return;
     }
-    const account = $("newZernioAccount").value.trim().toLowerCase();
-    if (!/^[0-9a-f]{24}$/.test(account)) {
-      status("listStatus", "zernio_account_id — 24 hex-символа, скопируйте id аккаунта из дашборда Zernio.", true);
-      return;
-    }
     payload.provider = "zernio";
-    payload.zernio_account_id = account;
   } else {
     pid = $("newPid").value.trim();
     if (!/^\d{1,20}$/.test(pid)) {
@@ -919,13 +910,14 @@ async function createClient() {
     return;
   }
   $("newPid").value = "";
-  $("newZernioAccount").value = "";
   $("newToken").value = "";
   $("newMgmtToken").value = "";
   show("newCard", false);
   loadList();
   const warnings = data.warnings || [];
   if (warnings.length) status("listStatus", "Клиент создан. " + warnings.join(" "), false);
+  // Zernio: сразу открываем карточку — там кнопки подключения номера.
+  if (newProvider === "zernio" && role === "admin") openEditor(pid);
 }
 
 function login() {
@@ -966,7 +958,7 @@ window.addEventListener("beforeunload", (event) => {
 
 // Enter отправляет формы входа и создания клиента; Ctrl/Cmd+S сохраняет настройки.
 $("tokenInput").addEventListener("keydown", (event) => { if (event.key === "Enter") login(); });
-["newPid", "newZernioAccount", "newBusiness", "newToken", "newMgmtToken"].forEach((id) => {
+["newPid", "newBusiness", "newToken", "newMgmtToken"].forEach((id) => {
   $(id).addEventListener("keydown", (event) => { if (event.key === "Enter") createClient(); });
 });
 document.addEventListener("keydown", (event) => {
