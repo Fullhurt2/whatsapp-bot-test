@@ -4,9 +4,13 @@
 
 import asyncio
 import dataclasses
+import os
 import sys
 from collections import deque
 from pathlib import Path
+
+# Отключаем БД для тестов (тесты используют in-memory историю как раньше)
+os.environ["JAUAP_TEST_MODE"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import logging

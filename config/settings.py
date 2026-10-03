@@ -125,6 +125,11 @@ class Settings:
     public_base_url: str = ""
     # Chat id владельца в Telegram (provider=tg) — куда слать уведомления.
     owner_telegram_chat_id: str = ""
+    # --- Telegram-бот владельца (общий для всех клиентов) ---
+    # Токен бота для уведомлений менеджеров (отдельный от клиентских ботов).
+    telegram_owner_bot_token: str = ""
+    # Секрет вебхука для бота владельца (заголовок X-Telegram-Bot-Api-Secret-Token).
+    telegram_owner_webhook_secret: str = ""
     # --- Zernio: уведомление владельцу шаблоном ---
     # Вне 24-часового окна WhatsApp свободный текст запрещён, поэтому
     # уведомление владельцу уходит approved-шаблоном с двумя переменными тела
@@ -137,6 +142,31 @@ class Settings:
     fallback_reply_kk: str = ""
     timeout_reply_ru: str = ""
     timeout_reply_kk: str = ""
+
+    # --- Новые поля для Этапов 2-5 ---
+    # Ручной режим: при каких причинах handoff ставить диалог на паузу (manual)
+    pause_on: list[str] = field(default_factory=lambda: ["booking", "complaint", "human_requested"])
+    # Глобальный флаг: ставить ли на паузу при handoff (default true)
+    handoff_pauses_bot: bool = True
+    # Таймаут ручного режима в часах (auto-возврат к боту)
+    manual_timeout_hours: int = 12
+    # Часовой пояс клиента (для аналитики "часы пик")
+    timezone: str = "Asia/Almaty"
+    # Каналы уведомлений владельца: ["telegram"] | ["whatsapp"] | ["telegram", "whatsapp"]
+    notify_channels: list[str] = field(default_factory=lambda: ["telegram"])
+    # Как уведомлять о [NO_ANSWER]: "silent" | "normal" | "off"
+    notify_on_no_answer: str = "silent"
+    # Минуты на один ответ бота (для оценки сэкономленного времени)
+    minutes_per_reply: int = 2
+    # Тестовые номера — исключаются из статистики
+    test_phones: list[str] = field(default_factory=list)
+    # Флаги фич (включаются по одному на тестовом клиенте)
+    features: dict[str, bool] = field(default_factory=lambda: {
+        "live_chat": False,
+        "telegram_notify": False,
+        "unanswered": False,
+        "stats": False,
+    })
 
     # Встроенные служебные ответы (lang — язык сообщения клиента: "ru"/"kk").
     _FALLBACK_TEMPLATES = {
