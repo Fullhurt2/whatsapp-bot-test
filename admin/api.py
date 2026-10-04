@@ -1360,6 +1360,397 @@ def register_admin_api(app, settings: Settings, state) -> None:
         return {"ok": True, "url": target,
                 "webhookId": str(webhook.get("_id") or "")}
 
+    @app.get("/admin/clients/{pid}/conversations")
+    async def get_conversations(pid: str, request: Request,
+                                status: str | None = None,
+                                q: str | None = None,
+                                cursor: str | None = None,
+                                since: str | None = None,
+                                limit: int = 50):
+        """Список диалогов клиента с фильтрами и пагинацией."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+
+        # Фильтры
+        if status and status not in ("bot", "manual"):
+            return JSONResponse(status_code=400, content={"error": "status должен быть 'bot' или 'manual'"})
+        if limit < 1 or limit > 100:
+            limit = 50
+
+        convs = list_conversations(pid, status=status, q=q, cursor=cursor, since=since, limit=limit)
+        return {"conversations": convs, "count": len(convs)}
+
+
+    @app.get("/admin/clients/{pid}/conversations/{cid}/messages")
+    async def get_conversation_messages(pid: str, cid: str, request: Request,
+                                        before: str | None = None,
+                                        limit: int = 50):
+        """История сообщений диалога (новые -> старые)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, pid):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+
+        if limit < 1 or limit > 200:
+            limit = 50
+
+        msgs = get_messages(cid, before=before, limit=limit)
+        return {"messages": msgs, "count": len(msgs)}
+
+
+    @app.post("/admin/clients/{pid}/conversations/{cid}/messages")
+    async def send_message_in_conversation(pid: str, cid: str, request: Request):
+        """Отправить сообщение от менеджера в диалог.
+        Тело: {"text": "...", "idempotency_key": "..."}
+        Возвращает 409 window_closed, если 24-часовое окно закрыто.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, pid):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+
+        # Проверка 24-часового окна (только для WhatsApp)
+        provider = _client_provider(clients_dir, pid)
+        if provider in ("wa", "zernio"):
+            last_client = get_last_client_message_at(cid)
+            if last_client:
+                from datetime import datetime, timedelta
+                last_dt = datetime.fromisoformat(last_client.replace("Z", "+00:00"))
+                if datetime.utcnow() - last_dt > timedelta(hours=24):
+                    return JSONResponse(
+                        status_code=409,
+                        content={"error": "window_closed", "message": "24-часовое окно закрыто, используйте шаблон"}
+                    )
+
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        if not isinstance(incoming, dict):
+            return JSONResponse(status_code=400, content={"error": "ожидается JSON-объект"})
+        text = str(incoming.get("text") or "").strip()
+        if not text:
+            return JSONResponse(status_code=400, content={"error": "текст сообщения обязателен"})
+        idempotency_key = str(incoming.get("idempotency_key") or "").strip()
+
+        sender = await _conversation_client(state, settings, clients_dir, pid)
+        if sender is None:
+            return JSONResponse(status_code=409, content={"error": "нет транспорта для отправки"})
+
+        conversation_id = conv.get("zernio_conversation_id", "")
+        if provider == "zernio" and not conversation_id:
+            return JSONResponse(status_code=409, content={"error": "нет conversation_id для Zernio"})
+
+        # Отправляем сообщение
+        try:
+            if provider == "zernio":
+                await sender.send_text(conversation_id, text, conversation_id=conversation_id)
+            else:
+                # Meta - отправка по номеру
+                await sender.send_text(conv["contact_phone"], text)
+
+            # Сохраняем сообщение роли human
+            add_message(
+                conversation_id=cid,
+                role="human",
+                text=text,
+                content_kind="text",
+                provider_message_id=idempotency_key,
+                delivery_status="sent",
+            )
+
+            # Обновляем last_message_at
+            from storage import update_last_message_times
+            update_last_message_times(cid, is_client=False)
+
+            # Если был открытый handoff — отмечаем first_human_reply
+            from storage import get_open_handoff, mark_first_human_reply
+            open_handoff = get_open_handoff(cid)
+            if open_handoff:
+                mark_first_human_reply(open_handoff["id"])
+
+        except MessagingError as exc:
+            return JSONResponse(status_code=502, content={"error": str(exc)})
+
+        return {"ok": True, "delivered": True}
+
+
+    @app.post("/admin/clients/{pid}/conversations/{cid}/mode")
+    async def set_conversation_mode(pid: str, cid: str, request: Request):
+        """Переключить режим диалога: 'bot' или 'manual'."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, pid):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        if not isinstance(incoming, dict):
+            return JSONResponse(status_code=400, content={"error": "ожидается JSON-объект"})
+        mode = str(incoming.get("mode") or "").strip()
+        if mode not in ("bot", "manual"):
+            return JSONResponse(status_code=400, content={"error": "mode должен быть 'bot' или 'manual'"})
+
+        update_conversation_status(cid, mode)
+
+        # Если переключаем на bot — сбрасываем unread_count
+        if mode == "bot":
+            from storage import mark_read
+            mark_read(cid)
+
+        return {"ok": True, "conversation_id": cid, "mode": mode}
+
+
+    @app.post("/admin/clients/{pid}/conversations/{cid}/read")
+    async def mark_conversation_read(pid: str, cid: str, request: Request):
+        """Сбросить счётчик непрочитанных сообщений."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, pid):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+        from storage import mark_read
+        mark_read(cid)
+        return {"ok": True}
+
+
+    # --- Telegram-привязка для уведомлений -------------------------------------------
+
+
+    @app.post("/admin/clients/{pid}/telegram/link-code")
+    async def tg_link_code(pid: str, request: Request):
+        """Создать одноразовый код привязки Telegram (на 15 минут)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+
+        from storage import create_link_code
+        link = create_link_code(pid)
+        return {"ok": True, "code": link["code"], "url": link["url"], "expires_at": link["expires_at"]}
+
+
+    @app.get("/admin/clients/{pid}/telegram")
+    async def tg_bindings_list(pid: str, request: Request):
+        """Список привязанных Telegram-чатов."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import get_tg_bindings
+        return {"bindings": get_tg_bindings(pid)}
+
+
+    @app.delete("/admin/clients/{pid}/telegram/{binding_id}")
+    async def tg_binding_remove(pid: str, binding_id: int, request: Request):
+        """Отвязать Telegram-чат."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import remove_tg_binding
+        if not remove_tg_binding(pid, binding_id):
+            return JSONResponse(status_code=404, content={"error": "привязка не найдена"})
+        return {"ok": True}
+
+
+    # --- Вопросы без ответа -----------------------------------------------------------
+
+
+    @app.get("/admin/clients/{pid}/unanswered")
+    async def get_unanswered(pid: str, request: Request, status: str | None = None):
+        """Список групп вопросов без ответа."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import list_unanswered_groups
+        groups = list_unanswered_groups(pid, status=status)
+        return {"groups": groups}
+
+
+    @app.post("/admin/clients/{pid}/unanswered/{group_id}/answer")
+    async def answer_unanswered(pid: str, group_id: int, request: Request):
+        """Добавить ответ в базу знаний и закрыть группу вопросов."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        answer = str(incoming.get("answer") or "").strip()
+        if not answer:
+            return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
+
+        from storage import get_unanswered_group, get_questions_for_group, mark_question_answered, update_group_status, create_conversation
+        group = get_unanswered_group(group_id)
+        if not group or group.get("client_key") != pid:
+            return JSONResponse(status_code=404, content={"error": "группа не найдена"})
+
+        # Дописываем «Вопрос: … Ответ: …» в knowledge_base
+        path = _client_yaml_path(clients_dir, pid)
+        cfg = _read_cfg(path) or {}
+        old_kb = str(cfg.get("knowledge_base") or "").strip()
+        questions = get_questions_for_group(group_id)
+        q_texts = "\n".join(f"Вопрос: {q['question']}\nОтвет: {answer}" for q in questions)
+        new_kb = (old_kb + "\n\n---\n\n" + q_texts).strip() if old_kb else q_texts
+
+        _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
+                             "admin" if role == "admin" else f"client:{pid}", "unanswered_answer", state)
+
+        # Отмечаем вопросы отвеченными
+        for q in questions:
+            mark_question_answered(q["id"], answer)
+        update_group_status(group_id, "answered")
+
+        await state.refresh_tenants()
+        return {"ok": True, "updated_kb": True}
+
+
+    @app.post("/admin/clients/{pid}/unanswered/{group_id}/ignore")
+    async def ignore_unanswered(pid: str, group_id: int, request: Request):
+        """Скрыть группу вопросов."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import update_group_status
+        if not update_group_status(group_id, "ignored"):
+            return JSONResponse(status_code=404, content={"error": "группа не найдена"})
+        return {"ok": True}
+
+
+    @app.post("/admin/clients/{pid}/unanswered/regroup")
+    async def regroup_unanswered(pid: str, request: Request):
+        """Пересчитать группы похожих вопросов (LLM)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+
+        # Получаем последние необработанные вопросы
+        from storage import get_recent_unanswered_for_regroup, get_last_regroup_time, create_unanswered_group
+        questions = get_recent_unanswered_for_regroup(pid, limit=200)
+        if len(questions) < 2:
+            return {"ok": True, "groups_created": 0, "message": "недостаточно вопросов для группировки"}
+
+        # Промпт для LLM группировки
+        system_prompt = (
+            "Ты — помощник для группировки похожих вопросов клиентов. "
+            "Дан список вопросов. Сгруппируй их по смыслу: вопросы об одной и той же теме "
+            "(например, цена, время работы, запись на маникюр) должны быть в одной группе. "
+            "Верни JSON: список групп, где каждая группа — объект с полями "
+            "'name' (краткое название темы) и 'question_ids' (массив id вопросов). "
+            "Не придумывай вопросы, используй только те, что даны. Вопросы, которые не "
+            "подходят ни к какой группе, не включай."
+        )
+        user_prompt = "Вопросы:\n" + "\n".join(f"{q['id']}: {q['question']}" for q in questions)
+
+        # Используем LLM клиента для группировки
+        from config.settings import Settings
+        from services.llm_client import LLMClient
+
+        client_settings = _read_cfg(_client_yaml_path(clients_dir, pid)) or {}
+        llm_params = client_settings.get("llm") or {}
+        llm = LLMClient(
+            settings.llm_api_url,
+            settings.llm_api_key,
+            type("LLMParams", (), {
+                "model": str(llm_params.get("model") or settings.llm.model),
+                "temperature": float(llm_params.get("temperature", 0.3)),
+                "max_tokens": int(llm_params.get("max_tokens", 500)),
+                "timeout_seconds": int(llm_params.get("timeout_seconds", 15)),
+            })()
+        )
+
+        try:
+            response = await llm.chat(system_prompt, user_prompt, history=[])
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": f"ошибка LLM: {exc}"})
+
+        # Парсим JSON ответ
+        import json
+        try:
+            groups = json.loads(response)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=500, content={"error": "LLM вернул невалидный JSON"})
+
+        # Создаём группы в БД
+        created = 0
+        for g in groups:
+            name = str(g.get("name") or "").strip()
+            ids = g.get("question_ids") or []
+            if name and ids:
+                create_unanswered_group(pid, name, ids)
+                created += 1
+
+        return {"ok": True, "groups_created": created, "groups": groups}
+
+
+    # --- Аналитика -------------------------------------------------------------------
+
+
+    @app.get("/admin/clients/{pid}/stats")
+    async def get_client_stats(pid: str, request: Request,
+                               from_date: str | None = None,
+                               to_date: str | None = None):
+        """Показатели клиента за период."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if _client_yaml_path(clients_dir, pid) is None:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+
+        from storage import parse_date_range, get_client_stats
+        from_date, to_date = parse_date_range(from_date, to_date)
+        stats = get_client_stats(pid, from_date, to_date)
+        return stats
+
+
+    @app.get("/admin/clients/{pid}/stats/export.csv")
+    async def export_client_stats(pid: str, request: Request,
+                                  from_date: str | None = None,
+                                  to_date: str | None = None):
+        """Экспорт статистики в CSV (UTF-8 с BOM для Excel)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import parse_date_range, export_stats_csv
+        from_date, to_date = parse_date_range(from_date, to_date)
+        csv_data = export_stats_csv(pid, from_date, to_date)
+        return PlainTextResponse(
+            csv_data,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="stats-{pid}-{from_date[:10]}-{to_date[:10]}.csv"'}
+        )
+
+
+    @app.get("/admin/stats/overview")
+    async def admin_stats_overview(request: Request,
+                                   from_date: str | None = None,
+                                   to_date: str | None = None):
+        """Сводка по всем клиентам и расходы (только админ)."""
+        role, error = _authorize(settings, request, clients_dir, pid=None)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нужен админ-токен"})
+        if role != "admin":
+            return JSONResponse(status_code=403, content={"error": "только для администратора"})
+
+        from storage import parse_date_range, get_admin_overview_stats
+        from_date, to_date = parse_date_range(from_date, to_date)
+        stats = get_admin_overview_stats(from_date, to_date)
+        return stats
+
+
 
 # --- Живой чат: диалоги и сообщения ---------------------------------------------
 
@@ -1382,394 +1773,4 @@ def _check_conv_ownership(conv, pid: str) -> bool:
     """Проверка, что диалог принадлежит клиенту."""
     return conv and conv.get("client_key") == pid
 
-
-@app.get("/admin/clients/{pid}/conversations")
-async def get_conversations(pid: str, request: Request,
-                            status: str | None = None,
-                            q: str | None = None,
-                            cursor: str | None = None,
-                            since: str | None = None,
-                            limit: int = 50):
-    """Список диалогов клиента с фильтрами и пагинацией."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    if _client_yaml_path(clients_dir, pid) is None:
-        return JSONResponse(status_code=404, content={"error": "клиент не найден"})
-
-    # Фильтры
-    if status and status not in ("bot", "manual"):
-        return JSONResponse(status_code=400, content={"error": "status должен быть 'bot' или 'manual'"})
-    if limit < 1 or limit > 100:
-        limit = 50
-
-    convs = list_conversations(pid, status=status, q=q, cursor=cursor, since=since, limit=limit)
-    return {"conversations": convs, "count": len(convs)}
-
-
-@app.get("/admin/clients/{pid}/conversations/{cid}/messages")
-async def get_conversation_messages(pid: str, cid: str, request: Request,
-                                    before: str | None = None,
-                                    limit: int = 50):
-    """История сообщений диалога (новые -> старые)."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    conv = get_conversation(cid)
-    if not _check_conv_ownership(conv, pid):
-        return JSONResponse(status_code=404, content={"error": "диалог не найден"})
-
-    if limit < 1 or limit > 200:
-        limit = 50
-
-    msgs = get_messages(cid, before=before, limit=limit)
-    return {"messages": msgs, "count": len(msgs)}
-
-
-@app.post("/admin/clients/{pid}/conversations/{cid}/messages")
-async def send_message_in_conversation(pid: str, cid: str, request: Request):
-    """Отправить сообщение от менеджера в диалог.
-    Тело: {"text": "...", "idempotency_key": "..."}
-    Возвращает 409 window_closed, если 24-часовое окно закрыто.
-    """
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    conv = get_conversation(cid)
-    if not _check_conv_ownership(conv, pid):
-        return JSONResponse(status_code=404, content={"error": "диалог не найден"})
-
-    # Проверка 24-часового окна (только для WhatsApp)
-    provider = _client_provider(clients_dir, pid)
-    if provider in ("wa", "zernio"):
-        last_client = get_last_client_message_at(cid)
-        if last_client:
-            from datetime import datetime, timedelta
-            last_dt = datetime.fromisoformat(last_client.replace("Z", "+00:00"))
-            if datetime.utcnow() - last_dt > timedelta(hours=24):
-                return JSONResponse(
-                    status_code=409,
-                    content={"error": "window_closed", "message": "24-часовое окно закрыто, используйте шаблон"}
-                )
-
-    try:
-        incoming = json.loads(await request.body() or b"{}")
-    except ValueError:
-        return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
-    if not isinstance(incoming, dict):
-        return JSONResponse(status_code=400, content={"error": "ожидается JSON-объект"})
-    text = str(incoming.get("text") or "").strip()
-    if not text:
-        return JSONResponse(status_code=400, content={"error": "текст сообщения обязателен"})
-    idempotency_key = str(incoming.get("idempotency_key") or "").strip()
-
-    sender = await _conversation_client(state, settings, clients_dir, pid)
-    if sender is None:
-        return JSONResponse(status_code=409, content={"error": "нет транспорта для отправки"})
-
-    conversation_id = conv.get("zernio_conversation_id", "")
-    if provider == "zernio" and not conversation_id:
-        return JSONResponse(status_code=409, content={"error": "нет conversation_id для Zernio"})
-
-    # Отправляем сообщение
-    try:
-        if provider == "zernio":
-            await sender.send_text(conversation_id, text, conversation_id=conversation_id)
-        else:
-            # Meta - отправка по номеру
-            await sender.send_text(conv["contact_phone"], text)
-
-        # Сохраняем сообщение роли human
-        add_message(
-            conversation_id=cid,
-            role="human",
-            text=text,
-            content_kind="text",
-            provider_message_id=idempotency_key,
-            delivery_status="sent",
-        )
-
-        # Обновляем last_message_at
-        from storage import update_last_message_times
-        update_last_message_times(cid, is_client=False)
-
-        # Если был открытый handoff — отмечаем first_human_reply
-        from storage import get_open_handoff, mark_first_human_reply
-        open_handoff = get_open_handoff(cid)
-        if open_handoff:
-            mark_first_human_reply(open_handoff["id"])
-
-    except MessagingError as exc:
-        return JSONResponse(status_code=502, content={"error": str(exc)})
-
-    return {"ok": True, "delivered": True}
-
-
-@app.post("/admin/clients/{pid}/conversations/{cid}/mode")
-async def set_conversation_mode(pid: str, cid: str, request: Request):
-    """Переключить режим диалога: 'bot' или 'manual'."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    conv = get_conversation(cid)
-    if not _check_conv_ownership(conv, pid):
-        return JSONResponse(status_code=404, content={"error": "диалог не найден"})
-
-    try:
-        incoming = json.loads(await request.body() or b"{}")
-    except ValueError:
-        return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
-    if not isinstance(incoming, dict):
-        return JSONResponse(status_code=400, content={"error": "ожидается JSON-объект"})
-    mode = str(incoming.get("mode") or "").strip()
-    if mode not in ("bot", "manual"):
-        return JSONResponse(status_code=400, content={"error": "mode должен быть 'bot' или 'manual'"})
-
-    update_conversation_status(cid, mode)
-
-    # Если переключаем на bot — сбрасываем unread_count
-    if mode == "bot":
-        from storage import mark_read
-        mark_read(cid)
-
-    return {"ok": True, "conversation_id": cid, "mode": mode}
-
-
-@app.post("/admin/clients/{pid}/conversations/{cid}/read")
-async def mark_conversation_read(pid: str, cid: str, request: Request):
-    """Сбросить счётчик непрочитанных сообщений."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    conv = get_conversation(cid)
-    if not _check_conv_ownership(conv, pid):
-        return JSONResponse(status_code=404, content={"error": "диалог не найден"})
-    from storage import mark_read
-    mark_read(cid)
-    return {"ok": True}
-
-
-# --- Telegram-привязка для уведомлений -------------------------------------------
-
-
-@app.post("/admin/clients/{pid}/telegram/link-code")
-async def tg_link_code(pid: str, request: Request):
-    """Создать одноразовый код привязки Telegram (на 15 минут)."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    if _client_yaml_path(clients_dir, pid) is None:
-        return JSONResponse(status_code=404, content={"error": "клиент не найден"})
-
-    from storage import create_link_code
-    link = create_link_code(pid)
-    return {"ok": True, "code": link["code"], "url": link["url"], "expires_at": link["expires_at"]}
-
-
-@app.get("/admin/clients/{pid}/telegram")
-async def tg_bindings_list(pid: str, request: Request):
-    """Список привязанных Telegram-чатов."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    from storage import get_tg_bindings
-    return {"bindings": get_tg_bindings(pid)}
-
-
-@app.delete("/admin/clients/{pid}/telegram/{binding_id}")
-async def tg_binding_remove(pid: str, binding_id: int, request: Request):
-    """Отвязать Telegram-чат."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    from storage import remove_tg_binding
-    if not remove_tg_binding(pid, binding_id):
-        return JSONResponse(status_code=404, content={"error": "привязка не найдена"})
-    return {"ok": True}
-
-
-# --- Вопросы без ответа -----------------------------------------------------------
-
-
-@app.get("/admin/clients/{pid}/unanswered")
-async def get_unanswered(pid: str, request: Request, status: str | None = None):
-    """Список групп вопросов без ответа."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    from storage import list_unanswered_groups
-    groups = list_unanswered_groups(pid, status=status)
-    return {"groups": groups}
-
-
-@app.post("/admin/clients/{pid}/unanswered/{group_id}/answer")
-async def answer_unanswered(pid: str, group_id: int, request: Request):
-    """Добавить ответ в базу знаний и закрыть группу вопросов."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    try:
-        incoming = json.loads(await request.body() or b"{}")
-    except ValueError:
-        return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
-    answer = str(incoming.get("answer") or "").strip()
-    if not answer:
-        return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
-
-    from storage import get_unanswered_group, get_questions_for_group, mark_question_answered, update_group_status, create_conversation
-    group = get_unanswered_group(group_id)
-    if not group or group.get("client_key") != pid:
-        return JSONResponse(status_code=404, content={"error": "группа не найдена"})
-
-    # Дописываем «Вопрос: … Ответ: …» в knowledge_base
-    path = _client_yaml_path(clients_dir, pid)
-    cfg = _read_cfg(path) or {}
-    old_kb = str(cfg.get("knowledge_base") or "").strip()
-    questions = get_questions_for_group(group_id)
-    q_texts = "\n".join(f"Вопрос: {q['question']}\nОтвет: {answer}" for q in questions)
-    new_kb = (old_kb + "\n\n---\n\n" + q_texts).strip() if old_kb else q_texts
-
-    _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
-                         "admin" if role == "admin" else f"client:{pid}", "unanswered_answer", state)
-
-    # Отмечаем вопросы отвеченными
-    for q in questions:
-        mark_question_answered(q["id"], answer)
-    update_group_status(group_id, "answered")
-
-    await state.refresh_tenants()
-    return {"ok": True, "updated_kb": True}
-
-
-@app.post("/admin/clients/{pid}/unanswered/{group_id}/ignore")
-async def ignore_unanswered(pid: str, group_id: int, request: Request):
-    """Скрыть группу вопросов."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    from storage import update_group_status
-    if not update_group_status(group_id, "ignored"):
-        return JSONResponse(status_code=404, content={"error": "группа не найдена"})
-    return {"ok": True}
-
-
-@app.post("/admin/clients/{pid}/unanswered/regroup")
-async def regroup_unanswered(pid: str, request: Request):
-    """Пересчитать группы похожих вопросов (LLM)."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-
-    # Получаем последние необработанные вопросы
-    from storage import get_recent_unanswered_for_regroup, get_last_regroup_time, create_unanswered_group
-    questions = get_recent_unanswered_for_regroup(pid, limit=200)
-    if len(questions) < 2:
-        return {"ok": True, "groups_created": 0, "message": "недостаточно вопросов для группировки"}
-
-    # Промпт для LLM группировки
-    system_prompt = (
-        "Ты — помощник для группировки похожих вопросов клиентов. "
-        "Дан список вопросов. Сгруппируй их по смыслу: вопросы об одной и той же теме "
-        "(например, цена, время работы, запись на маникюр) должны быть в одной группе. "
-        "Верни JSON: список групп, где каждая группа — объект с полями "
-        "'name' (краткое название темы) и 'question_ids' (массив id вопросов). "
-        "Не придумывай вопросы, используй только те, что даны. Вопросы, которые не "
-        "подходят ни к какой группе, не включай."
-    )
-    user_prompt = "Вопросы:\n" + "\n".join(f"{q['id']}: {q['question']}" for q in questions)
-
-    # Используем LLM клиента для группировки
-    from config.settings import Settings
-    from services.llm_client import LLMClient
-
-    client_settings = _read_cfg(_client_yaml_path(clients_dir, pid)) or {}
-    llm_params = client_settings.get("llm") or {}
-    llm = LLMClient(
-        settings.llm_api_url,
-        settings.llm_api_key,
-        type("LLMParams", (), {
-            "model": str(llm_params.get("model") or settings.llm.model),
-            "temperature": float(llm_params.get("temperature", 0.3)),
-            "max_tokens": int(llm_params.get("max_tokens", 500)),
-            "timeout_seconds": int(llm_params.get("timeout_seconds", 15)),
-        })()
-    )
-
-    try:
-        response = await llm.chat(system_prompt, user_prompt, history=[])
-    except Exception as exc:
-        return JSONResponse(status_code=500, content={"error": f"ошибка LLM: {exc}"})
-
-    # Парсим JSON ответ
-    import json
-    try:
-        groups = json.loads(response)
-    except json.JSONDecodeError:
-        return JSONResponse(status_code=500, content={"error": "LLM вернул невалидный JSON"})
-
-    # Создаём группы в БД
-    created = 0
-    for g in groups:
-        name = str(g.get("name") or "").strip()
-        ids = g.get("question_ids") or []
-        if name and ids:
-            create_unanswered_group(pid, name, ids)
-            created += 1
-
-    return {"ok": True, "groups_created": created, "groups": groups}
-
-
-# --- Аналитика -------------------------------------------------------------------
-
-
-@app.get("/admin/clients/{pid}/stats")
-async def get_client_stats(pid: str, request: Request,
-                           from_date: str | None = None,
-                           to_date: str | None = None):
-    """Показатели клиента за период."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    if _client_yaml_path(clients_dir, pid) is None:
-        return JSONResponse(status_code=404, content={"error": "клиент не найден"})
-
-    from storage import parse_date_range, get_client_stats
-    from_date, to_date = parse_date_range(from_date, to_date)
-    stats = get_client_stats(pid, from_date, to_date)
-    return stats
-
-
-@app.get("/admin/clients/{pid}/stats/export.csv")
-async def export_client_stats(pid: str, request: Request,
-                              from_date: str | None = None,
-                              to_date: str | None = None):
-    """Экспорт статистики в CSV (UTF-8 с BOM для Excel)."""
-    role, error = _authorize(settings, request, clients_dir, pid)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нет доступа"})
-    from storage import parse_date_range, export_stats_csv
-    from_date, to_date = parse_date_range(from_date, to_date)
-    csv_data = export_stats_csv(pid, from_date, to_date)
-    return PlainTextResponse(
-        csv_data,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="stats-{pid}-{from_date[:10]}-{to_date[:10]}.csv"'}
-    )
-
-
-@app.get("/admin/stats/overview")
-async def admin_stats_overview(request: Request,
-                               from_date: str | None = None,
-                               to_date: str | None = None):
-    """Сводка по всем клиентам и расходы (только админ)."""
-    role, error = _authorize(settings, request, clients_dir, pid=None)
-    if error is not None:
-        return JSONResponse(status_code=error, content={"error": "нужен админ-токен"})
-    if role != "admin":
-        return JSONResponse(status_code=403, content={"error": "только для администратора"})
-
-    from storage import parse_date_range, get_admin_overview_stats
-    from_date, to_date = parse_date_range(from_date, to_date)
-    stats = get_admin_overview_stats(from_date, to_date)
-    return stats
 

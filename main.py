@@ -21,6 +21,7 @@ import re
 import shutil
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -407,7 +408,6 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     # Если мультитенант включён через CLIENTS_DIR
     if clients_dir:
         settings = replace(settings, clients_dir=str(clients_dir))
-    state = WebhookState(settings, sender_factory)
 
     # APScheduler для фоновых задач
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -440,11 +440,28 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     #     """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч."""
     #     ...
 
-    # Запуск планировщика (только ежедневные задачи)
+    # Планировщик: job добавляем здесь, а запуск — в lifespan (нужен работающий
+    # event loop; create_app вызывается при импорте модуля, до старта loop).
     scheduler.add_job(scheduled_jobs, "cron", hour=3, minute=0, id="daily_maintenance", replace_existing=True)
     # scheduler.add_job(reminder_job, "interval", minutes=15, id="reminder_job", replace_existing=True)
-    scheduler.start()
-    logger.info("APScheduler запущен: ежедневные задачи в 03:00 UTC, напоминания ОТКЛЮЧЕНЫ")
+
+    # Lifespan контекст-менеджер (должен быть определён до создания FastAPI app)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        scheduler.start()
+        logger.info("APScheduler запущен: ежедневные задачи в 03:00 UTC, напоминания ОТКЛЮЧЕНЫ")
+        app.state.state = state
+        app.state.scheduler = scheduler
+        app.state.volume_ok = volume_ok
+        if not volume_ok:
+            logger.error("HEALTH CHECK: Volume недоступен, сервис может работать некорректно")
+        yield
+        scheduler.shutdown(wait=True)
+        await state.shutdown()
+        logger.info("Бот остановлен")
+
+    # Создаём FastAPI приложение
+    app = FastAPI(lifespan=lifespan)
 
     if settings.clients_dir:
         logger.info(
@@ -497,18 +514,6 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     # ADMIN_TOKEN (иначе роуты не существуют — см. admin/api.py).
     if state.multitenant:
         register_admin_api(app, settings, state)
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.state = state
-        app.state.scheduler = scheduler
-        app.state.volume_ok = volume_ok
-        if not volume_ok:
-            logger.error("HEALTH CHECK: Volume недоступен, сервис может работать некорректно")
-        yield
-        scheduler.shutdown(wait=True)
-        await state.shutdown()
-        logger.info("Бот остановлен")
 
     @app.get("/healthz")
     async def healthz():
