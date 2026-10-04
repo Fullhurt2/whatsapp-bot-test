@@ -140,9 +140,19 @@ async def notify_owner(
                         language=settings.owner_template_language or "ru",
                         params=[who, message_text],
                     )
+                    delivered_any = True
+                elif hasattr(sender, "send_template"):
+                    # Zernio: свободный текст без conversation_id невозможен —
+                    # попытка send_text гарантированно упадёт. Нужен шаблон.
+                    logger.error(
+                        "Уведомление владельцу не отправлено: у Zernio свободный текст "
+                        "вне 24-часового окна запрещён. Создайте approved-шаблон в Zernio "
+                        "(переменные: {{1}} — отправитель, {{2}} — сообщение) и задайте "
+                        "owner_template_name/owner_template_language в «Служебном» клиента"
+                    )
                 else:
                     await sender.send_text(phone, text)
-                delivered_any = True
+                    delivered_any = True
             except MessagingError:
                 logger.exception("Не удалось отправить уведомление в WhatsApp (%s)", phone)
 

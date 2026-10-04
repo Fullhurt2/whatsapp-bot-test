@@ -1419,6 +1419,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         # Проверка 24-часового окна (только для WhatsApp)
         provider = _client_provider(clients_dir, pid)
         if provider in ("wa", "zernio"):
+            from storage import get_last_client_message_at
             last_client = get_last_client_message_at(cid)
             if last_client:
                 from datetime import datetime, timedelta

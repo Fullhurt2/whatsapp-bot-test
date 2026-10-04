@@ -118,9 +118,12 @@ def get_context_for_llm(
         role = row["role"]
         text = row["text"] or ""
 
-        # human -> assistant для LLM
-        if role == "human":
+        # Роли БД -> роли LLM: клиент — user; ответы бота и менеджера —
+        # assistant (бот учитывает их как свои).
+        if role in ("bot", "human"):
             role = "assistant"
+        elif role == "client":
+            role = "user"
 
         # Обрезка длинного сообщения
         if len(text) > max_chars_per_msg:
