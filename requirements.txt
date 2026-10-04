@@ -4,3 +4,4 @@ httpx>=0.27
 PyYAML>=6.0
 python-dotenv>=1.0
 python-multipart>=0.0.9   # загрузка аватара в профиль WhatsApp (multipart в админ-API)
+apscheduler>=3.10
