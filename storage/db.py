@@ -12,11 +12,17 @@ _thread_local = threading.local()
 
 
 def get_db_path() -> Path:
-    """Путь к файлу БД. По умолчанию /data/jauap.db (на Railway Volume)."""
-    # На Railway Volume смонтирован в /data
-    # Локально можно переопределить через env
-    db_path = os.getenv("JAUAP_DB_PATH", "/data/jauap.db")
-    path = Path(db_path)
+    """Путь к файлу БД.
+    На Railway: использует RAILWAY_VOLUME_MOUNT_PATH (путь монтирования тома) + подпапка db/jauap.db.
+    Локально: JAUAP_DB_PATH или /data/jauap.db.
+    """
+    # Приоритет: явный env -> Railway volume mount path -> дефолт /data
+    if explicit := os.getenv("JAUAP_DB_PATH"):
+        path = Path(explicit)
+    elif railway_mount := os.getenv("RAILWAY_VOLUME_MOUNT_PATH"):
+        path = Path(railway_mount) / "db" / "jauap.db"
+    else:
+        path = Path("/data/jauap.db")
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

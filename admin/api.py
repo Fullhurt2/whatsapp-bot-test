@@ -182,17 +182,36 @@ def mask_secret(value: str) -> str:
 # --- Безопасность: хэширование токенов, rate limiting, CSP -----------------------
 
 
+# Префикс для обозначения SHA-256 хэша (чтобы не путать с plaintext токенами)
+TOKEN_HASH_PREFIX = "sha256:"
+
+
 def hash_token(token: str) -> str:
-    """SHA-256 хэш токена для хранения в YAML."""
-    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    """SHA-256 хэш токена для хранения в YAML с префиксом формата."""
+    return TOKEN_HASH_PREFIX + hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def verify_token_hash(provided: str, stored_hash: str) -> bool:
-    """Constant-time проверка токена против хранящегося хэша."""
+    """Constant-time проверка токена против хранящегося значения.
+    
+    Поддерживает два формата сохранённого токена:
+    - `sha256:<hex>` — SHA-256 хэш, сравниваем хэши
+    - Plaintext — сравниваем напрямую (constant-time)
+    """
     if not provided or not stored_hash:
         return False
-    provided_hash = hash_token(provided)
-    return hmac.compare_digest(provided_hash, stored_hash)
+    
+    stored = stored_hash.strip()
+    provided = provided.strip()
+    
+    # Если stored начинается с префикса — это SHA-256 хэш
+    if stored.startswith(TOKEN_HASH_PREFIX):
+        stored_hex = stored[len(TOKEN_HASH_PREFIX):]
+        provided_hash = hash_token(provided)
+        return hmac.compare_digest(provided_hash, stored)
+    
+    # Иначе — plaintext, сравниваем напрямую (constant-time)
+    return hmac.compare_digest(provided.encode("utf-8"), stored.encode("utf-8"))
 
 
 def mask_token_in_log(token: str) -> str:
@@ -231,15 +250,26 @@ def record_failed_auth(ip: str) -> None:
     _failed_auth[ip].append(time.time())
 
 
+def get_client_ip(request: Request) -> str:
+    """Получить IP клиента: последний из X-Forwarded-For, потом X-Real-IP, потом прямой."""
+    # X-Forwarded-For: client, proxy1, proxy2 → берём последний (ближайший к нам)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",")]
+        return parts[-1]  # последний — тот, кто стучился к нашему ingress
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "unknown"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Middleware для rate limiting на админ-эндпоинты."""
     
     async def dispatch(self, request: Request, call_next):
         # Применяем только к /admin/*
         if request.url.path.startswith("/admin"):
-            # Получаем IP клиента
-            forwarded = request.headers.get("X-Forwarded-For")
-            ip = forwarded.split(",")[0].strip() if forwarded else request.client.host
+            ip = get_client_ip(request)
             
             allowed, retry_after = check_rate_limit(ip)
             if not allowed:
@@ -1320,7 +1350,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         try:
             webhook = await client.create_webhook(
                 "whatsapp-bot", target, settings.zernio_webhook_secret,
-                ["message.received"],
+                ["message.received", "message.sent", "message.failed"],
             )
         except (MessagingError, MessagingTimeout) as exc:
             return _profile_failure(exc)
@@ -1334,7 +1364,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
 # --- Живой чат: диалоги и сообщения ---------------------------------------------
 
 
-def _conversation_client(state, settings: Settings, clients_dir: Path, pid: str):
+async def _conversation_client(state, settings: Settings, clients_dir: Path, pid: str):
     """Получить sender клиента для отправки сообщений в диалог."""
     provider = _client_provider(clients_dir, pid)
     if provider == "tg":

@@ -18,13 +18,16 @@ import json
 import logging
 import os
 import re
+import shutil
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
@@ -46,6 +49,10 @@ from storage import (
     get_open_handoff,
     update_delivery_status,
     get_message_by_provider_id,
+    get_handoffs_for_conversation,
+    backup as db_backup,
+    cleanup_old_seen_events,
+    cleanup_old_conversations,
 )
 from whatsapp.meta_client import MetaWhatsAppClient
 from whatsapp.meta_payload import parse_meta_events
@@ -345,21 +352,115 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             settings.business_name, settings.config_file, settings.llm.model,
             settings.messaging_provider,
         )
+
+    # Определяем пути: приоритет CLIENTS_DIR env > RAILWAY_VOLUME_MOUNT_PATH/clients > авто-детект
+    railway_volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    explicit_clients_dir = os.getenv("CLIENTS_DIR")
+    
+    if explicit_clients_dir:
+        # Явный CLIENTS_DIR из env имеет наивысший приоритет
+        clients_dir = Path(explicit_clients_dir)
+        logger.info("CLIENTS_DIR задан явно: %s", clients_dir)
+    elif railway_volume:
+        # Авто-детект из Railway Volume
+        clients_dir = Path(railway_volume) / "clients"
+        if not clients_dir.exists():
+            logger.warning("CLIENTS_DIR не найден в Volume: %s не существует", clients_dir)
+        logger.info("CLIENTS_DIR авто-детект из Volume: %s", clients_dir)
+    else:
+        clients_dir = None
+        logger.warning("RAILWAY_VOLUME_MOUNT_PATH не задан, CLIENTS_DIR не задан — мультитенант отключён")
+
+    # Определяем путь к БД
+    if railway_volume:
+        db_dir = Path(railway_volume) / "db"
+        db_path = db_dir / "jauap.db"
+        backups_dir = db_dir / "backups"
+    else:
+        # Локальный запуск / фолбэк
+        db_path = Path(os.getenv("JAUAP_DB_PATH", "/data/jauap.db"))
+        backups_dir = db_path.parent / "backups"
+
+    # Переопределяем пути через env для совместимости с storage
+    os.environ["JAUAP_DB_PATH"] = str(db_path)
+    if clients_dir:
+        os.environ["CLIENTS_DIR"] = str(clients_dir)
+
+    # Проверка Volume: пишем тестовый файл, читаем, удаляем — только так на Railway
+    volume_ok = True
+    try:
+        test_file = db_path.parent / ".volume_test"
+        test_file.write_text("ok")
+        content = test_file.read_text()
+        if content != "ok":
+            raise ValueError("Volume read-back mismatch")
+        test_file.unlink()
+        logger.info("Volume check OK: %s", db_path.parent)
+    except Exception as e:
+        volume_ok = False
+        logger.error("VOLUME CHECK FAILED: %s — %s", db_path.parent, e)
+
+    # Создаём директории
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    # Если мультитенант включён через CLIENTS_DIR
+    if clients_dir:
+        settings = replace(settings, clients_dir=str(clients_dir))
     state = WebhookState(settings, sender_factory)
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.state = state
-        yield
-        await state.shutdown()
-        logger.info("Бот остановлен")
+    # APScheduler для фоновых задач
+    scheduler = AsyncIOScheduler(timezone="UTC")
 
-    app = FastAPI(title="whatsapp-bot-test", lifespan=lifespan)
+    async def scheduled_jobs():
+        """Ежедневные задачи: бэкап, чистка."""
+        try:
+            # 1. Бэкап БД
+            from storage import backup as db_backup, get_db_path
+            backup_path = Path(os.getenv("JAUAP_DB_PATH", "/data/jauap.db")).parent / "backups" / f"jauap-{datetime.utcnow().strftime('%Y%m%d')}.db"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(db_backup, backup_path)
+            logger.info("Ежедневный бэкап создан: %s", backup_path)
 
-    # Регистрация middleware для безопасности
-    app.add_middleware(RateLimitMiddleware)
-    app.add_middleware(CSPMiddleware)
+            # 2. Чистка seen_events > 7 дней
+            from storage import cleanup_old_seen_events
+            deleted = await asyncio.to_thread(cleanup_old_seen_events, 7)
+            logger.info("Чистка seen_events: удалено %d записей", deleted)
 
+            # 3. Чистка старых диалогов (> 365 дней)
+            from storage import cleanup_old_conversations
+            deleted = await asyncio.to_thread(cleanup_old_conversations, 365)
+            logger.info("Чистка старых диалогов: удалено %d диалогов", deleted)
+
+        except Exception as e:
+            logger.exception("Ошибка в ежедневных задачах: %s", e)
+
+    # reminder_job отключен: пока только ставит reminded_at, не отправляет уведомления
+    # async def reminder_job():
+    #     """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч."""
+    #     ...
+
+    # Запуск планировщика (только ежедневные задачи)
+    scheduler.add_job(scheduled_jobs, "cron", hour=3, minute=0, id="daily_maintenance", replace_existing=True)
+    # scheduler.add_job(reminder_job, "interval", minutes=15, id="reminder_job", replace_existing=True)
+    scheduler.start()
+    logger.info("APScheduler запущен: ежедневные задачи в 03:00 UTC, напоминания ОТКЛЮЧЕНЫ")
+
+    if settings.clients_dir:
+        logger.info(
+            "Запуск бота | режим: мультитенант | папка клиентов: %s | провайдер: %s",
+            settings.clients_dir, settings.messaging_provider,
+        )
+    else:
+        logger.info(
+            "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | провайдер: %s",
+            settings.business_name, settings.config_file, settings.llm.model,
+            settings.messaging_provider,
+        )
+
+    state = WebhookState(settings, sender_factory)
+
+    # Регистрация вебхуков
     if state.multitenant:
         # В мультитенанте доступны все транспорты: WhatsApp-вебхук поднимаем
         # только если заданы секреты провайдера (иначе деплой чисто для
@@ -397,11 +498,28 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     if state.multitenant:
         register_admin_api(app, settings, state)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.state = state
+        app.state.scheduler = scheduler
+        app.state.volume_ok = volume_ok
+        if not volume_ok:
+            logger.error("HEALTH CHECK: Volume недоступен, сервис может работать некорректно")
+        yield
+        scheduler.shutdown(wait=True)
+        await state.shutdown()
+        logger.info("Бот остановлен")
+
     @app.get("/healthz")
     async def healthz():
-        if state.multitenant:
-            return {"status": "ok", "clients": len(state.tenants)}
-        return {"status": "ok", "business": settings.business_name}
+        return {
+            "status": "ok",
+            "volume_ok": volume_ok,
+            "db_path": str(db_path),
+            "clients_dir": os.getenv("CLIENTS_DIR"),
+            "scheduler_running": scheduler.running,
+            "clients": len(state.tenants) if state.multitenant else 1,
+        }
 
     @app.get("/privacy")
     async def privacy():
@@ -552,9 +670,11 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
                 if event.inbound is None:
                     continue
 
-                # Проверить, не от бизнеса ли сообщение
+                # Проверить, не от бизнеса ли сообщение — сравнение по цифрам без плюса
                 business_phone = await _get_business_phone(event.account_id, processor.sender)
-                if business_phone and event.sender_phone == business_phone:
+                sender_digits = re.sub(r"\D", "", event.sender_phone or "")
+                business_digits = re.sub(r"\D", "", business_phone or "")
+                if business_digits and sender_digits == business_digits:
                     logger.debug("Zernio: message.received от бизнеса пропущено | sender=%s", event.sender_phone)
                     continue
 

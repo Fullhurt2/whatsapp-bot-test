@@ -34,7 +34,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 DEFAULT_BASE_URL = "https://zernio.com/api/v1"
-DEFAULT_EVENTS = "message.received"
+# Поддерживаемые события: message.received (входящие), message.sent (исходящие от бизнеса),
+# message.failed (ошибки доставки), message.delivered, message.read
+DEFAULT_EVENTS = "message.received,message.sent,message.failed"
 
 
 def _client(base_url: str, api_key: str) -> httpx.Client:
