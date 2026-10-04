@@ -392,6 +392,12 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     db_path.parent.mkdir(parents=True, exist_ok=True)
     backups_dir.mkdir(parents=True, exist_ok=True)
 
+    # Инициализация БД (таблицы/миграции) — до любых запросов: вебхуки и
+    # админ-API пишут в неё сразу, без этого sqlite падал "no such table".
+    from storage import init_db
+    init_db()
+    logger.info("БД инициализирована: %s", db_path)
+
     # Проверка Volume: пишем тестовый файл, читаем, удаляем — только так на Railway
     volume_ok = True
     try:

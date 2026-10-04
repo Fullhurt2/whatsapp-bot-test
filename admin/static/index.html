@@ -173,6 +173,28 @@
 
   .only-mobile { display: none; }
 
+  /* --- живой чат --- */
+  .chat-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; }
+  .chat-layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+  .chat-conv-list { max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .chat-conv { padding: 9px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+  .chat-conv:hover { background: var(--surface-muted); }
+  .chat-conv.active { background: var(--accent-soft); }
+  .chat-conv-name { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .chat-conv.active .chat-conv-name { color: var(--accent-ink); }
+  .chat-unread { background: var(--accent-ink); color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 999px; }
+  .chat-conv-sub { font-size: 11.5px; color: var(--text-soft); margin-top: 2px; }
+  .chat-msgs { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-muted);
+    padding: 12px; height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .chat-msg { max-width: 78%; padding: 8px 12px; border-radius: 12px; font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .chat-msg .chat-msg-time { display: block; font-size: 10.5px; opacity: .65; margin-top: 3px; }
+  .chat-msg.client { align-self: flex-start; background: #EFEFEA; }
+  .chat-msg.bot { align-self: flex-end; background: var(--accent-soft); }
+  .chat-msg.human { align-self: flex-end; background: #DCEBFF; }
+  .chat-input-row { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; }
+  .chat-input-row textarea { min-height: 44px; height: 44px; }
+  .chat-input-row .btn { flex-shrink: 0; }
+
   /* --- savebar (sticky bottom) --- */
   .savebar {
     position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 14px;
@@ -304,6 +326,7 @@
 
         <nav class="tabs" id="tabsNav">
           <button class="tab-btn active" data-tab="business" onclick="switchTab('business')">О бизнесе</button>
+          <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">Живой чат</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
           <button class="tab-btn hidden" id="tabProfileBtn" data-tab="profile" onclick="switchTab('profile')">Профиль</button>
@@ -321,6 +344,35 @@
             <option value="ru">всегда по-русски</option>
             <option value="kk">всегда по-казахски</option>
           </select>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-chat">
+          <div class="section-title">Живой чат</div>
+          <div class="hint">Переписка клиентов с ботом. Включите «Вручную» — бот замолчит, и вы сможете ответить сами прямо отсюда.</div>
+
+          <div class="chat-toolbar">
+            <div class="seg" id="chatModeSeg">
+              <button type="button" class="seg-btn" data-mode="bot" onclick="setChatMode('bot')">Бот</button>
+              <button type="button" class="seg-btn" data-mode="manual" onclick="setChatMode('manual')">Вручную</button>
+            </div>
+            <button type="button" class="btn btn-sm" onclick="refreshChat()">Обновить</button>
+            <span class="muted" id="chatModeHint"></span>
+          </div>
+
+          <div class="chat-layout">
+            <div>
+              <input id="chatSearch" placeholder="Поиск по имени или номеру…" oninput="filterChats()">
+              <div class="chat-conv-list" id="chatConvList"></div>
+            </div>
+            <div>
+              <div class="chat-msgs" id="chatMsgs"><div class="muted">Выберите диалог слева.</div></div>
+              <div class="chat-input-row">
+                <textarea id="chatInput" rows="1" placeholder="Сообщение от менеджера… (Enter — отправить)"></textarea>
+                <button type="button" class="btn btn-primary" id="chatSendBtn" onclick="sendChatMessage()">Отправить</button>
+              </div>
+              <div class="status" id="chatStatus" role="status"></div>
+            </div>
+          </div>
         </section>
 
         <section class="tab-panel hidden" id="tab-knowledge">
@@ -712,6 +764,9 @@ function switchTab(name) {
     loadProfile();
     setupProfileCounters();
   }
+  // Живой чат: автообновление работает, только пока вкладка открыта.
+  if (name === "chat") startChatPolling();
+  else stopChatPolling();
 }
 
 function backToList(skipConfirm) {
@@ -779,6 +834,15 @@ async function openEditor(pid) {
     : "";
   $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
   $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
+  // Живой чат: сбрасываем состояние при смене клиента.
+  stopChatPolling();
+  currentConvId = null;
+  chatConvs = [];
+  $("chatSearch").value = "";
+  $("chatMsgs").innerHTML = '<div class="muted">Выберите диалог слева.</div>';
+  document.querySelectorAll("#chatModeSeg .seg-btn").forEach((btn) => btn.classList.remove("active"));
+  $("chatModeHint").textContent = "";
+  status("chatStatus", "");
   setDirty(false);
   status("editorStatus", "");
   switchTab("business");
@@ -1085,6 +1149,161 @@ async function copyZernioLink() {
   }
 }
 
+// --- Живой чат ----------------------------------------------------------------
+// Диалоги и сообщения читаются из БД через /admin/clients/{pid}/conversations*.
+// Роли сообщений: client — клиент, bot — ответы бота, human — сообщения менеджера.
+
+let chatConvs = [];
+let chatConvFilter = "";
+let currentConvId = null;
+let chatTimer = null;
+
+function chatApi(method, path, body) {
+  return api(method, "/admin/clients/" + encodeURIComponent(currentPid) + path, body);
+}
+
+// В БД время в UTC («YYYY-MM-DD HH:MM:SS») — показываем в локальном формате.
+function fmtChatTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
+  return isNaN(d) ? iso : d.toLocaleString();
+}
+
+function renderChatList() {
+  const box = $("chatConvList");
+  const q = chatConvFilter.trim().toLowerCase();
+  const list = !q ? chatConvs : chatConvs.filter((c) =>
+    (c.contact_name || "").toLowerCase().includes(q) || (c.contact_phone || "").includes(q)
+  );
+  if (!list.length) {
+    box.innerHTML = '<div class="list-empty">' + (chatConvs.length
+      ? "Ничего не найдено."
+      : "Диалогов пока нет — они появятся, когда клиенты напишут боту.") + "</div>";
+    return;
+  }
+  box.innerHTML = list.map((c) => {
+    const active = c.id === currentConvId ? " active" : "";
+    const name = c.contact_name || c.contact_phone;
+    const unread = c.unread_count > 0 ? '<span class="chat-unread">' + c.unread_count + "</span>" : "";
+    const badge = c.status === "manual" ? '<span class="provider-badge">вручную</span>' : "";
+    return '<div class="chat-conv' + active + '" data-cid="' + esc(c.id) + '">' +
+      '<div class="chat-conv-name">' + esc(name) + unread + "</div>" +
+      '<div class="chat-conv-sub">' + badge + " " + esc(fmtChatTime(c.last_message_at)) + "</div>" +
+      "</div>";
+  }).join("");
+  box.querySelectorAll(".chat-conv").forEach((row) => {
+    row.onclick = () => openConversation(row.dataset.cid);
+  });
+}
+
+function filterChats() {
+  chatConvFilter = $("chatSearch").value;
+  renderChatList();
+}
+
+async function refreshChat() {
+  const { ok, code, data } = await chatApi("GET", "/conversations?limit=100");
+  if (!ok) { status("chatStatus", humanError(code, data), true); return; }
+  chatConvs = data.conversations || [];
+  renderChatList();
+}
+
+function setChatModeUI(conv) {
+  document.querySelectorAll("#chatModeSeg .seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", conv && btn.dataset.mode === conv.status);
+  });
+  $("chatModeHint").textContent = !conv ? ""
+    : (conv.status === "manual"
+      ? "Диалог в ручном режиме — бот не отвечает, отвечаете вы."
+      : "Диалог на автопилоте — отвечает бот.");
+}
+
+async function openConversation(cid) {
+  currentConvId = cid;
+  renderChatList();
+  setChatModeUI(chatConvs.find((c) => c.id === cid));
+  await loadConversationMessages();
+  // Открыв диалог, сбрасываем счётчик непрочитанных.
+  chatApi("POST", "/conversations/" + encodeURIComponent(cid) + "/read").then(() => refreshChat());
+}
+
+async function loadConversationMessages() {
+  if (!currentConvId) return;
+  const { ok, code, data } = await chatApi("GET",
+    "/conversations/" + encodeURIComponent(currentConvId) + "/messages?limit=100");
+  if (!ok) { status("chatStatus", humanError(code, data), true); return; }
+  const box = $("chatMsgs");
+  const messages = (data.messages || []).slice().reverse();   // были новые -> старые
+  if (!messages.length) {
+    box.innerHTML = '<div class="muted">Сообщений пока нет.</div>';
+    return;
+  }
+  box.innerHTML = messages.map((m) => {
+    const statusBit = m.role === "human" && m.delivery_status ? " · " + esc(m.delivery_status) : "";
+    return '<div class="chat-msg ' + esc(m.role) + '">' + esc(m.text) +
+      '<span class="chat-msg-time">' + esc(fmtChatTime(m.created_at)) + statusBit + "</span></div>";
+  }).join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendChatMessage() {
+  const input = $("chatInput");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!currentConvId) { status("chatStatus", "Сначала выберите диалог слева.", true); return; }
+  $("chatSendBtn").disabled = true;
+  const { ok, code, data } = await chatApi("POST",
+    "/conversations/" + encodeURIComponent(currentConvId) + "/messages",
+    { text: text, idempotency_key: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) });
+  $("chatSendBtn").disabled = false;
+  if (!ok) {
+    status("chatStatus", (code === 409 && data.error === "window_closed"
+      ? "24-часовое окно закрыто — свободный текст запрещён правилами WhatsApp. Напишите клиенту в самом WhatsApp или дождитесь его сообщения."
+      : humanError(code, data)), true);
+    return;
+  }
+  input.value = "";
+  status("chatStatus", "Отправлено.");
+  await loadConversationMessages();
+  refreshChat();
+}
+
+async function setChatMode(mode) {
+  if (!currentConvId) { status("chatStatus", "Выберите диалог, затем переключите режим.", true); return; }
+  const { ok, code, data } = await chatApi("POST",
+    "/conversations/" + encodeURIComponent(currentConvId) + "/mode", { mode: mode });
+  if (!ok) { status("chatStatus", humanError(code, data), true); return; }
+  const conv = chatConvs.find((c) => c.id === currentConvId);
+  if (conv) conv.status = mode;
+  setChatModeUI(conv);
+  renderChatList();
+  status("chatStatus", mode === "manual"
+    ? "Режим «вручную» включён: бот молчит в этом диалоге."
+    : "Режим «бот» включён: бот снова отвечает сам.");
+}
+
+// Автообновление раз в 5 секунд, пока открыта вкладка чата.
+function startChatPolling() {
+  stopChatPolling();
+  refreshChat();
+  chatTimer = setInterval(() => {
+    refreshChat();
+    loadConversationMessages();
+  }, 5000);
+}
+
+function stopChatPolling() {
+  if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+}
+
+// Enter отправляет сообщение чата, Shift+Enter — перенос строки.
+$("chatInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendChatMessage();
+  }
+});
+
 function toggleNew() {
   const opening = $("newCard").classList.contains("hidden");
   show("newCard", opening);
@@ -1172,7 +1391,9 @@ function confirmDiscard() {
 }
 
 // Любая правка настроек бота → «несохранённые изменения».
-function markDirty() {
+// Ввод в живом чате к конфигу не относится — там свои кнопки.
+function markDirty(event) {
+  if (event && event.target && event.target.closest && event.target.closest("#tab-chat")) return;
   setDirty(true);
 }
 
