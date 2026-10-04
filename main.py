@@ -387,6 +387,11 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     if clients_dir:
         os.environ["CLIENTS_DIR"] = str(clients_dir)
 
+    # Создаём директории ДО проверки Volume: на чистом контейнере папки db ещё
+    # не существует, и проверка падала с ENOENT, помечая живой volume как битый.
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
     # Проверка Volume: пишем тестовый файл, читаем, удаляем — только так на Railway
     volume_ok = True
     try:
@@ -400,10 +405,6 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     except Exception as e:
         volume_ok = False
         logger.error("VOLUME CHECK FAILED: %s — %s", db_path.parent, e)
-
-    # Создаём директории
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    backups_dir.mkdir(parents=True, exist_ok=True)
 
     # Если мультитенант включён через CLIENTS_DIR
     if clients_dir:
