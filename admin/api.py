@@ -1380,7 +1380,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if limit < 1 or limit > 100:
             limit = 50
 
-        convs = list_conversations(pid, status=status, q=q, cursor=cursor, since=since, limit=limit)
+        convs = list_conversations(_conversation_client_key(clients_dir, pid), status=status, q=q, cursor=cursor, since=since, limit=limit)
         return {"conversations": convs, "count": len(convs)}
 
 
@@ -1393,7 +1393,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         conv = get_conversation(cid)
-        if not _check_conv_ownership(conv, pid):
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
 
         if limit < 1 or limit > 200:
@@ -1413,7 +1413,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         conv = get_conversation(cid)
-        if not _check_conv_ownership(conv, pid):
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
 
         # Проверка 24-часового окна (только для WhatsApp)
@@ -1489,7 +1489,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         conv = get_conversation(cid)
-        if not _check_conv_ownership(conv, pid):
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
 
         try:
@@ -1519,7 +1519,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         conv = get_conversation(cid)
-        if not _check_conv_ownership(conv, pid):
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
         from storage import mark_read
         mark_read(cid)
@@ -1755,13 +1755,23 @@ def register_admin_api(app, settings: Settings, state) -> None:
 # --- Живой чат: диалоги и сообщения ---------------------------------------------
 
 
+def _conversation_client_key(clients_dir: Path, pid: str) -> str:
+    """Ключ диалогов клиента в БД.
+
+    Обработчик пишет диалоги с client_key = whatsapp_phone_number_id тенанта:
+    у wa/tg это ключ из имени файла, у zernio — accountId из yaml. Панель
+    знает клиента по имени файла (pid), поэтому для zernio ключ надо
+    разрешить в accountId — иначе диалоги в живом чате не видны.
+    """
+    if _client_provider(clients_dir, pid) == "zernio":
+        cfg = _read_cfg(_client_yaml_path(clients_dir, pid)) or {}
+        return str(cfg.get("zernio_account_id") or "").strip() or pid
+    return pid
+
+
 async def _conversation_client(state, settings: Settings, clients_dir: Path, pid: str):
-    """Получить sender клиента для отправки сообщений в диалог."""
-    provider = _client_provider(clients_dir, pid)
-    if provider == "tg":
-        return None
-    # Для wa и zernio используем бандл из state
-    key = pid if provider == "wa" else str((_read_cfg(_client_yaml_path(clients_dir, pid)) or {}).get("zernio_account_id") or "")
+    """Sender клиента для отправки сообщений в диалог (wa / zernio / tg)."""
+    key = _conversation_client_key(clients_dir, pid)
     if not key:
         return None
     await state.refresh_tenants()
@@ -1769,8 +1779,8 @@ async def _conversation_client(state, settings: Settings, clients_dir: Path, pid
     return bundle.sender if bundle else None
 
 
-def _check_conv_ownership(conv, pid: str) -> bool:
-    """Проверка, что диалог принадлежит клиенту."""
-    return conv and conv.get("client_key") == pid
+def _check_conv_ownership(conv, db_key: str) -> bool:
+    """Проверка, что диалог принадлежит клиенту (по ключу диалогов в БД)."""
+    return conv and conv.get("client_key") == db_key
 
 

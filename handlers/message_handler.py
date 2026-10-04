@@ -380,6 +380,17 @@ class MessageProcessor:
         # чтобы оно было там даже если отправка ответа упадёт
         self._remember(self._history_for(phone), "user", text)
 
+        # Сохраняем сообщение клиента в БД (в ветке manual это уже сделано в
+        # handle_incoming) — без этого живой чат в панели видит только ответы бота.
+        if _DB_AVAILABLE:
+            add_message(
+                conversation_id=conv_id,
+                role="client",
+                text=text,
+                content_kind="text",
+            )
+            increment_unread(conv_id)
+
         # Служебные фразы бота не генерирует модель — выбираем язык по
         # сообщению клиента, чтобы казахскому клиенту не ушёл русский текст.
         lang = detect_language(text)
