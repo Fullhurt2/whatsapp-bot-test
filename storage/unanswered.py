@@ -133,6 +133,28 @@ def list_unanswered_groups(
     return result
 
 
+def list_ungrouped_questions(
+    client_key: str,
+    status: Optional[str] = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Вопросы, ещё не объединённые в группу.
+
+    Их можно закрыть прямо из панели, не дожидаясь LLM-группировки: без этого
+    новые вопросы не видны вовсе — list_unanswered_groups отдаёт только группы.
+    """
+    sql = "SELECT * FROM unanswered_questions WHERE client_key = ? AND group_id IS NULL"
+    params: list = [client_key]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    else:
+        sql += " AND status = 'new'"
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(row) for row in fetchall(sql, tuple(params))]
+
+
 def update_group_status(group_id: int, status: str) -> bool:
     """Обновить статус группы (answered/ignored)."""
     result = execute(

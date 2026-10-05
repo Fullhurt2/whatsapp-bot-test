@@ -596,6 +596,10 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             "clients_dir": os.getenv("CLIENTS_DIR"),
             "scheduler_running": scheduler.running,
             "clients": len(state.tenants) if state.multitenant else 1,
+            # Что сервис видит из окружения: без этого непонятно, почему
+            # не работает привязка менеджера или кнопка в уведомлении.
+            "telegram_owner_bot": bool(settings.telegram_owner_bot_token),
+            "public_base_url": bool(settings.public_base_url),
         }
 
     @app.get("/privacy")

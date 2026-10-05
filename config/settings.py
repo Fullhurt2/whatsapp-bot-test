@@ -366,6 +366,29 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
     return settings
 
 
+def _owner_bot_token() -> str:
+    """Токен общего бота JAUAP.
+
+    Основное имя — TELEGRAM_OWNER_BOT_TOKEN; остальные варианты принимаем,
+    потому что токен часто кладут рядом с клиентским TELEGRAM_BOT_TOKEN, и
+    из-за разных имён привязка менеджера молча не включалась.
+    """
+    for name in (
+        "TELEGRAM_OWNER_BOT_TOKEN",
+        "TELEGRAM_OWNER_TOKEN",
+        "JAUAP_BOT_TOKEN",
+    ):
+        token = os.getenv(name, "").strip()
+        if token:
+            if name != "TELEGRAM_OWNER_BOT_TOKEN":
+                logger.warning(
+                    "%s тоже содержит токен бота JAUAP — переименуйте переменную в "
+                    "TELEGRAM_OWNER_BOT_TOKEN, чтобы не путаться", name,
+                )
+            return token
+    return ""
+
+
 def _int_env(name: str, default: int) -> int:
     """Целое из переменной окружения; мусор в значении не ломает старт."""
     raw = os.getenv(name, "").strip()
@@ -440,7 +463,7 @@ def get_settings() -> Settings:
         config_file=config_file,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
-        telegram_owner_bot_token=os.getenv("TELEGRAM_OWNER_BOT_TOKEN", "").strip(),
+        telegram_owner_bot_token=_owner_bot_token(),
         telegram_owner_webhook_secret=os.getenv("TELEGRAM_OWNER_WEBHOOK_SECRET", "").strip(),
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
         manual_timeout_hours=_int_env("MANUAL_TIMEOUT_HOURS", 12),

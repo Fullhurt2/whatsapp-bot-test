@@ -389,6 +389,7 @@
             </div>
             <button type="button" class="btn btn-sm" onclick="refreshChat()">Обновить</button>
             <span class="muted" id="chatModeHint"></span>
+            <span class="muted" id="chatTzHint"></span>
           </div>
 
           <div class="chat-layout">
@@ -964,7 +965,10 @@ async function openEditor(pid) {
       " — привязывается автоматически при сохранении, если в .env задан PUBLIC_BASE_URL."
     : "";
   $("editorTitle").textContent = data.business_name || (isAdmin ? pid : "Ваш бот");
-  $("editorSub").textContent = isAdmin ? pid : "Настройки вашего бота";
+  clientTimezone = data.timezone || "Asia/Almaty";
+  $("editorSub").textContent = (isAdmin ? pid : "Настройки вашего бота") +
+    " · время в часовом поясе " + clientTimezone;
+  $("chatTzHint").textContent = "время: " + clientTimezone;
   // Живой чат: сбрасываем состояние при смене клиента.
   stopChatPolling();
   currentConvId = null;
@@ -1300,6 +1304,8 @@ async function copyZernioLink() {
 // Диалоги и сообщения читаются из БД через /admin/clients/{pid}/conversations*.
 // Роли сообщений: client — клиент, bot — ответы бота, human — сообщения менеджера.
 
+// Часовой пояс открытого клиента: время в чате и аналитике показываем в нём.
+let clientTimezone = "Asia/Almaty";
 let chatConvs = [];
 let chatConvFilter = "";
 let currentConvId = null;
@@ -1309,11 +1315,22 @@ function chatApi(method, path, body) {
   return api(method, "/admin/clients/" + encodeURIComponent(currentPid) + path, body);
 }
 
-// В БД время в UTC («YYYY-MM-DD HH:MM:SS») — показываем в локальном формате.
+// В БД время в UTC («YYYY-MM-DD HH:MM:SS»).
+// Показываем в часовом поясе клиента (по умолчанию Алматы), а не в поясе
+// браузера: иначе менеджер видит чужое время в чате и в аналитике.
 function fmtChatTime(iso) {
   if (!iso) return "";
   const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  return isNaN(d) ? iso : d.toLocaleString();
+  if (isNaN(d)) return iso;
+  try {
+    return d.toLocaleString("ru-RU", {
+      timeZone: clientTimezone,
+      day: "2-digit", month: "2-digit",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch (e) {
+    return d.toLocaleString("ru-RU");
+  }
 }
 
 function renderChatList() {
@@ -1436,7 +1453,7 @@ function startChatPolling() {
   chatTimer = setInterval(() => {
     refreshChat();
     loadConversationMessages();
-  }, 5000);
+  }, 2000);
 }
 
 function stopChatPolling() {
@@ -1489,8 +1506,8 @@ async function loadStats() {
     metricCard("Передачи", (data.handoffs || {}).total || 0, "менеджеру"),
     metricCard("Ответ бота (среднее)", seconds((data.response_time || {}).avg_ms),
       "p95: " + seconds((data.response_time || {}).p95_ms)),
-    metricCard("Реакция менеджера", (reaction.avg_seconds || 0) + " с",
-      "p95: " + (reaction.p95_seconds || 0) + " с · случаев: " + (reaction.count || 0)),
+    metricCard("Реакция менеджера", (Number(reaction.avg_seconds) || 0).toFixed(1) + " с",
+      "p95: " + (Number(reaction.p95_seconds) || 0).toFixed(1) + " с · случаев: " + (reaction.count || 0)),
     metricCard("Сэкономлено времени", (data.estimated_time_saved_minutes || 0) + " мин",
       "ответов бота вместо менеджера"),
     metricCard("Токены", ((data.tokens || {}).in || 0), "вход · выход: " + ((data.tokens || {}).out || 0)),
@@ -1581,6 +1598,7 @@ async function exportStatsCsv() {
 // --- Вопросы без ответа ----------------------------------------------------------
 
 let uaGroups = [];
+let uaUngrouped = [];
 let uaOpenGroupId = null;
 
 async function loadUnanswered() {
@@ -1589,22 +1607,59 @@ async function loadUnanswered() {
   const { ok, code, data } = await chatApi("GET", "/unanswered" + (filter ? "?status=" + encodeURIComponent(filter) : ""));
   if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
   uaGroups = data.groups || [];
-  status("uaStatusLine", uaGroups.length ? "Групп: " + uaGroups.length : "Вопросов без ответа пока нет.", false);
+  uaUngrouped = data.ungrouped || [];
+  const total = uaGroups.length + uaUngrouped.length;
+  status("uaStatusLine", total
+    ? "Групп: " + uaGroups.length + " · отдельных вопросов: " + uaUngrouped.length
+    : "Вопросов без ответа пока нет.", false);
   const box = $("uaList");
-  if (!uaGroups.length) {
-    box.innerHTML = '<div class="list-empty">Здесь появятся вопросы клиентов, на которые бот не нашёл ответа в базе знаний.</div>';
-    return;
+
+  // Отдельные вопросы (ещё не сгруппированные) идут первыми: их можно закрыть
+  // сразу, не дожидаясь группировки.
+  let html = uaUngrouped.length
+    ? '<div class="section-title">Отдельные вопросы</div>' + uaUngrouped.map((q) =>
+        '<div class="ua-row" data-qid="' + q.id + '">' +
+        '<div class="ua-row-head"><span>' + esc(q.question) + "</span>" +
+        '<span class="provider-badge">' + esc(q.status) + "</span></div>" +
+        '<div class="chat-conv-sub">' + esc(fmtChatTime(q.created_at)) + "</div>" +
+        '<div class="row" style="margin-top:8px">' +
+        '<input class="ua-q-answer" data-qid="' + q.id + '" placeholder="Ответ — попадёт в базу знаний">' +
+        '<div style="flex:0 0 auto"><button type="button" class="btn btn-primary btn-sm ua-q-save" ' +
+        'data-qid="' + q.id + '">Сохранить</button></div>' +
+        "</div></div>").join("")
+    : "";
+
+  if (uaGroups.length) {
+    html += '<div class="section-title">Группы похожих вопросов</div>' + uaGroups.map((g) => {
+      const count = (g.question_ids || []).length;
+      return '<div class="ua-row' + (g.id === uaOpenGroupId ? " active" : "") + '" data-gid="' + g.id + '">' +
+        '<div class="ua-row-head"><span>' + esc(g.name || "Без названия") + "</span>" +
+        '<span class="provider-badge">' + esc(g.status) + "</span></div>" +
+        '<div class="chat-conv-sub">вопросов: ' + count + " · " + esc(fmtChatTime(g.updated_at || g.created_at)) + "</div></div>";
+    }).join("");
   }
-  box.innerHTML = uaGroups.map((g) => {
-    const count = (g.question_ids || []).length;
-    return '<div class="ua-row' + (g.id === uaOpenGroupId ? " active" : "") + '" data-gid="' + g.id + '">' +
-      '<div class="ua-row-head"><span>' + esc(g.name || "Без названия") + "</span>" +
-      '<span class="provider-badge">' + esc(g.status) + "</span></div>" +
-      '<div class="chat-conv-sub">вопросов: ' + count + " · " + esc(fmtChatTime(g.updated_at || g.created_at)) + "</div></div>";
-  }).join("");
-  box.querySelectorAll(".ua-row").forEach((row) => {
+
+  box.innerHTML = html || '<div class="list-empty">Здесь появятся вопросы клиентов, на которые бот не нашёл ответа в базе знаний.</div>';
+
+  box.querySelectorAll(".ua-row[data-gid]").forEach((row) => {
     row.onclick = () => openUaGroup(Number(row.dataset.gid));
   });
+  box.querySelectorAll(".ua-q-save").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      answerSingleQuestion(Number(btn.dataset.qid));
+    };
+  });
+}
+
+async function answerSingleQuestion(questionId) {
+  const input = $("uaList").querySelector('.ua-q-answer[data-qid="' + questionId + '"]');
+  const answer = input ? input.value.trim() : "";
+  if (!answer) { status("uaStatusLine", "Впишите ответ, чтобы добавить его в базу знаний.", true); return; }
+  const { ok, code, data } = await chatApi("POST", "/unanswered/question/" + questionId + "/answer", { answer: answer });
+  if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
+  status("uaStatusLine", "Ответ добавлен в базу знаний — бот ответит на такой вопрос сам.", false);
+  loadUnanswered();
 }
 
 async function openUaGroup(groupId) {

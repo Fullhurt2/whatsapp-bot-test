@@ -861,6 +861,9 @@ def register_admin_api(app, settings: Settings, state) -> None:
             key: (mask_secret(value) if key in SECRET_FIELDS and isinstance(value, str) else value)
             for key, value in cfg.items()
         }
+        # Часовой пояс клиента: панель показывает время в нём, а не в поясе
+        # браузера (иначе менеджер видит чужое время в чате и аналитике).
+        masked.setdefault("timezone", str(settings.timezone or "Asia/Almaty"))
         return {"phone_number_id": pid, "config_file": path.name, **masked}
 
     @app.put("/admin/clients/{pid}")
@@ -1626,9 +1629,48 @@ def register_admin_api(app, settings: Settings, state) -> None:
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
-        from storage import list_unanswered_groups
-        groups = list_unanswered_groups(_conversation_client_key(clients_dir, pid), status=status)
-        return {"groups": groups}
+        from storage import list_unanswered_groups, list_ungrouped_questions
+        db_key = _conversation_client_key(clients_dir, pid)
+        groups = list_unanswered_groups(db_key, status=status)
+        return {
+            "groups": groups,
+            # Вопросы без группы видны сразу — их можно закрыть, не запуская
+            # LLM-группировку.
+            "ungrouped": list_ungrouped_questions(db_key, status=status or None),
+        }
+
+
+    @app.post("/admin/clients/{pid}/unanswered/question/{question_id}/answer")
+    async def answer_unanswered_question(pid: str, question_id: int, request: Request):
+        """Ответ на один несгруппированный вопрос: дописывает его в базу знаний."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        answer = str(incoming.get("answer") or "").strip()
+        if not answer:
+            return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
+
+        from storage import get_unanswered_question, mark_question_answered
+        db_key = _conversation_client_key(clients_dir, pid)
+        question = get_unanswered_question(question_id)
+        if not question or question.get("client_key") != db_key:
+            return JSONResponse(status_code=404, content={"error": "вопрос не найден"})
+
+        path = _client_yaml_path(clients_dir, pid)
+        cfg = _read_cfg(path) or {}
+        old_kb = str(cfg.get("knowledge_base") or "").strip()
+        entry = f"Вопрос: {question['question']}\nОтвет: {answer}"
+        new_kb = (old_kb + "\n\n---\n\n" + entry).strip() if old_kb else entry
+        _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
+                             "admin" if role == "admin" else f"client:{pid}",
+                             "unanswered_answer", state)
+        mark_question_answered(question_id, answer)
+        await state.refresh_tenants()
+        return {"ok": True, "updated_kb": True}
 
 
     @app.post("/admin/clients/{pid}/unanswered/{group_id}/answer")
@@ -1765,7 +1807,10 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         from storage import parse_date_range, get_client_stats
         from_date, to_date = parse_date_range(from_date, to_date)
-        stats = get_client_stats(_conversation_client_key(clients_dir, pid), from_date, to_date)
+        client_tz = str((_read_cfg(_client_yaml_path(clients_dir, pid)) or {}).get("timezone")
+                        or settings.timezone or "Asia/Almaty")
+        stats = get_client_stats(_conversation_client_key(clients_dir, pid),
+                                 from_date, to_date, timezone=client_tz)
         return stats
 
 
