@@ -685,24 +685,46 @@ def _multitenant_privacy() -> dict:
     }
 
 
-# Кэш бизнес-номеров по accountId (для фильтрации message.sent от бизнеса)
-_business_phone_cache: dict[str, str] = {}
+# Кэш бизнес-номеров по accountId (для фильтрации message.sent от бизнеса).
+# Храним и пустой результат: запрос в Zernio идёт больше секунды, а без кэша
+# пустого ответа он повторялся на каждом входящем и задерживал подтверждение.
+_business_phone_cache: dict[str, tuple[str, float]] = {}
+BUSINESS_PHONE_CACHE_TTL = 900  # 15 минут
 
 
 async def _get_business_phone(account_id: str, zernio_client) -> str:
-    """Получить бизнес-номер из кэша или Zernio API."""
-    if account_id in _business_phone_cache:
-        return _business_phone_cache[account_id]
+    """Бизнес-номер из кэша или Zernio API (пустой результат тоже кэшируется)."""
+    cached = _business_phone_cache.get(account_id)
+    if cached and time.monotonic() - cached[1] < BUSINESS_PHONE_CACHE_TTL:
+        return cached[0]
 
+    phone = ""
     try:
         # Используем Zernio API для получения информации об аккаунте
         info = await zernio_client.get_number_info()
-        phone = info.get("username") or info.get("phoneNumber") or ""
-        if phone:
-            _business_phone_cache[account_id] = phone
-        return phone
+        phone = str(info.get("username") or info.get("phoneNumber") or "").strip()
     except Exception:
-        return ""
+        logger.debug("Не удалось получить бизнес-номер из Zernio", exc_info=True)
+    _business_phone_cache[account_id] = (phone, time.monotonic())
+    return phone
+
+
+async def _handle_zernio_inbound(state: WebhookState, event, processor) -> None:
+    """Фоновая обработка входящего Zernio: фильтр «от бизнеса» + сценарий бота.
+
+    Вынесено из вебхука, чтобы ack не ждал сетевых запросов к Zernio: чем
+    раньше подтверждено событие, тем раньше клиент увидит ответ.
+    """
+    try:
+        business_phone = await _get_business_phone(event.account_id, processor.sender)
+        sender_digits = re.sub(r"\D", "", event.sender_phone or "")
+        business_digits = re.sub(r"\D", "", business_phone or "")
+        if business_digits and sender_digits == business_digits:
+            logger.debug("Zernio: message.received от бизнеса пропущено | sender=%s", event.sender_phone)
+            return
+        await state.handle_event(event.inbound, processor)
+    except Exception:
+        logger.exception("Ошибка обработки входящего Zernio (account=%s)", event.account_id)
 
 
 def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
@@ -767,15 +789,12 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
                 if event.inbound is None:
                     continue
 
-                # Проверить, не от бизнеса ли сообщение — сравнение по цифрам без плюса
-                business_phone = await _get_business_phone(event.account_id, processor.sender)
-                sender_digits = re.sub(r"\D", "", event.sender_phone or "")
-                business_digits = re.sub(r"\D", "", business_phone or "")
-                if business_digits and sender_digits == business_digits:
-                    logger.debug("Zernio: message.received от бизнеса пропущено | sender=%s", event.sender_phone)
-                    continue
-
-                background_tasks.add_task(state.handle_event, event.inbound, processor)
+                # Фильтр «это сообщение от самого бизнеса» делаем уже после
+                # подтверждения: запрос номера в Zernio занимает больше секунды,
+                # и на нём задерживался ответ клиенту.
+                background_tasks.add_task(
+                    _handle_zernio_inbound, state, event, processor
+                )
 
             elif event.event_type == "message_sent":
                 # Исходящее от бизнеса/оператора — обновляем статус доставки

@@ -13,6 +13,22 @@ from config.settings import LLMParams
 
 logger = logging.getLogger(__name__)
 
+# Модели, которые не принимают temperature и ждут max_completion_tokens.
+_REASONING_MODEL_MARKERS = ("o1", "o3", "o4", "gpt-5", "gpt-6")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """Похоже ли имя модели на reasoning-семейство OpenAI.
+
+    Проверка по имени: у o-серии и gpt-5+/gpt-6 temperature не поддерживается,
+    а вместо max_tokens провайдер ждёт max_completion_tokens. Знание дешёвое и
+    снимает две лишних попытки запроса в начале каждого процесса.
+    """
+    name = str(model or "").strip().lower()
+    if not name:
+        return False
+    return any(marker in name for marker in _REASONING_MODEL_MARKERS)
+
 # Лимит токенов для повторного запроса, когда reasoning-модель израсходовала
 # основной max_tokens и вернула пустой content (см. chat()).
 EMPTY_RESPONSE_RETRY_LIMIT = 5000
@@ -48,6 +64,13 @@ class LLMClient:
         self._use_max_completion_tokens = False
         self._omit_temperature = False
         self._omit_reasoning_effort = False
+        # Reasoning-модели (o-серия, gpt-5+, gpt-6) заранее не принимают
+        # temperature и требуют max_completion_tokens. Без этого предсказания
+        # каждый первый запрос уходил в два лишних круга по 400, а это секунды
+        # задержки до ответа клиенту.
+        if _is_reasoning_model(params.model):
+            self._use_max_completion_tokens = True
+            self._omit_temperature = True
         # Расход токенов последнего ответа: chat() возвращает только текст,
         # поэтому usage копим здесь — его читает аналитика в админке.
         self.last_usage: dict = {}
