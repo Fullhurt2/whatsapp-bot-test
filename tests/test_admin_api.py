@@ -365,9 +365,8 @@ def test_rate_limit():
         check("X-Forwarded-For: 11-я попытка -> 429", r.status_code == 429)
 
         # X-Real-IP имеет приоритет над X-Forwarded-For
-        r = client.get("/admin/clients", headers={"X-Admin-Token": "bad-token", "X-Real-IP": "9.9.9.9"})
         for _ in range(10):
-            pass
+            r = client.get("/admin/clients", headers={"X-Admin-Token": "bad-token", "X-Real-IP": "9.9.9.9"})
         r = client.get("/admin/clients", headers={"X-Admin-Token": "bad-token", "X-Real-IP": "9.9.9.9"})
         check("X-Real-IP: 11-я попытка -> 429", r.status_code == 429)
 
@@ -411,7 +410,8 @@ def test_token_migration():
         token = str(cfg.get("management_token") or "").strip()
         if not token:
             continue
-        if len(token) == 64 and all(c in "0123456789abcdef" for c in token.lower()):
+        bare = token[len("sha256:"):] if token.startswith("sha256:") else token
+        if len(bare) == 64 and all(c in "0123456789abcdef" for c in bare.lower()):
             continue  # уже хэш
         _atomic_write(path, {**cfg, "management_token": hash_token(token)})
 

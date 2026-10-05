@@ -1,17 +1,22 @@
 """Уведомления владельцу бизнеса о вопросах, требующих живого человека.
 
 Владелец получает сообщение через настроенные каналы:
-- Telegram (если привязан и включен в notify_channels)
-- WhatsApp (если включен в notify_channels)
+- Telegram (чаты, привязанные в панели, + owner_telegram_chat_id из yaml);
+- WhatsApp (если включён в notify_channels).
+
+Telegram-уведомления уходят общим ботом JAUAP (telegram_owner_bot_token) —
+он видит всех клиентов; если он не задан, откат на sender клиента. К уведомлению
+прикрепляется кнопка «Открыть диалог» — ссылка прямо на нужный диалог в панели
+(нужен PUBLIC_BASE_URL).
 
 Особенность Zernio: свободный текст вне 24-часового окна WhatsApp запрещён,
 поэтому уведомление уходит approved-шаблоном (owner_template_name/
 owner_template_language из yaml клиента, две переменные тела: отправитель
-и сообщение). Если шаблон не задан или у sender нет send_template — пробуем
-обычный send_text (в диалоге, где окно открыто, это сработает).
+и сообщение). Если шаблон не задан — сообщаем в лог, что его нужно создать,
+и уведомление не доставляем.
 
 Для NO_ANSWER: silent уведомление (disable_notification в Telegram).
-Троттлинг: не чаще 1 уведомления на диалог за 10 минут.
+Троттлинг: не чаще 1 уведомления на диалог и причину за 10 минут.
 """
 
 import asyncio
@@ -27,6 +32,91 @@ logger = logging.getLogger(__name__)
 # In-memory троттлинг: (conversation_id, reason) -> last_notified_at
 _notification_throttle: dict[tuple[str, str], datetime] = {}
 THROTTLE_MINUTES = 10
+
+
+# Текст кнопки в уведомлении менеджеру
+OPEN_CHAT_BUTTON_TEXT = "💬 Открыть диалог"
+
+
+def _notify_recipients(settings: Settings) -> list[str]:
+    """Чаты для Telegram-уведомлений: привязки из панели + ручной chat_id из yaml.
+
+    Привязки хранятся в БД по ключу клиента; для zernio это accountId — тот же,
+    под которым лежат диалоги, поэтому уведомление найдёт нужный диалог.
+    """
+    chat_ids: list[str] = []
+    client_key = (
+        getattr(settings, "whatsapp_phone_number_id", "")
+        or getattr(settings, "zernio_account_id", "")
+        or ""
+    )
+    if client_key:
+        try:
+            from storage import get_tg_bindings_for_notify
+            chat_ids.extend(get_tg_bindings_for_notify(client_key))
+        except Exception:
+            logger.exception("Не удалось прочитать привязки Telegram (%s)", client_key)
+
+    manual = str(getattr(settings, "owner_telegram_chat_id", "") or "")
+    for chat_id in [c.strip() for c in manual.split(",") if c.strip()]:
+        if chat_id not in chat_ids:
+            chat_ids.append(chat_id)
+    return chat_ids
+
+
+def _dialog_button(settings: Settings, conversation_id: str) -> dict | None:
+    """Inline-кнопка «Открыть диалог» — ведёт в панель на нужный диалог.
+
+    Без PUBLIC_BASE_URL адрес панели неизвестен, поэтому кнопку не вешаем.
+    """
+    base_url = str(getattr(settings, "public_base_url", "") or "").strip().rstrip("/")
+    if not base_url or not conversation_id:
+        return None
+    return {
+        "inline_keyboard": [[{
+            "text": OPEN_CHAT_BUTTON_TEXT,
+            "url": f"{base_url}/admin#chat={conversation_id}",
+        }]],
+    }
+
+
+async def _send_telegram_notification(
+    sender,
+    settings: Settings,
+    chat_id: str,
+    text: str,
+    reply_markup: dict | None,
+    disable_notification: bool,
+) -> None:
+    """Отправка уведомления в Telegram.
+
+    Приоритет у общего бота JAUAP (telegram_owner_bot_token): он видит все
+    клиенты. Если он не задан — откат на sender клиента (и тогда это должен
+    быть Telegram-клиент; у WhatsApp-клиента чат_id в отправителе бессмыслен).
+    """
+    owner_token = str(getattr(settings, "telegram_owner_bot_token", "") or "").strip()
+    if owner_token:
+        from whatsapp.telegram_client import TelegramClient
+        bot = TelegramClient(owner_token)
+        try:
+            await bot.send_text(
+                chat_id,
+                text,
+                reply_markup=reply_markup,
+                disable_notification=disable_notification,
+            )
+            return
+        finally:
+            await bot.close()
+
+    if hasattr(sender, "send_text"):
+        try:
+            await sender.send_text(chat_id, text, disable_notification=disable_notification)
+        except TypeError:
+            # Старый клиент без параметра тихой доставки
+            await sender.send_text(chat_id, text)
+        return
+    await sender.send_text(chat_id, text)
 
 
 async def notify_owner(
@@ -54,8 +144,10 @@ async def notify_owner(
     # Определяем каналы уведомлений с fallback на старую логику
     notify_channels = getattr(settings, "notify_channels", None)
     
-    # Собираем доступные контакты
-    has_telegram = bool(getattr(settings, "owner_telegram_chat_id", ""))
+    # Собираем доступные контакты. Для Telegram это привязки из панели плюс
+    # ручной chat_id из yaml — поэтому канал считаем доступным, если есть хоть один.
+    telegram_chats = _notify_recipients(settings)
+    has_telegram = bool(telegram_chats)
     has_whatsapp = bool(getattr(settings, "owner_phone", ""))
     
     if notify_channels is None:
@@ -111,21 +203,21 @@ async def notify_owner(
 
     delivered_any = False
 
-    # Отправка в Telegram
-    if "telegram" in notify_channels:
-        chat_ids = getattr(settings, "owner_telegram_chat_id", "") or ""
-        if chat_ids:
-            for chat_id in [c.strip() for c in chat_ids.split(",") if c.strip()]:
-                try:
-                    disable_notification = (reason == "no_answer" and
-                                            getattr(settings, "notify_on_no_answer", "silent") == "silent")
-                    if hasattr(sender, "send_text"):
-                        await _send_telegram_with_options(sender, chat_id, text, disable_notification)
-                    else:
-                        await sender.send_text(chat_id, text)
-                    delivered_any = True
-                except MessagingError:
-                    logger.exception("Не удалось отправить уведомление в Telegram (%s)", chat_id)
+    # Отправка в Telegram: привязанные менеджерам чаты + ручной chat_id
+    if "telegram" in notify_channels and telegram_chats:
+        reply_markup = _dialog_button(settings, conversation_id)
+        silent = (
+            reason == "no_answer"
+            and getattr(settings, "notify_on_no_answer", "silent") == "silent"
+        )
+        for chat_id in telegram_chats:
+            try:
+                await _send_telegram_notification(
+                    sender, settings, chat_id, text, reply_markup, silent,
+                )
+                delivered_any = True
+            except MessagingError:
+                logger.exception("Не удалось отправить уведомление в Telegram (%s)", chat_id)
 
     # Отправка в WhatsApp (Meta/Zernio)
     if "whatsapp" in notify_channels:
@@ -157,15 +249,3 @@ async def notify_owner(
                 logger.exception("Не удалось отправить уведомление в WhatsApp (%s)", phone)
 
     return delivered_any
-
-
-async def _send_telegram_with_options(sender, chat_id: str, text: str, disable_notification: bool = False) -> None:
-    """Отправка в Telegram с опцией disable_notification (silent message).
-    Если sender не поддерживает этот параметр — fallback на send_text.
-    """
-    try:
-        # Пробуем вызвать с disable_notification
-        await sender.send_text(chat_id, text, disable_notification=disable_notification)
-    except TypeError:
-        # Старый sender без этого параметра
-        await sender.send_text(chat_id, text)

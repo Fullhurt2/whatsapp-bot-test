@@ -9,6 +9,8 @@ from typing import Optional
 
 # Глобальный пул соединений (один на поток, thread-local)
 _thread_local = threading.local()
+# Глубина вложенной transaction() — чтобы коммит делал только внешний блок.
+_tx_local = threading.local()
 
 
 def get_db_path() -> Path:
@@ -63,26 +65,52 @@ def transaction():
         with transaction() as conn:
             conn.execute(...)
     При исключении — rollback, иначе — commit.
+
+    Вложенность поддерживается: коммит делает только внешний блок.
     """
     conn = get_connection()
+    depth = getattr(_tx_local, "depth", 0)
+    _tx_local.depth = depth + 1
     try:
         yield conn
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
+    else:
+        if depth == 0:
+            conn.commit()
+    finally:
+        _tx_local.depth = depth
+
+
+def _is_write(sql: str) -> bool:
+    """Запрос меняет данные (нужен commit)."""
+    head = sql.lstrip()[:8].upper()
+    return head.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
 
 
 def execute(sql: str, params: tuple = ()) -> sqlite3.Cursor:
-    """Выполнить запрос в текущей транзакции или автокомите."""
+    """Выполнить запрос.
+
+    Запросы, меняющие данные, коммитятся сразу — иначе транзакция остаётся
+    висеть (следующая запись получает «database is locked», а при рестарте
+    данные теряются). Внутри transaction() коммит делает внешний блок, так
+    что несколько execute() остаются одной атомарной операцией.
+    """
     conn = get_connection()
-    return conn.execute(sql, params)
+    cursor = conn.execute(sql, params)
+    if getattr(_tx_local, "depth", 0) == 0 and _is_write(sql):
+        conn.commit()
+    return cursor
 
 
 def executemany(sql: str, params_list: list[tuple]) -> sqlite3.Cursor:
-    """Выполнить много запросов."""
+    """Выполнить много запросов одной транзакцией."""
     conn = get_connection()
-    return conn.executemany(sql, params_list)
+    cursor = conn.executemany(sql, params_list)
+    if getattr(_tx_local, "depth", 0) == 0 and _is_write(sql):
+        conn.commit()
+    return cursor
 
 
 def fetchone(sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:

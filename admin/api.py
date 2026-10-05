@@ -336,6 +336,19 @@ def _client_yaml_path(clients_dir: Path, pid: str) -> Path | None:
     return None
 
 
+def _client_pids(clients_dir: Path) -> list[str]:
+    """Ключи всех клиентов из папки clients/ (имя файла без расширения)."""
+    try:
+        names = sorted(os.listdir(clients_dir))
+    except OSError:
+        return []
+    return [
+        name.rsplit(".", 1)[0]
+        for name in names
+        if name.lower().endswith((".yaml", ".yml")) and not name.startswith("_")
+    ]
+
+
 def _read_cfg(path: Path) -> dict | None:
     """Содержимое yaml-файла как словарь; None — битый/нечитаемый."""
     try:
@@ -1539,9 +1552,19 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if _client_yaml_path(clients_dir, pid) is None:
             return JSONResponse(status_code=404, content={"error": "клиент не найден"})
 
-        from storage import create_link_code
-        link = create_link_code(pid)
-        return {"ok": True, "code": link["code"], "url": link["url"], "expires_at": link["expires_at"]}
+        from storage import MAX_BINDINGS_PER_CLIENT, count_bindings, create_link_code
+        db_key = _conversation_client_key(clients_dir, pid)
+        bot_username = os.getenv("TELEGRAM_OWNER_BOT_USERNAME", "").strip().lstrip("@")
+        link = create_link_code(db_key, bot_username=bot_username)
+        return {
+            "ok": True,
+            "code": link["code"],
+            "url": link["url"],
+            "expires_at": link["expires_at"],
+            "bot_username": bot_username,
+            "bound": count_bindings(db_key),
+            "max_bindings": MAX_BINDINGS_PER_CLIENT,
+        }
 
 
     @app.get("/admin/clients/{pid}/telegram")
@@ -1550,8 +1573,13 @@ def register_admin_api(app, settings: Settings, state) -> None:
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
-        from storage import get_tg_bindings
-        return {"bindings": get_tg_bindings(pid)}
+        from storage import MAX_BINDINGS_PER_CLIENT, get_tg_bindings
+        db_key = _conversation_client_key(clients_dir, pid)
+        return {
+            "bindings": get_tg_bindings(db_key),
+            "max_bindings": MAX_BINDINGS_PER_CLIENT,
+            "owner_bot_configured": bool(settings.telegram_owner_bot_token),
+        }
 
 
     @app.delete("/admin/clients/{pid}/telegram/{binding_id}")
@@ -1561,12 +1589,35 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         from storage import remove_tg_binding
-        if not remove_tg_binding(pid, binding_id):
+        if not remove_tg_binding(_conversation_client_key(clients_dir, pid), binding_id):
             return JSONResponse(status_code=404, content={"error": "привязка не найдена"})
         return {"ok": True}
 
 
     # --- Вопросы без ответа -----------------------------------------------------------
+
+
+    @app.get("/admin/clients/{pid}/unanswered/{group_id}/questions")
+    async def unanswered_group_questions(pid: str, group_id: int, request: Request):
+        """Тексты вопросов внутри группы — их показывает панель перед ответом."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import get_questions_for_group, get_unanswered_group
+        db_key = _conversation_client_key(clients_dir, pid)
+        group = get_unanswered_group(group_id)
+        if not group or group.get("client_key") != db_key:
+            return JSONResponse(status_code=404, content={"error": "группа не найдена"})
+        questions = get_questions_for_group(group_id)
+        return {
+            "questions": [{
+                "id": q["id"],
+                "question": q["question"],
+                "status": q["status"],
+                "answer_text": q.get("answer_text") or "",
+                "created_at": q.get("created_at") or "",
+            } for q in questions]
+        }
 
 
     @app.get("/admin/clients/{pid}/unanswered")
@@ -1576,7 +1627,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         from storage import list_unanswered_groups
-        groups = list_unanswered_groups(pid, status=status)
+        groups = list_unanswered_groups(_conversation_client_key(clients_dir, pid), status=status)
         return {"groups": groups}
 
 
@@ -1596,7 +1647,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         from storage import get_unanswered_group, get_questions_for_group, mark_question_answered, update_group_status, create_conversation
         group = get_unanswered_group(group_id)
-        if not group or group.get("client_key") != pid:
+        if not group or group.get("client_key") != _conversation_client_key(clients_dir, pid):
             return JSONResponse(status_code=404, content={"error": "группа не найдена"})
 
         # Дописываем «Вопрос: … Ответ: …» в knowledge_base
@@ -1640,7 +1691,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         # Получаем последние необработанные вопросы
         from storage import get_recent_unanswered_for_regroup, get_last_regroup_time, create_unanswered_group
-        questions = get_recent_unanswered_for_regroup(pid, limit=200)
+        db_key = _conversation_client_key(clients_dir, pid)
+        questions = get_recent_unanswered_for_regroup(db_key, limit=200)
         if len(questions) < 2:
             return {"ok": True, "groups_created": 0, "message": "недостаточно вопросов для группировки"}
 
@@ -1691,7 +1743,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
             name = str(g.get("name") or "").strip()
             ids = g.get("question_ids") or []
             if name and ids:
-                create_unanswered_group(pid, name, ids)
+                create_unanswered_group(db_key, name, ids)
                 created += 1
 
         return {"ok": True, "groups_created": created, "groups": groups}
@@ -1713,7 +1765,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         from storage import parse_date_range, get_client_stats
         from_date, to_date = parse_date_range(from_date, to_date)
-        stats = get_client_stats(pid, from_date, to_date)
+        stats = get_client_stats(_conversation_client_key(clients_dir, pid), from_date, to_date)
         return stats
 
 
@@ -1727,7 +1779,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
         from storage import parse_date_range, export_stats_csv
         from_date, to_date = parse_date_range(from_date, to_date)
-        csv_data = export_stats_csv(pid, from_date, to_date)
+        csv_data = export_stats_csv(_conversation_client_key(clients_dir, pid), from_date, to_date)
         return PlainTextResponse(
             csv_data,
             media_type="text/csv; charset=utf-8",
@@ -1748,7 +1800,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         from storage import parse_date_range, get_admin_overview_stats
         from_date, to_date = parse_date_range(from_date, to_date)
-        stats = get_admin_overview_stats(from_date, to_date)
+        client_map = {
+            stem: _conversation_client_key(clients_dir, stem)
+            for stem in _client_pids(clients_dir)
+        }
+        stats = get_admin_overview_stats(from_date, to_date, client_map)
         return stats
 
 

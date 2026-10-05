@@ -48,6 +48,9 @@ class LLMClient:
         self._use_max_completion_tokens = False
         self._omit_temperature = False
         self._omit_reasoning_effort = False
+        # Расход токенов последнего ответа: chat() возвращает только текст,
+        # поэтому usage копим здесь — его читает аналитика в админке.
+        self.last_usage: dict = {}
         # Общий таймаут = timeout_seconds из конфига; на установку соединения даём 10с.
         # read-таймаут — главная защита от «зависшего» ответа модели.
         self._client = httpx.AsyncClient(
@@ -207,6 +210,12 @@ class LLMClient:
 
         # Диагностика расхода токенов: если reasoning съедает max_tokens,
         # content приходит пустым — по этим полям это сразу видно в логах.
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        self.last_usage = {
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+        }
         logger.info(
             "LLM ответ | finish_reason=%s | usage=%s",
             choice.get("finish_reason"),

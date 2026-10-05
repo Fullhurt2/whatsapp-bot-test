@@ -159,20 +159,28 @@ def update_last_message_times(conv_id: str, is_client: bool = False) -> None:
         )
 
 
-def get_conversations_needing_timeout_check(timeout_hours: int) -> list[dict]:
+def get_conversations_needing_timeout_check(
+    timeout_hours: int,
+    client_key: Optional[str] = None,
+) -> list[dict]:
     """
     Найти диалоги в manual, где нет сообщений от человека > timeout_hours.
     Для фоновой задачи автовозврата к боту.
+
+    client_key — ограничить одним клиентом (в мультитенанте у каждого свой
+    таймаут, поэтому задача обходит тенантов по одному).
     """
-    rows = fetchall(
-        """
+    sql = """
         SELECT * FROM conversations
         WHERE status = 'manual'
           AND manual_since IS NOT NULL
           AND datetime(manual_since, ? || ' hours') < datetime('now')
-        """,
-        (f"+{timeout_hours}",),
-    )
+    """
+    params: tuple = (f"+{int(timeout_hours)}",)
+    if client_key:
+        sql += " AND client_key = ?"
+        params += (client_key,)
+    rows = fetchall(sql, params)
     return [dict(row) for row in rows]
 
 

@@ -173,6 +173,35 @@
 
   .only-mobile { display: none; }
 
+  /* --- аналитика --- */
+  .date-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .date-row > div { flex: 0 1 170px; }
+  .date-row label { margin-top: 0; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 10px; margin: 14px 0 4px; }
+  .metric { border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 13px; background: var(--surface-muted); }
+  .metric-label { font-size: 11.5px; color: var(--text-soft); }
+  .metric-value { font-size: 18px; font-weight: 600; margin-top: 3px; word-break: break-word; }
+  .metric-sub { font-size: 11.5px; color: var(--text-soft); margin-top: 3px; }
+  .table-scroll { overflow-x: auto; }
+  .panel-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .panel-table th, .panel-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  .panel-table th { font-size: 11.5px; color: var(--text-soft); font-weight: 600; }
+  .panel-table th.num, .panel-table td.num { text-align: right; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 128px; border-bottom: 1px solid var(--border); }
+  .bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; min-width: 0; }
+  .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; }
+  .bar-label { font-size: 10px; color: var(--text-soft); margin-top: 4px; }
+
+  /* --- вопросы без ответа --- */
+  .ua-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-height: 50vh; overflow-y: auto; }
+  .ua-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 13px; background: var(--surface-muted); cursor: pointer; }
+  .ua-row:hover { background: var(--surface); }
+  .ua-row.active { background: var(--accent-soft); border-color: var(--accent-ink); }
+  .ua-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-weight: 600; font-size: 13.5px; }
+  .ua-question { border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted);
+    padding: 9px 11px; font-size: 13.5px; margin-bottom: 7px; white-space: pre-wrap; word-break: break-word; }
+  .ua-question .muted { display: block; margin-top: 4px; }
+
   /* --- живой чат --- */
   .chat-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; }
   .chat-layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
@@ -327,6 +356,9 @@
         <nav class="tabs" id="tabsNav">
           <button class="tab-btn active" data-tab="business" onclick="switchTab('business')">О бизнесе</button>
           <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">Живой чат</button>
+          <button class="tab-btn hidden" id="tabUnansweredBtn" data-tab="unanswered" onclick="switchTab('unanswered')">Вопросы без ответа</button>
+          <button class="tab-btn hidden" id="tabStatsBtn" data-tab="stats" onclick="switchTab('stats')">Аналитика</button>
+          <button class="tab-btn hidden" id="tabTelegramBtn" data-tab="telegram" onclick="switchTab('telegram')">Telegram</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
           <button class="tab-btn hidden" id="tabProfileBtn" data-tab="profile" onclick="switchTab('profile')">Профиль</button>
@@ -373,6 +405,96 @@
               <div class="status" id="chatStatus" role="status"></div>
             </div>
           </div>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-unanswered">
+          <div class="section-title">Вопросы без ответа</div>
+          <div class="hint">Сюда попадают вопросы, на которые в базе знаний нет ответа. Ответьте — и ответ автоматически допишется в «Информацию о бизнесе», и бот в следующий раз ответит сам.</div>
+          <div class="row" style="margin-top:12px">
+            <div>
+              <label>Показывать</label>
+              <select id="uaStatus" onchange="loadUnanswered()">
+                <option value="">Все группы</option>
+                <option value="active">Без ответа</option>
+                <option value="answered">Отвеченные</option>
+                <option value="ignored">Скрытые</option>
+              </select>
+            </div>
+            <div style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <button type="button" class="btn btn-primary" id="uaRegroupBtn" onclick="regroupUnanswered()">Сгруппировать похожие</button>
+            </div>
+          </div>
+          <div class="status" id="uaStatusLine" role="status"></div>
+          <div class="ua-list" id="uaList"></div>
+
+          <div class="hidden" id="uaDetail">
+            <div class="section-title" style="margin-top:20px">Вопросы группы</div>
+            <div id="uaQuestions"></div>
+            <label for="uaAnswer">Ответ менеджера — допишется в базу знаний</label>
+            <textarea id="uaAnswer" rows="3" placeholder="Например: маникюр с покрытием — 4500 ₸, запись за 1 день."></textarea>
+            <p>
+              <button type="button" class="btn btn-primary" id="uaSaveBtn" onclick="answerUnanswered()">Дописать в базу знаний</button>
+              <button type="button" class="btn btn-ghost" onclick="closeUaDetail()">Назад к списку</button>
+            </p>
+            <div class="status" id="uaDetailStatus" role="status"></div>
+          </div>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-stats">
+          <div class="section-title">Аналитика</div>
+          <div class="date-row" style="margin-top:12px">
+            <div>
+              <label for="stFrom">Период с</label>
+              <input id="stFrom" type="date">
+            </div>
+            <div>
+              <label for="stTo">по</label>
+              <input id="stTo" type="date">
+            </div>
+            <div class="date-actions">
+              <button type="button" class="btn btn-primary" onclick="loadStats()">Обновить</button>
+              <button type="button" class="btn btn-sm" style="margin-left:6px" onclick="exportStatsCsv()">Экспорт CSV</button>
+            </div>
+          </div>
+          <div class="status" id="statsStatus" role="status"></div>
+          <div class="metrics" id="statsMetrics"></div>
+
+          <div class="section-title">Передачи по причинам</div>
+          <div id="statsHandoffs"></div>
+
+          <div class="section-title">Часы пик (сообщения клиентов)</div>
+          <div id="statsHourly"></div>
+
+          <div class="section-title">Топ вопросов без ответа</div>
+          <div id="statsTopUnanswered"></div>
+
+          <div class="section-title" id="statsOverviewTitle" style="display:none">Сводка по всем клиентам</div>
+          <div id="statsOverview"></div>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-telegram">
+          <div class="section-title">Telegram-менеджер</div>
+          <div class="hint">Менеджер привязывает свой чат один раз по ссылке — дальше бот сам присылает уведомления о вопросах с кнопкой «Открыть диалог».</div>
+          <div class="status" id="tgPanelStatus" role="status"></div>
+
+          <p>
+            <button type="button" class="btn btn-primary" id="tgLinkBtn" onclick="createTgLinkCode()">Получить ссылку для менеджера</button>
+          </p>
+          <div class="row hidden" id="tgLinkWrap">
+            <div style="flex:1 1 320px">
+              <label>Ссылка для менеджера</label>
+              <input id="tgLink" class="mono" readonly>
+            </div>
+            <div style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <button type="button" class="btn btn-sm" onclick="copyTgLink()">Копировать</button>
+            </div>
+          </div>
+          <div class="hint" id="tgLinkHint"></div>
+
+          <div class="section-title">Привязанные чаты</div>
+          <div id="tgBindings"></div>
         </section>
 
         <section class="tab-panel hidden" id="tab-knowledge">
@@ -695,6 +817,8 @@ async function whoami() {
     show("editorEmpty", true);
     show("editorCard", false);
     loadList();
+    // Ссылка вида /admin#chat=<id> открывает диалог, когда клиент уже выбран.
+    openChatFromHash();
   } else {
     show("editorEmpty", false);
     openEditor(data.phone_number_id);
@@ -767,6 +891,10 @@ function switchTab(name) {
   // Живой чат: автообновление работает, только пока вкладка открыта.
   if (name === "chat") startChatPolling();
   else stopChatPolling();
+  // Остальные вкладки подгружают данные при открытии.
+  if (name === "stats") loadStats();
+  if (name === "unanswered") loadUnanswered();
+  if (name === "telegram") loadTgBindings();
 }
 
 function backToList(skipConfirm) {
@@ -813,6 +941,9 @@ async function openEditor(pid) {
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
+  show("tabStatsBtn", isAdmin);
+  show("tabTelegramBtn", isAdmin);
+  show("tabUnansweredBtn", isAdmin);
   // Show Profile tab for WhatsApp (wa) and Zernio clients
   const isWhatsApp = ["wa", "zernio"].includes(data.provider);
   show("tabProfileBtn", isWhatsApp);
@@ -843,6 +974,22 @@ async function openEditor(pid) {
   document.querySelectorAll("#chatModeSeg .seg-btn").forEach((btn) => btn.classList.remove("active"));
   $("chatModeHint").textContent = "";
   status("chatStatus", "");
+  status("statsStatus", "");
+  status("uaStatusLine", "");
+  status("uaDetailStatus", "");
+  status("tgPanelStatus", "");
+  closeUaDetail();
+  $("statsMetrics").innerHTML = "";
+  $("statsHandoffs").innerHTML = "";
+  $("statsHourly").innerHTML = "";
+  $("statsTopUnanswered").innerHTML = "";
+  $("statsOverview").innerHTML = "";
+  $("statsOverviewTitle").style.display = "none";
+  $("uaList").innerHTML = "";
+  $("tgBindings").innerHTML = "";
+  show("tgLinkWrap", false);
+  $("tgLink").value = "";
+  $("tgLinkHint").textContent = "";
   setDirty(false);
   status("editorStatus", "");
   switchTab("business");
@@ -1303,6 +1450,298 @@ $("chatInput").addEventListener("keydown", (event) => {
     sendChatMessage();
   }
 });
+
+// --- Аналитика ------------------------------------------------------------------
+
+function statsQuery() {
+  const from = $("stFrom").value;
+  const to = $("stTo").value;
+  const params = [];
+  if (from) params.push("from_date=" + encodeURIComponent(from));
+  if (to) params.push("to_date=" + encodeURIComponent(to + "T23:59:59"));
+  return params.length ? "?" + params.join("&") : "";
+}
+
+function metricCard(label, value, sub) {
+  return '<div class="metric"><div class="metric-label">' + esc(label) + "</div>" +
+    '<div class="metric-value">' + esc(value) + "</div>" +
+    (sub ? '<div class="metric-sub">' + esc(sub) + "</div>" : "") + "</div>";
+}
+
+function seconds(ms) {
+  return (Number(ms || 0) / 1000).toFixed(1) + " с";
+}
+
+async function loadStats() {
+  status("statsStatus", "Считаем…");
+  const { ok, code, data } = await chatApi("GET", "/stats" + statsQuery());
+  if (!ok) { status("statsStatus", humanError(code, data), true); return; }
+  const msgs = data.messages || {};
+  const closed = data.closed_by_bot || {};
+  const reaction = data.manager_reaction || {};
+  status("statsStatus", "Период: " + fmtChatTime(data.period && data.period.from) +
+    " — " + fmtChatTime(data.period && data.period.to), false);
+
+  $("statsMetrics").innerHTML = [
+    metricCard("Диалоги", data.dialogues || 0, "новых контактов: " + (data.new_contacts || 0)),
+    metricCard("Сообщения", msgs.total || 0, "клиентов: " + (msgs.client || 0) + " · бота: " + (msgs.bot || 0)),
+    metricCard("Закрыто ботом", (closed.percentage || 0) + "%", "диалогов: " + (closed.count || 0)),
+    metricCard("Передачи", (data.handoffs || {}).total || 0, "менеджеру"),
+    metricCard("Ответ бота (среднее)", seconds((data.response_time || {}).avg_ms),
+      "p95: " + seconds((data.response_time || {}).p95_ms)),
+    metricCard("Реакция менеджера", (reaction.avg_seconds || 0) + " с",
+      "p95: " + (reaction.p95_seconds || 0) + " с · случаев: " + (reaction.count || 0)),
+    metricCard("Сэкономлено времени", (data.estimated_time_saved_minutes || 0) + " мин",
+      "ответов бота вместо менеджера"),
+    metricCard("Токены", ((data.tokens || {}).in || 0), "вход · выход: " + ((data.tokens || {}).out || 0)),
+    metricCard("Без ответа", (data.unanswered || {}).total || 0,
+      "новых: " + ((data.unanswered || {}).new_count || 0)),
+  ].join("");
+
+  const byReason = (data.handoffs || {}).by_reason || {};
+  const reasonKeys = Object.keys(byReason);
+  $("statsHandoffs").innerHTML = reasonKeys.length
+    ? '<div class="table-scroll"><table class="panel-table"><thead><tr><th>Причина</th><th class="num">Сколько</th></tr></thead><tbody>' +
+      reasonKeys.map((r) => "<tr><td>" + esc(r) + '</td><td class="num">' + byReason[r] + "</td></tr>").join("") +
+      "</tbody></table></div>"
+    : '<div class="muted">Передач за период не было.</div>';
+
+  const hourly = (data.hourly_peak || []).slice().sort((a, b) => a.hour - b.hour);
+  if (hourly.length) {
+    const max = Math.max.apply(null, hourly.map((h) => h.count || 0)) || 1;
+    $("statsHourly").innerHTML = '<div class="bars">' + hourly.map((h) =>
+      '<div class="bar-col"><div class="bar" style="height:' +
+      Math.max(2, Math.round((h.count || 0) / max * 110)) + 'px" title="' +
+      esc(h.hour + ":00 — " + h.count) + '"></div><div class="bar-label">' + h.hour + "</div></div>"
+    ).join("") + "</div>";
+  } else {
+    $("statsHourly").innerHTML = '<div class="muted">Нет сообщений за период.</div>';
+  }
+
+  const top = data.top_unanswered || [];
+  $("statsTopUnanswered").innerHTML = top.length
+    ? '<div class="table-scroll"><table class="panel-table"><thead><tr><th>Тема</th><th class="num">Спросили раз</th></tr></thead><tbody>' +
+      top.map((t) => "<tr><td>" + esc(t.name) + '</td><td class="num">' + (t.count || 0) + "</td></tr>").join("") +
+      "</tbody></table></div>"
+    : '<div class="muted">Тем без ответа пока нет.</div>';
+
+  await loadStatsOverview();
+}
+
+async function loadStatsOverview() {
+  const { ok, code, data } = await api("GET", "/admin/stats/overview" + statsQuery());
+  if (!ok || !data.clients) { $("statsOverview").innerHTML = ""; $("statsOverviewTitle").style.display = "none"; return; }
+  const clients = data.clients || {};
+  const pids = Object.keys(clients);
+  $("statsOverviewTitle").style.display = "block";
+  $("statsOverview").innerHTML =
+    '<div class="metrics">' + [
+      metricCard("Клиентов", data.total_clients || 0, ""),
+      metricCard("Диалогов всего", data.total_dialogues || 0, ""),
+      metricCard("Передач всего", data.total_handoffs || 0, ""),
+      metricCard("Расход на LLM", "$" + Number(data.estimated_cost_usd || 0).toFixed(4),
+        "вход: " + (data.total_tokens_in || 0) + " · выход: " + (data.total_tokens_out || 0)),
+    ].join("") + "</div>" +
+    (pids.length ? '<div class="table-scroll"><table class="panel-table"><thead><tr><th>Клиент</th>' +
+      '<th class="num">Диалоги</th><th class="num">Передачи</th><th class="num">Закрыто ботом</th>' +
+      '<th class="num">Токены</th></tr></thead><tbody>' +
+      pids.map((pid) => {
+        const c = clients[pid];
+        return "<tr><td>" + esc(pid) + '</td><td class="num">' + (c.dialogues || 0) +
+          '</td><td class="num">' + (c.handoffs || 0) + '</td><td class="num">' +
+          (c.closed_by_bot_pct || 0) + '%</td><td class="num">' +
+          ((c.tokens_in || 0) + (c.tokens_out || 0)) + "</td></tr>";
+      }).join("") + "</tbody></table></div>" : "");
+}
+
+async function exportStatsCsv() {
+  status("statsStatus", "Готовим файл…");
+  const token = localStorage.getItem(STORE_KEY) || "";
+  try {
+    const response = await fetch(
+      "/admin/clients/" + encodeURIComponent(currentPid) + "/stats/export.csv" + statsQuery(),
+      { headers: { "X-Admin-Token": token, "X-Client-Token": token } }
+    );
+    if (!response.ok) { status("statsStatus", "Не удалось выгрузить (код " + response.status + ")", true); return; }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "stats-" + currentPid + ".csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    status("statsStatus", "Файл сохранён.", false);
+  } catch (e) {
+    status("statsStatus", "Не удалось выгрузить: " + e.message, true);
+  }
+}
+
+// --- Вопросы без ответа ----------------------------------------------------------
+
+let uaGroups = [];
+let uaOpenGroupId = null;
+
+async function loadUnanswered() {
+  status("uaStatusLine", "Загружаем…");
+  const filter = $("uaStatus").value;
+  const { ok, code, data } = await chatApi("GET", "/unanswered" + (filter ? "?status=" + encodeURIComponent(filter) : ""));
+  if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
+  uaGroups = data.groups || [];
+  status("uaStatusLine", uaGroups.length ? "Групп: " + uaGroups.length : "Вопросов без ответа пока нет.", false);
+  const box = $("uaList");
+  if (!uaGroups.length) {
+    box.innerHTML = '<div class="list-empty">Здесь появятся вопросы клиентов, на которые бот не нашёл ответа в базе знаний.</div>';
+    return;
+  }
+  box.innerHTML = uaGroups.map((g) => {
+    const count = (g.question_ids || []).length;
+    return '<div class="ua-row' + (g.id === uaOpenGroupId ? " active" : "") + '" data-gid="' + g.id + '">' +
+      '<div class="ua-row-head"><span>' + esc(g.name || "Без названия") + "</span>" +
+      '<span class="provider-badge">' + esc(g.status) + "</span></div>" +
+      '<div class="chat-conv-sub">вопросов: ' + count + " · " + esc(fmtChatTime(g.updated_at || g.created_at)) + "</div></div>";
+  }).join("");
+  box.querySelectorAll(".ua-row").forEach((row) => {
+    row.onclick = () => openUaGroup(Number(row.dataset.gid));
+  });
+}
+
+async function openUaGroup(groupId) {
+  uaOpenGroupId = groupId;
+  renderUnansweredList();
+  show("uaDetail", true);
+  status("uaDetailStatus", "Загружаем вопросы…");
+  const { ok, code, data } = await chatApi("GET", "/unanswered/" + groupId + "/questions");
+  if (!ok) { status("uaDetailStatus", humanError(code, data), true); return; }
+  const questions = data.questions || [];
+  $("uaQuestions").innerHTML = questions.length
+    ? questions.map((q) => '<div class="ua-question">' + esc(q.question) +
+      '<span class="muted">' + esc(fmtChatTime(q.created_at)) +
+      (q.answer_text ? " · ответ: " + esc(q.answer_text) : "") + "</span></div>").join("")
+    : '<div class="muted">В группе нет вопросов.</div>';
+  $("uaAnswer").value = "";
+  status("uaDetailStatus", "Вопросов в группе: " + questions.length, false);
+}
+
+function renderUnansweredList() {
+  loadUnanswered();
+}
+
+function closeUaDetail() {
+  show("uaDetail", false);
+  uaOpenGroupId = null;
+  $("uaQuestions").innerHTML = "";
+  $("uaAnswer").value = "";
+}
+
+async function answerUnanswered() {
+  const answer = $("uaAnswer").value.trim();
+  if (!answer) { status("uaDetailStatus", "Напишите ответ — он уйдёт в базу знаний.", true); return; }
+  const btn = $("uaSaveBtn");
+  btn.disabled = true;
+  btn.textContent = "Сохраняем…";
+  const { ok, code, data } = await chatApi("POST", "/unanswered/" + uaOpenGroupId + "/answer", { answer: answer });
+  btn.disabled = false;
+  btn.textContent = "Дописать в базу знаний";
+  if (!ok) { status("uaDetailStatus", humanError(code, data), true); return; }
+  closeUaDetail();
+  status("uaStatusLine", "Ответ добавлен в базу знаний — бот ответит на такие вопросы сам.", false);
+  loadUnanswered();
+}
+
+async function regroupUnanswered() {
+  const btn = $("uaRegroupBtn");
+  btn.disabled = true;
+  btn.textContent = "Группируем…";
+  status("uaStatusLine", "LLM группирует похожие вопросы — это может занять до минуты.");
+  const { ok, code, data } = await chatApi("POST", "/unanswered/regroup");
+  btn.disabled = false;
+  btn.textContent = "Сгруппировать похожие";
+  if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
+  status("uaStatusLine", "Создано групп: " + ((data && data.groups_created) || 0), false);
+  loadUnanswered();
+}
+
+// --- Telegram-менеджер ------------------------------------------------------------
+
+async function loadTgBindings() {
+  status("tgPanelStatus", "Загружаем привязки…");
+  const { ok, code, data } = await chatApi("GET", "/telegram");
+  if (!ok) { status("tgPanelStatus", humanError(code, data), true); return; }
+  const bindings = data.bindings || [];
+  status("tgPanelStatus",
+    "Привязано чатов: " + bindings.length + " из " + (data.max_bindings || 5), false);
+  if (!data.owner_bot_configured) {
+    status("tgPanelStatus",
+      "Бот JAUAP не настроен: в переменных окружения нет TELEGRAM_OWNER_BOT_TOKEN — " +
+      "ссылка работать не будет, задайте его и перезапустите сервис.", true);
+  }
+  $("tgBindings").innerHTML = bindings.length
+    ? '<div class="table-scroll"><table class="panel-table"><thead><tr><th>Chat id</th><th>Когда</th><th></th></tr></thead><tbody>' +
+      bindings.map((b) => "<tr><td class=\"mono\">" + esc(b.chat_id) + "</td><td>" +
+        esc(fmtChatTime(b.created_at)) + '</td><td class="num"><button type="button" class="btn btn-sm btn-danger ' +
+        'tg-unbind" data-binding-id="' + b.id + '">Отвязать</button></td></tr>').join("") +
+      "</tbody></table></div>"
+    : '<div class="muted">Ни один чат не привязан.</div>';
+  $("tgBindings").querySelectorAll(".tg-unbind").forEach((btn) => {
+    btn.onclick = () => removeTgBinding(Number(btn.dataset.bindingId));
+  });
+}
+
+async function createTgLinkCode() {
+  const btn = $("tgLinkBtn");
+  btn.disabled = true;
+  btn.textContent = "Создаём…";
+  status("tgPanelStatus", "");
+  const { ok, code, data } = await chatApi("POST", "/telegram/link-code");
+  btn.disabled = false;
+  btn.textContent = "Получить ссылку для менеджера";
+  if (!ok) { status("tgPanelStatus", humanError(code, data), true); return; }
+  $("tgLink").value = data.url || "";
+  show("tgLinkWrap", Boolean(data.url));
+  $("tgLinkHint").textContent = data.url
+    ? "Ссылка действует до " + fmtChatTime(data.expires_at) + ". Отправьте её менеджеру: он нажмёт и привяжет свой чат."
+    : "@username бота не задан (TELEGRAM_OWNER_BOT_USERNAME). Код: " + data.code +
+      " — отправьте его менеджеру и попросите написать боту /start " + data.code;
+  status("tgPanelStatus", data.bound >= data.max_bindings
+    ? "Внимание: уже привязано " + data.bound + " из " + data.max_bindings + " чатов."
+    : "Готово.", data.bound >= data.max_bindings);
+}
+
+function copyTgLink() {
+  const input = $("tgLink");
+  if (!input.value) return;
+  const done = () => { $("tgLinkHint").textContent = "Ссылка скопирована."; };
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(input.value).then(done).catch(() => {
+      input.select(); document.execCommand("copy"); done();
+    });
+  } else {
+    input.select(); document.execCommand("copy"); done();
+  }
+}
+
+async function removeTgBinding(bindingId) {
+  if (!confirm("Отвязать этот чат? Уведомления в него больше не придут.")) return;
+  const { ok, code, data } = await chatApi("DELETE", "/telegram/" + bindingId);
+  if (!ok) { status("tgPanelStatus", humanError(code, data), true); return; }
+  loadTgBindings();
+}
+
+// --- Переход по ссылке из уведомления Telegram ------------------------------------
+
+function openChatFromHash() {
+  const match = /#chat=([A-Za-z0-9-]+)/.exec(location.hash || "");
+  if (!match) return;
+  const conversationId = match[1];
+  if (!$("editorCard") || $("editorCard").classList.contains("hidden")) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  switchTab("chat");
+  openConversation(conversationId);
+}
+
+window.addEventListener("hashchange", openChatFromHash);
 
 function toggleNew() {
   const opening = $("newCard").classList.contains("hidden");

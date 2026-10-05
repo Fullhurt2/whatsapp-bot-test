@@ -129,9 +129,10 @@ def get_context_for_llm(
         if len(text) > max_chars_per_msg:
             text = text[:max_chars_per_msg] + "…"
 
-        # Бюджет символов
+        # Бюджет символов: переполнение пропускаем, а не обрываем — иначе
+        # вместе с лишним текстом выпали бы самые новые сообщения диалога.
         if total_chars + len(text) > total_char_budget:
-            break
+            continue
 
         messages.append({"role": role, "content": text})
         total_chars += len(text)
@@ -188,12 +189,12 @@ def get_bot_messages_stats(client_key: str, from_date: str, to_date: str) -> dic
         """
         SELECT
             COUNT(*) as total_bot_messages,
-            AVG(latency_ms) as avg_latency_ms,
-            SUM(tokens_in) as total_tokens_in,
-            SUM(tokens_out) as total_tokens_out,
-            SUM(CASE WHEN answer_kind = 'handoff' THEN 1 ELSE 0 END) as handoff_count,
-            SUM(CASE WHEN answer_kind = 'no_answer' THEN 1 ELSE 0 END) as no_answer_count,
-            SUM(CASE WHEN answer_kind = 'kb' THEN 1 ELSE 0 END) as kb_count
+            COALESCE(AVG(latency_ms), 0) as avg_latency_ms,
+            COALESCE(SUM(tokens_in), 0) as total_tokens_in,
+            COALESCE(SUM(tokens_out), 0) as total_tokens_out,
+            COALESCE(SUM(CASE WHEN answer_kind = 'handoff' THEN 1 ELSE 0 END), 0) as handoff_count,
+            COALESCE(SUM(CASE WHEN answer_kind = 'no_answer' THEN 1 ELSE 0 END), 0) as no_answer_count,
+            COALESCE(SUM(CASE WHEN answer_kind = 'kb' THEN 1 ELSE 0 END), 0) as kb_count
         FROM messages m
         JOIN conversations c ON m.conversation_id = c.id
         WHERE c.client_key = ?
@@ -209,6 +210,12 @@ def get_bot_messages_stats(client_key: str, from_date: str, to_date: str) -> dic
 def get_conversation_stats(client_key: str, from_date: str, to_date: str) -> dict:
     """
     Статистика диалогов за период.
+
+    conversations_with_client_msg — диалоги, где клиент писал ИМЕННО в периоде
+    (без фильтра по датам метрика считала бы все диалоги за всё время).
+    conversations_closed_by_bot — те же диалоги, но без единой передачи
+    менеджеру: их закрыл бот сам. Считается в тех же единицах, что и
+    conversations_with_client_msg, поэтому доля не уходит в минус.
     """
     row = fetchone(
         """
@@ -216,12 +223,21 @@ def get_conversation_stats(client_key: str, from_date: str, to_date: str) -> dic
             COUNT(DISTINCT c.id) as total_conversations,
             COUNT(DISTINCT CASE WHEN c.created_at >= ? AND c.created_at <= ? THEN c.id END) as new_conversations,
             COUNT(DISTINCT CASE WHEN EXISTS (
-                SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.role = 'client'
-            ) THEN c.id END) as conversations_with_client_msg
+                SELECT 1 FROM messages m
+                WHERE m.conversation_id = c.id AND m.role = 'client'
+                  AND m.created_at >= ? AND m.created_at <= ?
+            ) THEN c.id END) as conversations_with_client_msg,
+            COUNT(DISTINCT CASE WHEN EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.conversation_id = c.id AND m.role = 'client'
+                  AND m.created_at >= ? AND m.created_at <= ?
+            ) AND NOT EXISTS (
+                SELECT 1 FROM handoffs h WHERE h.conversation_id = c.id
+            ) THEN c.id END) as conversations_closed_by_bot
         FROM conversations c
         WHERE c.client_key = ?
         """,
-        (from_date, to_date, client_key),
+        (from_date, to_date, from_date, to_date, from_date, to_date, client_key),
     )
     return dict(row) if row else {}
 

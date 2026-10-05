@@ -86,7 +86,7 @@ except Exception:
 # Минимальный контекст в памяти процесса (без БД — осознанно для MVP):
 # храним последние сообщения каждого чата и передаём их модели.
 # Ограничения защищают память процесса от неограниченного роста.
-HISTORY_MAX_MESSAGES = 8   # последние 8 сообщений = 4 хода «клиент-бот»
+HISTORY_MAX_MESSAGES = 16  # 16 сообщений — столько же, сколько берётся из БД
 MESSAGE_MAX_CHARS = 700    # обрезка слишком длинных сообщений в истории
 MAX_TRACKED_CHATS = 500    # не храним историю больше чем для 500 чатов
 
@@ -198,6 +198,14 @@ class MessageProcessor:
         self.handoff_pauses_bot = getattr(settings, "handoff_pauses_bot", True)
         self.manual_timeout_hours = getattr(settings, "manual_timeout_hours", 12)
 
+    def _client_key(self) -> str:
+        """Ключ клиента в БД: у Meta/TG — id номера/бота, у Zernio — accountId."""
+        return (
+            getattr(self.settings, "whatsapp_phone_number_id", "")
+            or getattr(self.settings, "zernio_account_id", "")
+            or "single"
+        )
+
     # --- память диалога (fallback) ----------------------------------------------
 
     def _history_for(self, phone: str) -> deque:
@@ -243,7 +251,7 @@ class MessageProcessor:
         self._histories.pop(phone, None)
 
         # Создаём/обновляем диалог в БД
-        client_key = self.settings.whatsapp_phone_number_id or self.settings.zernio_account_id or "single"
+        client_key = self._client_key()
         conv = get_conversation_by_client_and_phone(client_key, phone)
         if conv is None:
             conv = create_conversation(
@@ -312,7 +320,7 @@ class MessageProcessor:
             return
 
         # Получить или создать диалог в БД
-        client_key = self.settings.whatsapp_phone_number_id or self.settings.zernio_account_id or "single"
+        client_key = self._client_key()
         conv = get_conversation_by_client_and_phone(client_key, phone)
         if conv is None:
             conv = create_conversation(
@@ -524,14 +532,15 @@ class MessageProcessor:
 
         # Сохраняем ответ бота ТОЛЬКО после успешной отправки
         if _DB_AVAILABLE:
+            usage = getattr(self.llm, "last_usage", None) or {}
             add_message(
                 conversation_id=conv_id,
                 role="bot",
                 text=reply,
                 content_kind="text",
                 provider_message_id=provider_msg_id,
-                tokens_in=None,
-                tokens_out=None,
+                tokens_in=usage.get("prompt_tokens") or None,
+                tokens_out=usage.get("completion_tokens") or None,
                 latency_ms=int(llm_sec * 1000),
                 answer_kind="kb",
             )
@@ -575,6 +584,20 @@ class MessageProcessor:
                 answer_kind=answer_kind,
             )
 
+            # Вопрос, на который в базе знаний нет ответа, кладём в отдельное
+            # хранилище: из него собирается вкладка «Вопросы без ответа»,
+            # а ответ менеджера дописывается обратно в базу знаний.
+            if reason == "no_answer":
+                from storage import add_unanswered_question
+                try:
+                    add_unanswered_question(
+                        client_key=self._client_key(),
+                        conversation_id=conv_id,
+                        question=text_for_owner,
+                    )
+                except Exception:
+                    logger.exception("Не удалось сохранить вопрос без ответа")
+
             # Создаём запись о передаче (handoff)
             from storage import create_handoff
             handoff_id = create_handoff(
@@ -601,6 +624,7 @@ class MessageProcessor:
             display_name=display_name,
             message_text=text_for_owner,
             reason=reason,
+            conversation_id=conv_id,
         )
         logger.info(
             "Fallback завершён | причина=%s | уведомление владельцу: %s",

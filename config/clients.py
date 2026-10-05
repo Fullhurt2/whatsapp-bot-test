@@ -69,6 +69,25 @@ def is_client_file(path: Path) -> bool:
     )
 
 
+def _int_or(value, default: int) -> int:
+    """Число из yaml клиента; мусор или пустое значение = базовое."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _features_of(cfg: dict, base) -> dict:
+    """Флаги фич клиента поверх базовых (неизвестные ключи игнорируем)."""
+    features = dict(getattr(base, "features", {}) or {})
+    own = cfg.get("features")
+    if isinstance(own, dict):
+        for key, flag in own.items():
+            if isinstance(flag, bool):
+                features[str(key)] = flag
+    return features
+
+
 def is_valid_phone_number_id(value: str) -> bool:
     """Строка похожа на phone_number_id: только цифры (ключ Meta/TG-клиента)."""
     return bool(_PHONE_NUMBER_ID_RE.fullmatch(value))
@@ -256,6 +275,16 @@ def validate_tenant_config(
         llm=llm,
         style_examples=str(cfg.get("style_examples") or "").strip(),
         config_file=file_name,
+        # Ручной режим, уведомления и флаги фич — из yaml клиента, с откатом
+        # на базовые настройки сервиса, если ключа нет.
+        pause_on=[str(p).strip() for p in (cfg.get("pause_on") or base.pause_on) if str(p).strip()],
+        handoff_pauses_bot=bool(cfg.get("handoff_pauses_bot", base.handoff_pauses_bot)),
+        manual_timeout_hours=_int_or(cfg.get("manual_timeout_hours"), base.manual_timeout_hours),
+        timezone=str(cfg.get("timezone") or base.timezone or "").strip(),
+        notify_channels=[str(c).strip() for c in (cfg.get("notify_channels") or base.notify_channels)],
+        notify_on_no_answer=str(cfg.get("notify_on_no_answer") or base.notify_on_no_answer or "").strip(),
+        minutes_per_reply=_int_or(cfg.get("minutes_per_reply"), base.minutes_per_reply),
+        features=_features_of(cfg, base),
         fallback_reply_ru=str(cfg.get("fallback_reply_ru") or "").strip(),
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),

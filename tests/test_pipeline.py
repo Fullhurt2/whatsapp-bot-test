@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.CRITICAL)
 
 from config.settings import LLMParams, Settings
 from handlers.message_handler import MessageProcessor
+from handlers import owner_handler
 from services.fallback import extract_booking_summary
 from services.llm_client import LLMTimeout
 from whatsapp.errors import MessagingError
@@ -99,6 +100,11 @@ def _base_settings():
 
 
 BASE_SETTINGS = _base_settings()
+
+
+def reset_throttle() -> None:
+    """Сбросить троттлинг уведомлений (тесты идут подряд по одному диалогу)."""
+    owner_handler._notification_throttle.clear()
 
 
 def make_processor(replies, cls=StubLLM, bird=None, sender=None):
@@ -218,6 +224,7 @@ async def main():
     check("клиенту — вежливая передача",
           "Передаю ваш вопрос" in proc10._history_for(CLIENT_PHONE)[-1]["content"])
 
+    reset_throttle()
     print("[11] handoff без сводки: владельцу уходит исходный текст")
     proc11 = make_processor(["[HANDOFF] Не могу проверить статус заказа"])
     await proc11.handle_incoming(CLIENT_PHONE, "Валя", "где мой заказ")
@@ -225,6 +232,7 @@ async def main():
     check("сырой текст клиента", "Сообщение: где мой заказ" in owner11)
     check("сводки нет", "ЗАПИСЬ:" not in owner11)
 
+    reset_throttle()
     print("[12] сбой отправки клиенту: ответ не в истории, владелец уведомлён")
     bad_bird = FakeBird()
     bad_bird.fail_for.add(CLIENT_PHONE)

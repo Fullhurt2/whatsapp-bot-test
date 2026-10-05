@@ -447,16 +447,76 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     #     """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч."""
     #     ...
 
+    async def manual_timeout_job():
+        """Автовозврат к боту: диалоги, висевшие в manual дольше таймаута.
+
+        В мультитенанте таймаут свой у каждого клиента, поэтому обходим
+        тенантов по одному. Возвращает диалог в режим бота и чистит счётчик
+        непрочитанных — дальше бот снова отвечает сам.
+        """
+        from storage import (
+            get_conversations_needing_timeout_check,
+            mark_read,
+            update_conversation_status,
+        )
+
+        targets: list[tuple[int, str]] = []
+        if state.multitenant:
+            await state.refresh_tenants()
+            for bundle in state.tenants.values():
+                ts = bundle.settings
+                db_key = ts.whatsapp_phone_number_id or ts.zernio_account_id
+                targets.append((int(ts.manual_timeout_hours or 12), db_key))
+        else:
+            targets.append((int(settings.manual_timeout_hours or 12), None))
+
+        total = 0
+        for hours, db_key in targets:
+            convs = await asyncio.to_thread(get_conversations_needing_timeout_check, hours, db_key)
+            for conv in convs:
+                await asyncio.to_thread(update_conversation_status, conv["id"], "bot")
+                await asyncio.to_thread(mark_read, conv["id"])
+                total += 1
+                logger.info(
+                    "Диалог возвращён боту по таймауту | conv_id=%s | часов=%d",
+                    conv["id"], hours,
+                )
+        if total:
+            logger.info("Автовозврат к боту: обработано диалогов — %d", total)
+
     # Планировщик: job добавляем здесь, а запуск — в lifespan (нужен работающий
     # event loop; create_app вызывается при импорте модуля, до старта loop).
     scheduler.add_job(scheduled_jobs, "cron", hour=3, minute=0, id="daily_maintenance", replace_existing=True)
+    scheduler.add_job(manual_timeout_job, "interval", hours=1, id="manual_timeout", replace_existing=True)
     # scheduler.add_job(reminder_job, "interval", minutes=15, id="reminder_job", replace_existing=True)
 
     # Lifespan контекст-менеджер (должен быть определён до создания FastAPI app)
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         scheduler.start()
-        logger.info("APScheduler запущен: ежедневные задачи в 03:00 UTC, напоминания ОТКЛЮЧЕНЫ")
+        logger.info(
+            "APScheduler запущен: ежедневные задачи в 03:00 UTC, "
+            "автовозврат из ручного режима — раз в час, напоминания ОТКЛЮЧЕНЫ"
+        )
+        # Привязываем адрес вебхука бота JAUAP на стороне Telegram: без этого
+        # бот не пришлёт /start <код> и привязка чата менеджера не сработает.
+        if settings.telegram_owner_bot_token and settings.public_base_url:
+            from whatsapp.telegram_client import TelegramClient, webhook_owner_url
+            owner_bot = TelegramClient(settings.telegram_owner_bot_token)
+            try:
+                await owner_bot.set_webhook(
+                    webhook_owner_url(settings.public_base_url),
+                    settings.telegram_owner_webhook_secret,
+                )
+                logger.info("Вебхук бота JAUAP зарегистрирован: %s",
+                            webhook_owner_url(settings.public_base_url))
+            except Exception:
+                logger.exception(
+                    "Не удалось зарегистрировать вебхук бота JAUAP — привязка чата "
+                    "менеджера не заработает (проверьте токен и PUBLIC_BASE_URL)"
+                )
+            finally:
+                await owner_bot.close()
         app.state.state = state
         app.state.scheduler = scheduler
         app.state.volume_ok = volume_ok
@@ -469,6 +529,11 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
 
     # Создаём FastAPI приложение
     app = FastAPI(lifespan=lifespan)
+
+    # Безопасность панели /admin: ограничение попыток входа (10 за 10 минут с
+    # одного IP) и защитные заголовки (CSP, nosniff, frame-ancestors none).
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(CSPMiddleware)
 
     if settings.clients_dir:
         logger.info(
@@ -847,10 +912,13 @@ def _register_telegram_webhook(app: FastAPI, settings: Settings, state: WebhookS
             return {"ok": True}
 
         for inbound in inbound_messages:
-            # Дедупликация через БД (persistent across restarts)
-            event_id = getattr(inbound, "message_id", None) or ""
+            # Дедупликация через БД (persistent across restarts). update_id у
+            # Telegram счётчик ВНУТРИ бота: два бота с update_id=100 не должны
+            # считаться дублем друг друга, поэтому ключ составной.
+            raw_id = getattr(inbound, "message_id", None) or ""
+            event_id = f"tg:{bot_id}:{raw_id}" if raw_id else ""
             if not check_and_add(event_id):
-                logger.debug("Дубликат вебхука Telegram проигнорирован: update_id=%s", event_id)
+                logger.debug("Дубликат вебхука Telegram проигнорирован: update_id=%s", raw_id)
                 continue
 
             processor = await state.processor_for(inbound)
@@ -898,56 +966,82 @@ def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: We
         chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
         chat_id = str(chat.get("id") or "")
 
-        # Обработка команды /start <code>
+        # Обработка команд: /start <code> — привязка чата, /stop — отвязка.
         if text.startswith("/start"):
             parts = text.split(maxsplit=1)
             if len(parts) == 2:
                 code = parts[1].strip()
-                from storage import verify_link_code, complete_link_code, add_tg_binding
+                from storage import (
+                    MAX_BINDINGS_PER_CLIENT,
+                    add_tg_binding,
+                    complete_link_code,
+                    count_bindings,
+                    verify_link_code,
+                )
+                from whatsapp.telegram_client import TelegramClient
+
                 result = verify_link_code(code)
-                if result:
-                    client_key = result["client_key"]
-                    code_hash = result["code_hash"]
-                    # Завершаем привязку
-                    complete_link_code(code_hash, chat_id)
-                    add_tg_binding(client_key, chat_id)
-                    # Отправляем подтверждение
-                    from whatsapp.telegram_client import TelegramClient
-                    owner_bot = TelegramClient(settings.telegram_owner_bot_token)
-                    try:
-                        await owner_bot.send_text(chat_id, "✅ Подключено! Теперь вы будете получать уведомления.")
-                    except Exception:
-                        logger.exception("Не удалось отправить подтверждение в Telegram")
-                    finally:
-                        await owner_bot.close()
+                if not result:
+                    await _owner_bot_reply(settings, chat_id,
+                                           "❌ Код неверен или истёк. Получите новый в панели.")
+                    return {"ok": True}
+
+                client_key = result["client_key"]
+                code_hash = result["code_hash"]
+                # Код одноразовый: если его уже заняли — привязка не пройдёт.
+                if not complete_link_code(code_hash, chat_id):
+                    await _owner_bot_reply(settings, chat_id,
+                                           "⚠️ Этот код уже использован. Попросите новый в панели.")
+                    return {"ok": True}
+                if count_bindings(client_key) >= MAX_BINDINGS_PER_CLIENT:
+                    await _owner_bot_reply(
+                        settings, chat_id,
+                        f"⚠️ У клиента уже {MAX_BINDINGS_PER_CLIENT} привязанных чатов. "
+                        "Отвяжите лишний в панели или удалите этого бота.",
+                    )
+                    return {"ok": True}
+                if add_tg_binding(client_key, chat_id):
+                    logger.info("Telegram: чат %s привязан к клиенту %s", chat_id, client_key)
+                    await _owner_bot_reply(
+                        settings, chat_id,
+                        "✅ Подключено! Теперь вы будете получать уведомления о вопросах.",
+                    )
                 else:
-                    # Неверный или истёкший код
-                    from whatsapp.telegram_client import TelegramClient
-                    owner_bot = TelegramClient(settings.telegram_owner_bot_token)
-                    try:
-                        await owner_bot.send_text(chat_id, "❌ Код неверен или истёк. Попробуйте получить новый в панели.")
-                    except Exception:
-                        pass
-                    finally:
-                        await owner_bot.close()
-            elif text == "/stop":
-                # Отвязка чата
-                from storage import remove_tg_binding, get_tg_bindings
-                bindings = get_tg_bindings("")
-                for b in bindings:
-                    if b["chat_id"] == chat_id:
-                        remove_tg_binding(b["client_key"], b["id"])
-                        from whatsapp.telegram_client import TelegramClient
-                        owner_bot = TelegramClient(settings.telegram_owner_bot_token)
-                        try:
-                            await owner_bot.send_text(chat_id, "✅ Чат отвязан.")
-                        except Exception:
-                            pass
-                        finally:
-                            await owner_bot.close()
-                        break
+                    await _owner_bot_reply(settings, chat_id,
+                                           "Этот чат уже привязан — ничего менять не нужно.")
+
+        elif text.strip() == "/stop":
+            # Отвязка чата от всех клиентов, где он привязан.
+            from storage import get_tg_bindings, remove_tg_binding
+            removed = 0
+            for binding in get_tg_bindings_for_notify_all():
+                if binding["chat_id"] == chat_id and remove_tg_binding(binding["client_key"], binding["id"]):
+                    removed += 1
+            if removed:
+                logger.info("Telegram: чат %s отвязан от %d клиентов", chat_id, removed)
+                await _owner_bot_reply(settings, chat_id, "✅ Чат отвязан.")
+            else:
+                await _owner_bot_reply(settings, chat_id, "Этот чат и так ни к чему не привязан.")
 
         return {"ok": True}
+
+
+def get_tg_bindings_for_notify_all() -> list[dict]:
+    """Все привязки во всех клиентах — нужно для /stop (чат мог привязаться к разным)."""
+    from storage.db import fetchall
+    return [dict(row) for row in fetchall("SELECT id, client_key, chat_id FROM tg_bindings")]
+
+
+async def _owner_bot_reply(settings: Settings, chat_id: str, text: str) -> None:
+    """Ответ в чат менеджера от имени бота JAUAP (ошибки не роняют вебхук)."""
+    from whatsapp.telegram_client import TelegramClient
+    bot = TelegramClient(settings.telegram_owner_bot_token)
+    try:
+        await bot.send_text(chat_id, text)
+    except Exception:
+        logger.exception("Не удалось ответить в Telegram (%s)", chat_id)
+    finally:
+        await bot.close()
 
 
 def main() -> None:

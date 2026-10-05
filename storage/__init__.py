@@ -91,10 +91,12 @@ from storage.tg_bindings import (
     verify_link_code,
     complete_link_code,
     add_tg_binding,
+    count_bindings,
     get_tg_bindings,
     remove_tg_binding,
     get_tg_bindings_for_notify,
     cleanup_expired_link_codes,
+    MAX_BINDINGS_PER_CLIENT,
 )
 
 from storage.stats import (
@@ -182,10 +184,12 @@ __all__ = [
     "verify_link_code",
     "complete_link_code",
     "add_tg_binding",
+    "count_bindings",
     "get_tg_bindings",
     "remove_tg_binding",
     "get_tg_bindings_for_notify",
     "cleanup_expired_link_codes",
+    "MAX_BINDINGS_PER_CLIENT",
     # stats
     "get_client_stats",
     "get_admin_overview_stats",

@@ -27,9 +27,9 @@ def get_client_stats(client_key: str, from_date: str, to_date: str, timezone: st
     response_times = get_manager_response_times(client_key, from_date, to_date)
     hourly = get_hourly_distribution(client_key, from_date, to_date, timezone)
 
-    # Диалоги за период (где было хотя бы одно сообщение клиента)
-    dialogues_count = conv_stats.get("conversations_with_client_msg", 0)
-    new_contacts = conv_stats.get("new_conversations", 0)
+    # Диалоги за период (где было хотя бы одно сообщение клиента в этом периоде)
+    dialogues_count = conv_stats.get("conversations_with_client_msg") or 0
+    new_contacts = conv_stats.get("new_conversations") or 0
 
     # Сообщения: клиенты + бот
     client_msg_count = 0
@@ -44,17 +44,18 @@ def get_client_stats(client_key: str, from_date: str, to_date: str, timezone: st
     if row:
         client_msg_count = row["cnt"]
 
-    bot_msg_count = msg_stats.get("total_bot_messages", 0)
+    bot_msg_count = msg_stats.get("total_bot_messages") or 0
     total_messages = client_msg_count + bot_msg_count
 
-    # Закрыто ботом: диалогов без handoff / всего диалогов с сообщениями клиента
+    # Закрыто ботом: диалоги периода без единой передачи менеджеру.
+    # Обе величины — счётчики диалогов, поэтому доля не уходит в минус.
     total_handoffs = sum(handoff_stats.values())
-    closed_by_bot = dialogues_count - total_handoffs if dialogues_count > 0 else 0
+    closed_by_bot = conv_stats.get("conversations_closed_by_bot") or 0
     closed_by_bot_pct = round(closed_by_bot / dialogues_count * 100, 1) if dialogues_count > 0 else 0
 
     # Время ответа бота
     avg_latency = msg_stats.get("avg_latency_ms") or 0
-    # p95 считаем в Python если нужно (нужны сырые данные)
+    p95_latency = get_bot_latency_p95(client_key, from_date, to_date)
 
     # Топ вопросов без ответа
     top_unanswered = get_top_unanswered_questions(client_key, from_date, to_date, limit=10)
@@ -82,28 +83,59 @@ def get_client_stats(client_key: str, from_date: str, to_date: str, timezone: st
         "unanswered": unanswered_stats,
         "response_time": {
             "avg_ms": round(avg_latency, 1),
-            # "p95_ms": ... нужно сырые данные
+            "p95_ms": round(p95_latency, 1),
         },
         "manager_reaction": response_times,
         "hourly_peak": hourly_tz,
         "top_unanswered": top_unanswered,
         "tokens": {
-            "in": msg_stats.get("total_tokens_in", 0),
-            "out": msg_stats.get("total_tokens_out", 0),
+            "in": msg_stats.get("total_tokens_in") or 0,
+            "out": msg_stats.get("total_tokens_out") or 0,
         },
-        "estimated_time_saved_minutes": closed_by_bot * 2,  # minutes_per_reply = 2 по умолчанию
+        "estimated_time_saved_minutes": closed_by_bot * SAVED_MINUTES_PER_DIALOGUE,
     }
 
 
+# Сколько минут работы менеджера экономит один диалог, закрытый ботом.
+# Ориентир — 2 минуты на ответ; при желании вынести в конфиг клиента.
+SAVED_MINUTES_PER_DIALOGUE = 2
+
+
+def get_bot_latency_p95(client_key: str, from_date: str, to_date: str) -> float:
+    """95-й перцентиль времени ответа бота за период (мс)."""
+    rows = fetchall(
+        """
+        SELECT m.latency_ms
+        FROM messages m
+        JOIN conversations c ON m.conversation_id = c.id
+        WHERE c.client_key = ?
+          AND m.role = 'bot'
+          AND m.latency_ms IS NOT NULL
+          AND m.created_at >= ?
+          AND m.created_at <= ?
+        ORDER BY m.latency_ms
+        """,
+        (client_key, from_date, to_date),
+    )
+    if not rows:
+        return 0.0
+    index = min(int(round(0.95 * (len(rows) - 1))), len(rows) - 1)
+    return float(rows[index]["latency_ms"] or 0)
+
+
 def get_top_unanswered_questions(client_key: str, from_date: str, to_date: str, limit: int = 10) -> list[dict]:
-    """Топ вопросов без ответа по частоте (группы)."""
+    """Топ вопросов без ответа по частоте (по группам вопросов).
+
+    Берём вопросы, на которые ответа ещё нет (new/ignored); answered — это
+    уже закрытые вопросы, они в «без ответа» не должны попадать.
+    """
     rows = fetchall(
         """
         SELECT ug.name, COUNT(uq.id) as count, MAX(uq.created_at) as last_asked
         FROM unanswered_questions uq
         JOIN unanswered_groups ug ON uq.group_id = ug.id
         WHERE uq.client_key = ?
-          AND uq.status = 'answered'
+          AND uq.status != 'answered'
           AND uq.created_at >= ?
           AND uq.created_at <= ?
         GROUP BY ug.id
@@ -142,17 +174,26 @@ def convert_hourly_to_timezone(hourly_utc: list[dict], timezone: str) -> list[di
     return result
 
 
-def get_admin_overview_stats(from_date: str, to_date: str) -> dict:
-    """Сводка по всем клиентам для админа."""
-    # Список клиентов с их статистикой
-    rows = fetchall(
-        """
-        SELECT DISTINCT client_key FROM conversations
-        WHERE created_at <= ?
-        """,
-        (to_date,),
-    )
-    client_keys = [row["client_key"] for row in rows]
+def get_admin_overview_stats(
+    from_date: str,
+    to_date: str,
+    client_map: Optional[dict] = None,
+) -> dict:
+    """Сводка по всем клиентам для админа.
+
+    client_map — сопоставление «ключ панели (имя файла) -> ключ в БД».
+    Для zernio-клиентов они различаются (имя файла против accountId), поэтому
+    без этой карты в сводке вместо клиентов были бы их accountId. Если карта не
+    передана, берём ключи клиентов из самой БД.
+    """
+    if client_map is None:
+        rows = fetchall(
+            "SELECT DISTINCT client_key FROM conversations WHERE created_at <= ?",
+            (to_date,),
+        )
+        pairs = [(row["client_key"], row["client_key"]) for row in rows]
+    else:
+        pairs = [(pid, db_key) for pid, db_key in client_map.items() if db_key]
 
     clients_stats = {}
     total_tokens_in = 0
@@ -160,17 +201,19 @@ def get_admin_overview_stats(from_date: str, to_date: str) -> dict:
     total_dialogues = 0
     total_handoffs = 0
 
-    for ck in client_keys:
-        stats = get_client_stats(ck, from_date, to_date)
-        clients_stats[ck] = {
+    for pid, db_key in pairs:
+        stats = get_client_stats(db_key, from_date, to_date)
+        tokens_in = stats["tokens"]["in"] or 0
+        tokens_out = stats["tokens"]["out"] or 0
+        clients_stats[pid] = {
             "dialogues": stats["dialogues"],
             "handoffs": stats["handoffs"]["total"],
             "closed_by_bot_pct": stats["closed_by_bot"]["percentage"],
-            "tokens_in": stats["tokens"]["in"],
-            "tokens_out": stats["tokens"]["out"],
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
         }
-        total_tokens_in += stats["tokens"]["in"]
-        total_tokens_out += stats["tokens"]["out"]
+        total_tokens_in += tokens_in
+        total_tokens_out += tokens_out
         total_dialogues += stats["dialogues"]
         total_handoffs += stats["handoffs"]["total"]
 
@@ -180,7 +223,7 @@ def get_admin_overview_stats(from_date: str, to_date: str) -> dict:
 
     return {
         "period": {"from": from_date, "to": to_date},
-        "total_clients": len(client_keys),
+        "total_clients": len(pairs),
         "total_dialogues": total_dialogues,
         "total_handoffs": total_handoffs,
         "total_tokens_in": total_tokens_in,

@@ -178,6 +178,15 @@ class Settings:
         "kk": "Бір сәт, {business_name} нақтылаймын… ⏳",
     }
 
+    def feature(self, name: str) -> bool:
+        """Включена ли фича.
+
+        Фичи включаются по умолчанию: отсутствующий флаг = включено, чтобы
+        добавление нового ключа в yaml не выключало работающее поведение.
+        Выключается фича явно — `features: {live_chat: false}` в yaml клиента.
+        """
+        return bool(self.features.get(name, True))
+
     def fallback_reply(self, lang: str = "ru") -> str:
         """Ответ клиенту при передаче человеку на его языке."""
         override = self.fallback_reply_kk if lang == "kk" else self.fallback_reply_ru
@@ -357,6 +366,16 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
     return settings
 
 
+def _int_env(name: str, default: int) -> int:
+    """Целое из переменной окружения; мусор в значении не ломает старт."""
+    raw = os.getenv(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        logger.warning("%s=%r — не число, беру %s", name, raw, default)
+        return default
+
+
 def get_settings() -> Settings:
     """Собирает итоговые настройки из .env и конфига клиента (CLIENT_CONFIG).
 
@@ -421,7 +440,10 @@ def get_settings() -> Settings:
         config_file=config_file,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
+        telegram_owner_bot_token=os.getenv("TELEGRAM_OWNER_BOT_TOKEN", "").strip(),
+        telegram_owner_webhook_secret=os.getenv("TELEGRAM_OWNER_WEBHOOK_SECRET", "").strip(),
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+        manual_timeout_hours=_int_env("MANUAL_TIMEOUT_HOURS", 12),
         owner_telegram_chat_id=str(cfg.get("owner_telegram_chat_id") or "").strip(),
         owner_template_name=str(cfg.get("owner_template_name") or "").strip(),
         owner_template_language=str(cfg.get("owner_template_language") or "").strip(),

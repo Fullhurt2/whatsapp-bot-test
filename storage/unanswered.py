@@ -79,14 +79,15 @@ def create_unanswered_group(
     question_ids: list[int],
 ) -> int:
     """Создать группу похожих вопросов. Возвращает group_id."""
-    now = datetime.utcnow().isoformat()
+    # Время пишем тем же форматом, что и остальные таблицы (datetime('now') UTC):
+    # иначе строки с «T» в сортировке по updated_at всегда встают позже прочих.
     with transaction() as conn:
         cursor = conn.execute(
             """
             INSERT INTO unanswered_groups (client_key, name, question_ids, status, created_at, updated_at)
-            VALUES (?, ?, ?, 'active', ?, ?)
+            VALUES (?, ?, ?, 'active', datetime('now'), datetime('now'))
             """,
-            (client_key, name, json.dumps(question_ids), now, now),
+            (client_key, name, json.dumps(question_ids)),
         )
         group_id = cursor.lastrowid
 
@@ -156,9 +157,9 @@ def get_unanswered_stats(client_key: str, from_date: str, to_date: str) -> dict:
         """
         SELECT
             COUNT(*) as total,
-            SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new_count,
-            SUM(CASE WHEN status = 'answered' THEN 1 ELSE 0 END) as answered_count,
-            SUM(CASE WHEN status = 'ignored' THEN 1 ELSE 0 END) as ignored_count
+            COALESCE(SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END), 0) as new_count,
+            COALESCE(SUM(CASE WHEN status = 'answered' THEN 1 ELSE 0 END), 0) as answered_count,
+            COALESCE(SUM(CASE WHEN status = 'ignored' THEN 1 ELSE 0 END), 0) as ignored_count
         FROM unanswered_questions
         WHERE client_key = ?
           AND created_at >= ?

@@ -57,6 +57,14 @@ def webhook_url(public_base_url: str, bot_id: str) -> str:
     return f"{str(public_base_url or '').rstrip('/')}{webhook_path(bot_id)}"
 
 
+OWNER_WEBHOOK_PATH = "/webhooks/telegram-owner"
+
+
+def webhook_owner_url(public_base_url: str) -> str:
+    """Адрес вебхука общего бота JAUAP (привязка чатов менеджеров)."""
+    return f"{str(public_base_url or '').rstrip('/')}{OWNER_WEBHOOK_PATH}"
+
+
 class TelegramClient:
     """Асинхронный клиент отправки сообщений Telegram. Один на клиента.
 
@@ -79,20 +87,38 @@ class TelegramClient:
             transport=transport,  # точка для тестов: подменяется на MockTransport
         )
 
-    async def send_text(self, to: str, text: str, conversation_id: str = "") -> None:
+    async def send_text(
+        self,
+        to: str,
+        text: str,
+        conversation_id: str = "",
+        reply_markup: dict | None = None,
+        disable_notification: bool = False,
+    ) -> None:
         """Отправляет текст получателю `to` (chat_id в любом формате).
 
         Длинные тексты бьёт на части по лимиту Bot API. Бросает TelegramError
         при любой неудаче — вызывающий код решает, логировать сбой или нет.
         `conversation_id` — часть общего интерфейса отправки (нужен Zernio);
         Telegram адресует сообщения по chat_id и параметр игнорирует.
+
+        reply_markup — например inline-кнопка под сообщением:
+            {"inline_keyboard": [[{"text": "Открыть диалог", "url": "https://…"}]]}
+        Кнопка вешается только на первое сообщение (иначе она повторится во всех
+        частях длинного текста). disable_notification — доставка без звука.
         """
         text = text or ""
         if not text:
             return
         receiver = str(to).strip()
-        for i in range(0, len(text), TELEGRAM_TEXT_LIMIT):
-            await self._send_text_chunk(receiver, text[i:i + TELEGRAM_TEXT_LIMIT])
+        for i, start in enumerate(range(0, len(text), TELEGRAM_TEXT_LIMIT)):
+            chunk_markup = reply_markup if i == 0 else None
+            await self._send_text_chunk(
+                receiver,
+                text[start:start + TELEGRAM_TEXT_LIMIT],
+                reply_markup=chunk_markup,
+                disable_notification=disable_notification,
+            )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -120,13 +146,23 @@ class TelegramClient:
 
     # --- внутреннее -----------------------------------------------------------
 
-    async def _send_text_chunk(self, chat_id: str, body: str) -> None:
+    async def _send_text_chunk(
+        self,
+        chat_id: str,
+        body: str,
+        reply_markup: dict | None = None,
+        disable_notification: bool = False,
+    ) -> None:
         """POST sendMessage: один получатель, один кусок текста.
 
         HTTP 429/5xx — один повтор с паузой. Успех — HTTP 200 И ok: true:
         Bot API отдаёт 200 с ok: false при логических ошибках.
         """
-        payload = {"chat_id": chat_id, "text": body}
+        payload: dict = {"chat_id": chat_id, "text": body}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        if disable_notification:
+            payload["disable_notification"] = True
         response = await self._post("sendMessage", payload)
         if response.status_code in RETRYABLE_STATUSES:
             delay = _retry_after_seconds(response, RATE_LIMIT_MAX_RETRY_SEC)
