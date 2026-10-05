@@ -370,12 +370,7 @@
           <input id="f_business_name" placeholder="Nails Studio">
           <label for="f_tone">Как бот общается</label>
           <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
-          <label>Язык ответов</label>
-          <select id="f_language">
-            <option value="auto">как напишет клиент — по-русски или по-казахски</option>
-            <option value="ru">всегда по-русски</option>
-            <option value="kk">всегда по-казахски</option>
-          </select>
+          <div class="hint">Язык ответа выбирается автоматически: бот отвечает на том же языке, на котором написал клиент.</div>
         </section>
 
         <section class="tab-panel hidden" id="tab-chat">
@@ -545,11 +540,7 @@
           <div class="hint">Что видят клиенты рядом с именем: описание, контакты, аватар. Правится через Zernio/Meta API.</div>
 
           <div class="section-title">О компании</div>
-          <label for="f_about">Кратко (до 139 символов)</label>
-          <input id="f_about" class="mono" placeholder="Кофе и десерты" maxlength="139">
-          <div id="aboutCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/139</div>
-
-          <label for="f_description">Подробно (до 512 символов)</label>
+          <label for="f_description">Описание (до 512 символов)</label>
           <textarea id="f_description" class="auto-resize" placeholder="Описание бизнеса…" maxlength="512"></textarea>
           <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
 
@@ -559,8 +550,8 @@
           <label for="f_websites">Сайты (до 2, по одному на строку)</label>
           <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://shop.example.com" rows="2"></textarea>
 
-          <label for="f_vertical">Вертикаль (категория бизнеса)</label>
-          <input id="f_vertical" class="mono" placeholder="RETAIL">
+          <label for="f_vertical">Категория бизнеса</label>
+          <select id="f_vertical" class="mono"></select>
 
           <label for="f_address">Адрес</label>
           <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
@@ -818,11 +809,12 @@ async function whoami() {
     show("editorEmpty", true);
     show("editorCard", false);
     loadList();
-    // Ссылка вида /admin#chat=<id> открывает диалог, когда клиент уже выбран.
+    // Ссылка вида /admin#chat=<id> открывает нужного клиента и диалог.
     openChatFromHash();
   } else {
     show("editorEmpty", false);
-    openEditor(data.phone_number_id);
+    await openEditor(data.phone_number_id);
+    openChatFromHash();
   }
 }
 
@@ -932,7 +924,6 @@ async function openEditor(pid) {
     $("f_" + key).value = data[key] != null ? data[key] : "";
   }
   $("f_fallback_triggers").value = (data.fallback_triggers || []).join(", ");
-  $("f_language").value = ["ru", "kk", "auto"].includes(data.language) ? data.language : "auto";
   const llm = data.llm || {};
   $("f_llm_model").value = llm.model != null ? llm.model : "";
   $("f_llm_temperature").value = llm.temperature != null ? llm.temperature : "";
@@ -1006,7 +997,7 @@ function collectForm() {
   const config = {
     business_name: value("f_business_name").trim(),
     tone: value("f_tone").trim(),
-    language: value("f_language"),
+    language: "auto",
     knowledge_base: value("f_knowledge_base"),
     owner_whatsapp_phone: normalizeOwnerPhone(value("f_owner_whatsapp_phone")),
     owner_telegram_chat_id: value("f_owner_telegram_chat_id").trim(),
@@ -1033,7 +1024,7 @@ function collectForm() {
     }
     config.llm = {
       model: value("f_llm_model").trim(),
-      temperature: parseFloat(value("f_llm_temperature")) || 0.6,
+      temperature: parseFloat(value("f_llm_temperature")) || 1.0,
       max_tokens: parseInt(value("f_llm_max_tokens"), 10) || 3500,
       timeout_seconds: parseInt(value("f_llm_timeout_seconds"), 10) || 15,
       reasoning_effort: value("f_llm_reasoning_effort").trim(),
@@ -1184,6 +1175,40 @@ async function zernioRegisterNumber() {
 
 // --- WhatsApp Profile (Meta/Zernio) ------------------------------------------
 
+// Категории бизнеса WhatsApp (VerticalCategory в Graph API).
+const WHATSAPP_VERTICALS = [
+  ["", "Не выбрана"],
+  ["UNDEFINED", "Не определено"],
+  ["OTHER", "Другое"],
+  ["AUTO", "Авто"],
+  ["BEAUTY", "Красота и салоны"],
+  ["APPAREL", "Одежда"],
+  ["EDU", "Образование"],
+  ["ENTERTAIN", "Развлечения"],
+  ["EVENT_PRESENT", "Мероприятия и подарки"],
+  ["FINANCE", "Финансы"],
+  ["FOOD", "Еда и напитки"],
+  ["GOVT", "Госструктуры"],
+  ["HOTEL", "Отели и туризм"],
+  ["HEALTH", "Здоровье и медицина"],
+  ["NONPROFIT", "Некоммерческие организации"],
+  ["PROF_SERVICES", "Профессиональные услуги"],
+  ["RETAIL", "Розничная торговля"],
+  ["TRAVEL", "Путешествия"],
+  ["RESTAURANT", "Рестораны"],
+  ["NOT_A_BIZ", "Не бизнес"],
+];
+
+function fillVerticals() {
+  const select = $("f_vertical");
+  if (!select) return;
+  select.innerHTML = WHATSAPP_VERTICALS
+    .map(([value, label]) => '<option value="' + esc(value) + '">' + esc(label) + "</option>")
+    .join("");
+}
+
+fillVerticals();
+
 function updateCounter(inputId, counterId, maxLen) {
   const input = $(inputId);
   const counter = $(counterId);
@@ -1195,9 +1220,7 @@ function updateCounter(inputId, counterId, maxLen) {
 }
 
 function setupProfileCounters() {
-  const aboutInput = $("f_about");
   const descInput = $("f_description");
-  if (aboutInput) aboutInput.addEventListener("input", () => updateCounter("f_about", "aboutCounter", 139));
   if (descInput) descInput.addEventListener("input", () => updateCounter("f_description", "descriptionCounter", 512));
 }
 
@@ -1215,7 +1238,6 @@ async function loadProfile() {
       return;
     }
     // Fill form
-    $("f_about").value = data.about || "";
     $("f_description").value = data.description || "";
     $("f_email").value = data.email || "";
     $("f_websites").value = (data.websites || []).join("\n");
@@ -1228,7 +1250,6 @@ async function loadProfile() {
     } else {
       avatarEl.textContent = "не загружен";
     }
-    updateCounter("f_about", "aboutCounter", 139);
     updateCounter("f_description", "descriptionCounter", 512);
     status(statusEl, "Профиль загружен", false);
   } catch (e) {
@@ -1238,7 +1259,6 @@ async function loadProfile() {
 
 async function saveProfile() {
   const payload = {
-    about: $("f_about").value.trim(),
     description: $("f_description").value.trim(),
     email: $("f_email").value.trim(),
     websites: $("f_websites").value.split("\n").map(s => s.trim()).filter(Boolean),
@@ -1385,6 +1405,7 @@ function setChatModeUI(conv) {
 async function openConversation(cid) {
   currentConvId = cid;
   renderChatList();
+  status("chatStatus", "");
   setChatModeUI(chatConvs.find((c) => c.id === cid));
   await loadConversationMessages();
   // Открыв диалог, сбрасываем счётчик непрочитанных.
@@ -1786,14 +1807,23 @@ async function removeTgBinding(bindingId) {
 
 // --- Переход по ссылке из уведомления Telegram ------------------------------------
 
-function openChatFromHash() {
+async function openChatFromHash() {
   const match = /#chat=([A-Za-z0-9-]+)/.exec(location.hash || "");
   if (!match) return;
   const conversationId = match[1];
-  if (!$("editorCard") || $("editorCard").classList.contains("hidden")) return;
   history.replaceState(null, "", location.pathname + location.search);
+
+  // Карточка клиента ещё не открыта (админ только зашёл по ссылке) — узнаём,
+  // чей это диалог, и откроем нужного клиента, а не первую страницу.
+  const editorHidden = $("editorCard").classList.contains("hidden");
+  if (editorHidden) {
+    const { ok, data } = await api("GET", "/admin/conversations/" + encodeURIComponent(conversationId) + "/client");
+    if (!ok) return;
+    await openEditor(data.pid);
+  }
+  if ($("editorCard").classList.contains("hidden")) return;
   switchTab("chat");
-  openConversation(conversationId);
+  await openConversation(conversationId);
 }
 
 window.addEventListener("hashchange", openChatFromHash);

@@ -744,6 +744,38 @@ def _validate_redirect_url(raw: str) -> str | None:
 # --- роуты --------------------------------------------------------------------
 
 
+
+def _parse_groups_json(raw: str) -> list | None:
+    """Достаёт список групп из ответа модели.
+
+    Модель может вернуть чистый JSON, JSON в блоке ``` или с текстом вокруг —
+    все три варианта здесь приводим к списку. None — разобрать не удалось.
+    """
+    import json
+    import re
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", text, re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if isinstance(parsed, dict):
+        parsed = parsed.get("groups") or []
+    if not isinstance(parsed, list):
+        return None
+    return parsed
+
+
 def register_admin_api(app, settings: Settings, state) -> None:
     """Регистрирует админ-роуты и страницу /admin.
 
@@ -792,8 +824,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             for name in names:
                 if not name.lower().endswith((".yaml", ".yml")) or name.startswith("_"):
                     continue
-                token = _management_token_of(clients_dir, Path(name).stem)
-                if token and tokens_equal(client_header, token):
+                # В yaml лежит SHA-256 хэш, а клиент присылает свой простой
+                # пароль — сравнивать надо через verify_token_hash, иначе вход
+                # по management_token не проходил никогда.
+                token_hash = _management_token_of(clients_dir, Path(name).stem)
+                if token_hash and verify_token_hash(client_header, token_hash):
                     return {"role": "client", "phone_number_id": Path(name).stem}
         return JSONResponse(status_code=401, content={"error": "токен не распознан"})
 
@@ -921,7 +956,14 @@ def register_admin_api(app, settings: Settings, state) -> None:
         # Хэшируем management_token перед сохранением (если он был передан и изменился)
         if "management_token" in merged:
             raw_token = str(merged["management_token"] or "").strip()
-            if raw_token:
+            if raw_token.startswith(TOKEN_HASH_PREFIX):
+                # Уже хэш: поле не меняли или прислали маску. Повторное
+                # хэширование ломало бы ранее заданный токен — из-за этого
+                # management_token нельзя было поменять.
+                pass
+            elif raw_token:
+                # Любой простой пароль («nailsstudio») хэшируется в yaml,
+                # а вход в панели остаётся тем же, что ввёл менеджер.
                 merged["management_token"] = hash_token(raw_token)
             else:
                 # Пустой токен — удаляем поле
@@ -1623,6 +1665,31 @@ def register_admin_api(app, settings: Settings, state) -> None:
         }
 
 
+    @app.get("/admin/conversations/{cid}/client")
+    async def conversation_client(request: Request, cid: str, pid: str | None = None):
+        """К какому клиенту относится диалог — нужно для перехода по ссылке.
+
+        Ссылка из уведомления Telegram приходит как /admin#chat=<id> без указания
+        клиента, поэтому панель спрашивает, чей это диалог, и открывает нужную
+        карточку сама.
+        """
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        if role != "admin":
+            # Клиент и так внутри своей карточки — ему ответ не нужен.
+            return JSONResponse(status_code=403, content={"error": "только администратору"})
+        from storage import get_conversation
+        conv = get_conversation(cid)
+        if not conv:
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+        db_key = str(conv.get("client_key") or "")
+        for stem in _client_pids(clients_dir):
+            if _conversation_client_key(clients_dir, stem) == db_key:
+                return {"pid": stem, "conversation_id": cid}
+        return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+
+
     @app.get("/admin/clients/{pid}/unanswered")
     async def get_unanswered(pid: str, request: Request, status: str | None = None):
         """Список групп вопросов без ответа."""
@@ -1750,8 +1817,9 @@ def register_admin_api(app, settings: Settings, state) -> None:
         )
         user_prompt = "Вопросы:\n" + "\n".join(f"{q['id']}: {q['question']}" for q in questions)
 
-        # Используем LLM клиента для группировки
-        from config.settings import Settings
+        # Используем LLM клиента для группировки. Параметры — настоящий
+        # LLMParams: самодельный объект без reasoning_effort ронял клиент.
+        from config.settings import LLMParams
         from services.llm_client import LLMClient
 
         client_settings = _read_cfg(_client_yaml_path(clients_dir, pid)) or {}
@@ -1759,25 +1827,29 @@ def register_admin_api(app, settings: Settings, state) -> None:
         llm = LLMClient(
             settings.llm_api_url,
             settings.llm_api_key,
-            type("LLMParams", (), {
-                "model": str(llm_params.get("model") or settings.llm.model),
-                "temperature": float(llm_params.get("temperature", 0.3)),
-                "max_tokens": int(llm_params.get("max_tokens", 500)),
-                "timeout_seconds": int(llm_params.get("timeout_seconds", 15)),
-            })()
+            LLMParams(
+                model=str(llm_params.get("model") or settings.llm.model),
+                temperature=float(llm_params.get("temperature", 0.3)),
+                max_tokens=int(llm_params.get("max_tokens", 2000)),
+                timeout_seconds=int(llm_params.get("timeout_seconds", 30)),
+                reasoning_effort=llm_params.get("reasoning_effort"),
+            ),
         )
 
         try:
             response = await llm.chat(system_prompt, user_prompt, history=[])
         except Exception as exc:
-            return JSONResponse(status_code=500, content={"error": f"ошибка LLM: {exc}"})
+            logger.exception("Группировка вопросов: LLM не ответил")
+            return JSONResponse(status_code=502, content={"error": f"ошибка LLM: {exc}"})
+        finally:
+            await llm.close()
 
-        # Парсим JSON ответ
-        import json
-        try:
-            groups = json.loads(response)
-        except json.JSONDecodeError:
-            return JSONResponse(status_code=500, content={"error": "LLM вернул невалидный JSON"})
+        groups = _parse_groups_json(response)
+        if groups is None:
+            return JSONResponse(
+                status_code=502,
+                content={"error": "LLM вернул нечитаемый ответ вместо списка групп"},
+            )
 
         # Создаём группы в БД
         created = 0

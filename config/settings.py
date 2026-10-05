@@ -325,7 +325,7 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         owner_phone=None,
         llm=LLMParams(
             model=os.getenv("LLM_MODEL", "").strip(),
-            temperature=0.6,
+            temperature=1.0,
             max_tokens=3500,
             timeout_seconds=15,
         ),
@@ -443,7 +443,7 @@ def get_settings() -> Settings:
     model = str((cfg.get("llm") or {}).get("model") or "").strip() or os.getenv("LLM_MODEL", "").strip()
     llm = LLMParams(
         model=model,
-        temperature=float((cfg.get("llm") or {}).get("temperature", 0.6)),
+        temperature=float((cfg.get("llm") or {}).get("temperature", 1.0)),
         max_tokens=int((cfg.get("llm") or {}).get("max_tokens", 3500)),
         timeout_seconds=int((cfg.get("llm") or {}).get("timeout_seconds", 15)),
         reasoning_effort=(cfg.get("llm") or {}).get("reasoning_effort") or None,
