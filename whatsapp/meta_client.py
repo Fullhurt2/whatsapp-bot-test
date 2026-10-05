@@ -158,6 +158,9 @@ class MetaWhatsAppClient:
         payload = {key: value for key, value in (fields or {}).items() if value is not None}
         if not payload:
             return
+        # Meta требует messaging_product в теле правки профиля — без него
+        # запрос отклоняется и поля не применяются.
+        payload["messaging_product"] = "whatsapp"
         response = await self._call("PATCH", self._profile_endpoint, json=payload)
         if response.status_code != 200:
             raise MetaError(_meta_error_text(response))

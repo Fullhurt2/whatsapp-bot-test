@@ -139,13 +139,23 @@ PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address
                            "photo_url")
 
 # Поля, которые PATCH умеет применять (display name через API не меняется).
-PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address")
+PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address",
+                         "vertical")
 
 # Лимит Meta на «Описание» (символы). Проверяется и на бэкенде, и в панели.
 DESCRIPTION_MAX_LENGTH = 512
 
 # Ссылок на сайте Meta принимает не больше двух.
 PROFILE_WEBSITES_MAX = 2
+
+# Категория бизнеса (vertical) — закрытый список Meta, он не выдумывается:
+# https://developers.facebook.com/docs/whatsapp/cloud-api/reference/business-profiles
+PROFILE_VERTICALS = (
+    "UNDEFINED", "OTHER", "AUTO", "BEAUTY", "APPAREL", "EDU", "ENTERTAIN",
+    "EVENT_PLAN", "FINANCE", "GOVT", "GROCERY", "HEALTH", "HOTEL", "NONPROFIT",
+    "ONLINE_GAMBLING", "OTC_DRUGS", "PHYSICAL_GAMBLING", "PROF_SERVICES",
+    "RESTAURANT", "RETAIL", "TRAVEL", "ALCOHOL",
+)
 
 # Аватар: jpg/png/webp до 5 МБ, файл нигде у нас не остаётся.
 PROFILE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
@@ -566,6 +576,15 @@ def _validate_profile_fields(incoming: dict) -> tuple[dict, list[str]]:
             continue
         payload[key] = text
 
+    if "vertical" in incoming:
+        vertical = str(incoming["vertical"] or "").strip().upper()
+        if vertical and vertical not in PROFILE_VERTICALS:
+            problems.append(
+                "категория бизнеса не из списка WhatsApp — выберите значение из списка"
+            )
+        else:
+            payload["vertical"] = vertical
+
     if "email" in incoming:
         email = str(incoming["email"] or "").strip()
         if email and not _looks_like_email(email):
@@ -713,6 +732,43 @@ def _zernio_api_client(state, settings: Settings) -> ZernioApiClient:
     if factory is not None:
         return factory(settings)
     return ZernioApiClient(settings.zernio_api_key, base_url=settings.zernio_base_url)
+
+
+
+def _kb_has_question(knowledge_base: str, question: str) -> bool:
+    """Есть ли уже такой вопрос в базе знаний.
+
+    Один и тот же вопрос («Прайс») клиенты спрашивают снова и снова, и без
+    проверки каждое «Ответить» дописывало бы в базу копию ответа.
+    """
+    needle = " ".join(str(question or "").strip().lower().split())
+    if not needle:
+        return False
+    for line in str(knowledge_base or "").splitlines():
+        if line.strip().lower().startswith("вопрос:"):
+            existing = " ".join(line.strip()[len("вопрос:"):].strip().lower().split())
+            if existing == needle:
+                return True
+    return False
+
+
+def _append_answers_to_kb(knowledge_base: str, questions: list[dict], answer: str) -> str:
+    """Дописывает «Вопрос: … Ответ: …» в базу знаний, минуя дубликаты.
+
+    Уже отвеченный вопрос пропускается — иначе повторный ответ на «Прайс»
+    дописывает то же самое второй раз.
+    """
+    text = str(knowledge_base or "").strip()
+    blocks = []
+    for question in questions:
+        raw = str((question or {}).get("question") or "").strip()
+        if not raw or _kb_has_question(text, raw):
+            continue
+        blocks.append("Вопрос: " + raw + "\nОтвет: " + answer)
+    if not blocks:
+        return text
+    addition = "\n\n---\n\n".join(blocks)
+    return (text + "\n\n---\n\n" + addition).strip() if text else addition
 
 
 def _client_editable_cfg(clients_dir: Path, pid: str, cfg: dict,
@@ -1730,7 +1786,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         path = _client_yaml_path(clients_dir, pid)
         cfg = _read_cfg(path) or {}
         old_kb = str(cfg.get("knowledge_base") or "").strip()
-        entry = f"Вопрос: {question['question']}\nОтвет: {answer}"
+        new_kb = _append_answers_to_kb(old_kb, [question], answer)
         new_kb = (old_kb + "\n\n---\n\n" + entry).strip() if old_kb else entry
         _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
                              "admin" if role == "admin" else f"client:{pid}",
@@ -1764,8 +1820,7 @@ def register_admin_api(app, settings: Settings, state) -> None:
         cfg = _read_cfg(path) or {}
         old_kb = str(cfg.get("knowledge_base") or "").strip()
         questions = get_questions_for_group(group_id)
-        q_texts = "\n".join(f"Вопрос: {q['question']}\nОтвет: {answer}" for q in questions)
-        new_kb = (old_kb + "\n\n---\n\n" + q_texts).strip() if old_kb else q_texts
+        new_kb = _append_answers_to_kb(old_kb, questions, answer)
 
         _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
                              "admin" if role == "admin" else f"client:{pid}", "unanswered_answer", state)

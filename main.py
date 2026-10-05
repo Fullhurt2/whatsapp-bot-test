@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -714,6 +715,7 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
         Дедупликация через БД (storage.seen_events.check_and_add).
         """
         raw_body = await request.body()
+        received_at = time.monotonic()
         signature = (
             request.headers.get(ZERNIO_HEADER_SIGNATURE, "")
             or request.headers.get(ZERNIO_HEADER_SIGNATURE_LEGACY, "")
@@ -729,6 +731,12 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
             return {"ok": True}
 
         events = parse_zernio_events(payload)
+        # Замер разбора вебхука: если он упирается в сотни миллисекунд, Zernio
+        # может ретраить, и вся задержка до клиента растёт.
+        logger.info(
+            "Вебхук Zernio разобран | событий=%d | %.3f с",
+            len(events), time.monotonic() - received_at,
+        )
         if not events:
             return {"ok": True}
 
@@ -807,6 +815,10 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
                 if event.provider_message_id:
                     update_delivery_status(event.provider_message_id, "read")
 
+        logger.info(
+            "Вебхук Zernio: ack через %.3f с | событий=%d",
+            time.monotonic() - received_at, len(events),
+        )
         return {"ok": True}
 
 

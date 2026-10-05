@@ -19,6 +19,7 @@ send_text()/send_template() и не знают про коды ответов и
 import asyncio
 import logging
 import uuid
+import time
 
 import httpx
 
@@ -238,11 +239,19 @@ class ZernioWhatsAppClient:
     async def _send_reply(self, conversation_id: str, body: str) -> None:
         """POST /inbox/conversations/{id}/messages: один кусок текста в диалог."""
         payload = {"accountId": self._account_id, "message": body}
+        started = time.monotonic()
         response = await self._request_with_retry(
             "POST",
             f"{self._base}/inbox/conversations/{conversation_id}/messages",
             json=payload,
             headers={"Idempotency-Key": uuid.uuid4().hex},
+        )
+        # Замер отличает нашу задержку от задержки Zernio: если здесь 200-400 мс,
+        # а клиент видит ответ через 15 секунд — время уходит уже после ответа
+        # Zernio, на доставке в WhatsApp.
+        logger.info(
+            "Zernio принял сообщение | conv=%s | символов=%d | %.3f с",
+            conversation_id[:12], len(body), time.monotonic() - started,
         )
         if response.status_code != 200:
             raise ZernioError(_zernio_error_text(response))

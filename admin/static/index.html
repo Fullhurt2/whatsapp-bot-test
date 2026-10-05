@@ -552,6 +552,7 @@
 
           <label for="f_vertical">Категория бизнеса</label>
           <select id="f_vertical" class="mono"></select>
+          <div class="hint">Список категорий задан WhatsApp: значение попадает в профиль номера в Zernio и Meta. Не нашли свою — оставьте «Не выбрана».</div>
 
           <label for="f_address">Адрес</label>
           <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
@@ -1175,28 +1176,31 @@ async function zernioRegisterNumber() {
 
 // --- WhatsApp Profile (Meta/Zernio) ------------------------------------------
 
-// Категории бизнеса WhatsApp (VerticalCategory в Graph API).
+// Категории бизнеса — закрытый список Meta (VerticalCategory в Graph API).
+// Значения приходят из документации business-profiles; свои добавлять нельзя.
 const WHATSAPP_VERTICALS = [
   ["", "Не выбрана"],
-  ["UNDEFINED", "Не определено"],
-  ["OTHER", "Другое"],
-  ["AUTO", "Авто"],
   ["BEAUTY", "Красота и салоны"],
+  ["RESTAURANT", "Рестораны"],
+  ["GROCERY", "Продукты и супермаркеты"],
+  ["RETAIL", "Розничная торговля"],
   ["APPAREL", "Одежда"],
+  ["HOTEL", "Отели"],
+  ["TRAVEL", "Путешествия"],
+  ["HEALTH", "Здоровье и медицина"],
+  ["PROF_SERVICES", "Профессиональные услуги"],
   ["EDU", "Образование"],
   ["ENTERTAIN", "Развлечения"],
-  ["EVENT_PRESENT", "Мероприятия и подарки"],
+  ["EVENT_PLAN", "Мероприятия"],
   ["FINANCE", "Финансы"],
-  ["FOOD", "Еда и напитки"],
   ["GOVT", "Госструктуры"],
-  ["HOTEL", "Отели и туризм"],
-  ["HEALTH", "Здоровье и медицина"],
   ["NONPROFIT", "Некоммерческие организации"],
-  ["PROF_SERVICES", "Профессиональные услуги"],
-  ["RETAIL", "Розничная торговля"],
-  ["TRAVEL", "Путешествия"],
-  ["RESTAURANT", "Рестораны"],
-  ["NOT_A_BIZ", "Не бизнес"],
+  ["AUTO", "Автотовары"],
+  ["ALCOHOL", "Алкоголь"],
+  ["OTC_DRUGS", "Лекарства"],
+  ["ONLINE_GAMBLING", "Онлайн-ставки"],
+  ["PHYSICAL_GAMBLING", "Оффлайн-ставки"],
+  ["OTHER", "Другое"],
 ];
 
 function fillVerticals() {
