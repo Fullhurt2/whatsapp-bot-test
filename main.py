@@ -579,8 +579,16 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     # Вебхук Telegram-бота владельца (для уведомлений): регистрируем, если задан токен.
     if settings.telegram_owner_bot_token:
         _register_telegram_owner_webhook(app, settings, state)
+        if not settings.telegram_owner_webhook_secret:
+            logger.warning(
+                "Секрет вебхука бота JAUAP не задан (TELEGRAM_OWNER_WEBHOOK_SECRET) — "
+                "запросы /webhooks/telegram-owner не проверяются"
+            )
     else:
-        logger.debug("Telegram-бот владельца не настроен: TELEGRAM_OWNER_BOT_TOKEN не задан")
+        logger.warning(
+            "Бот JAUAP не настроен: TELEGRAM_OWNER_BOT_TOKEN пуст — уведомления "
+            "менеджерам в Telegram и привязка чатов работать не будут"
+        )
 
     # Админ-API и панель /admin: только в мультитенанте и с заданным
     # ADMIN_TOKEN (иначе роуты не существуют — см. admin/api.py).

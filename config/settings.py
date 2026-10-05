@@ -332,6 +332,11 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         clients_dir=str(clients_dir),
         # Публичный адрес сервиса — база для setWebhook Telegram-клиентов.
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+        # Общий бот JAUAP: уведомления менеджерам и привязка чатов. Без этих
+        # полей мультитенантный режим их не видел — токен молча оставался пустым.
+        telegram_owner_bot_token=_owner_bot_token(),
+        telegram_owner_webhook_secret=_owner_bot_secret(),
+        manual_timeout_hours=_int_env("MANUAL_TIMEOUT_HOURS", 12),
         # Админ-API (панель /admin): полный доступ к clients/*.yaml.
         # Не обязателен — без него админ-роуты просто не регистрируются.
         admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
@@ -364,6 +369,19 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
             "(Zernio-клиенты недоступны)"
         )
     return settings
+
+
+def _owner_bot_secret() -> str:
+    """Секрет вебхука бота JAUAP (заголовок X-Telegram-Bot-Api-Secret-Token).
+
+    Основное имя — TELEGRAM_OWNER_WEBHOOK_SECRET; TELEGRAM_OWNER_BOT_SECRET
+    принимаем как синоним (так его называют в части деплоев).
+    """
+    for name in ("TELEGRAM_OWNER_WEBHOOK_SECRET", "TELEGRAM_OWNER_BOT_SECRET"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _owner_bot_token() -> str:
@@ -464,7 +482,7 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
         telegram_owner_bot_token=_owner_bot_token(),
-        telegram_owner_webhook_secret=os.getenv("TELEGRAM_OWNER_WEBHOOK_SECRET", "").strip(),
+        telegram_owner_webhook_secret=_owner_bot_secret(),
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
         manual_timeout_hours=_int_env("MANUAL_TIMEOUT_HOURS", 12),
         owner_telegram_chat_id=str(cfg.get("owner_telegram_chat_id") or "").strip(),
