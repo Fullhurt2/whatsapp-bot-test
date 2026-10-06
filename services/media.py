@@ -30,7 +30,13 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from PIL import Image
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    HAS_PIL = False
 
 from config.settings import Settings
 
@@ -152,6 +158,10 @@ def resize_image_if_needed(image_bytes: bytes, max_side: int = 1600) -> tuple[by
     Уменьшает изображение до max_side по длинной стороне через PIL.
     Возвращает (новые_байты, mime_type: image/jpeg).
     """
+    if not HAS_PIL or Image is None:
+        logger.warning("Pillow (PIL) не установлен, отправляем картинку без сжатия")
+        return image_bytes, "image/jpeg"
+
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             # Преобразуем RGBA/P в RGB для JPEG
