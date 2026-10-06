@@ -182,11 +182,11 @@ class Settings:
     test_phones: list[str] = field(default_factory=list)
     # Флаги фич (включаются по одному на тестовом клиенте)
     features: dict[str, bool] = field(default_factory=lambda: {
-        "live_chat": False,
-        "telegram_notify": False,
-        "unanswered": False,
-        "stats": False,
-        "media": False,
+        "live_chat": True,
+        "telegram_notify": True,
+        "unanswered": True,
+        "stats": True,
+        "media": True,
     })
 
     # Встроенные служебные ответы (lang — язык сообщения клиента: "ru"/"kk").
@@ -202,9 +202,17 @@ class Settings:
     def feature(self, name: str) -> bool:
         """Включена ли фича.
 
-        По умолчанию True, если не выключена явно в features: {<name>: false}.
+        По умолчанию True, если явно не выключена в features: {<name>: false}.
+        Для 'media': если в media включено audio или image, фича включена.
         """
-        return bool(self.features.get(name, True))
+        if name == "media":
+            if hasattr(self, "media") and self.media is not None:
+                if self.media.audio or self.media.image:
+                    return bool(self.features.get("media", True))
+        val = self.features.get(name)
+        if val is None:
+            return True
+        return bool(val)
 
     def fallback_reply(self, lang: str = "ru") -> str:
         """Ответ клиенту при передаче человеку на его языке."""

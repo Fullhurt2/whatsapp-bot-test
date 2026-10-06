@@ -320,6 +320,11 @@ class MessageProcessor:
         """
         # Если фича media выключена или провайдер не Zernio — старое поведение
         if not self.settings.feature("media") or self.settings.messaging_provider != "zernio":
+            logger.info(
+                "Медиа пропущено: feature(media)=%s, provider=%s | phone=%s | kind=%s",
+                self.settings.feature("media"), self.settings.messaging_provider, phone,
+                getattr(inbound, "content_kind", "unknown"),
+            )
             await self.handle_non_text(
                 phone, display_name, getattr(inbound, "content_kind", "unknown"), conversation_id=conversation_id,
             )

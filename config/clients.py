@@ -80,11 +80,23 @@ def _int_or(value, default: int) -> int:
 def _features_of(cfg: dict, base) -> dict:
     """Флаги фич клиента поверх базовых (неизвестные ключи игнорируем)."""
     features = dict(getattr(base, "features", {}) or {})
+    for feat in ("media", "live_chat", "telegram_notify", "unanswered", "stats"):
+        features.setdefault(feat, True)
+
     own = cfg.get("features")
     if isinstance(own, dict):
         for key, flag in own.items():
             if isinstance(flag, bool):
                 features[str(key)] = flag
+
+    # Если в блоке media включено audio или image — медиа активно
+    media_cfg = cfg.get("media")
+    if isinstance(media_cfg, dict):
+        if media_cfg.get("audio") is True or media_cfg.get("image") is True:
+            features["media"] = True
+        elif media_cfg.get("audio") is False and media_cfg.get("image") is False:
+            features["media"] = False
+
     return features
 
 

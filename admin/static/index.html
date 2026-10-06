@@ -1067,6 +1067,13 @@ function collectForm() {
       max_image_mb: parseInt(value("f_media_max_image_mb"), 10) || 8,
       daily_limit: parseInt(value("f_media_daily_limit"), 10) || 50,
     },
+    features: {
+      media: Boolean($("f_media_audio") ? $("f_media_audio").checked : true) || Boolean($("f_media_image") ? $("f_media_image").checked : true),
+      live_chat: true,
+      telegram_notify: true,
+      unanswered: true,
+      stats: true,
+    },
   };
   if (role === "admin") {
     config.management_token = value("f_management_token").trim();

@@ -39,15 +39,24 @@ logger = logging.getLogger(__name__)
 # Тариф Whisper: $0.006 за минуту
 WHISPER_PRICE_PER_MINUTE = 0.006
 
-# Разрешённые хосты для скачивания вложений (Zernio и WhatsApp CDN)
+# Разрешённые хосты для скачивания вложений (Zernio, CDN и облачные хранилища)
 ALLOWED_MEDIA_HOSTS = (
     "zernio.com",
     "api.zernio.com",
     "app.zernio.com",
+    "cdn.zernio.com",
+    "media.zernio.com",
     "whatsapp.com",
     "fbcdn.net",
     "fbsbx.com",
     "facebook.com",
+    "amazonaws.com",
+    "cloudfront.net",
+    "cloudflarestorage.com",
+    "r2.dev",
+    "googleapis.com",
+    "googleusercontent.com",
+    "digitaloceanspaces.com",
 )
 
 # Ограничение частоты: номер -> список таймстемпов последних медиа (за 60 сек)
@@ -204,7 +213,7 @@ async def transcribe_audio(
     language: 'ru', 'kk' или 'auto' (при auto не передаём language).
     hint: название бизнеса + ключевые услуги из базы знаний.
     """
-    api_key = settings.openai_api_key
+    api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip()
     if not api_key:
         raise MediaError("OPENAI_API_KEY не задан для транскрибации аудио")
 
@@ -289,9 +298,9 @@ async def describe_image(
     Описывает изображение через Vision-модель.
     Картинка ресайзится до 1600px и передаётся как data URL base64.
     """
-    api_url = settings.vision_api_url or settings.llm_api_url
-    api_key = settings.vision_api_key or settings.llm_api_key
-    model = settings.vision_model or settings.llm.model
+    api_url = settings.vision_api_url or settings.llm_api_url or os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip().rstrip("/")
+    api_key = settings.vision_api_key or settings.llm_api_key or os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip()
+    model = settings.vision_model or settings.llm.model or os.getenv("VISION_MODEL", "").strip() or os.getenv("LLM_MODEL", "").strip()
 
     if not api_url or not api_key:
         raise MediaError("Не задан VISION_API_URL или VISION_API_KEY")
