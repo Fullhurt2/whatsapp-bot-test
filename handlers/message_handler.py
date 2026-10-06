@@ -450,7 +450,12 @@ class MessageProcessor:
 
         local_path = ""
         try:
-            data, mime = await download_media(media_url, max_bytes=max_bytes, timeout_s=15.0)
+            data, mime = await download_media(
+                media_url,
+                max_bytes=max_bytes,
+                timeout_s=15.0,
+                api_key=self.settings.zernio_api_key,
+            )
         except MediaLimitError as exc:
             logger.warning("Медиа превышает лимит размера: %s | phone=%s", exc, phone)
             await self._skip_media(

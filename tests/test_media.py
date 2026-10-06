@@ -168,7 +168,7 @@ async def test_media_security_and_download():
         async def __aexit__(self, *args):
             pass
 
-        def stream(self, method, url):
+        def stream(self, method, url, *args, **kwargs):
             if "too-large" in url:
                 return MockStreamResponse([b"A" * 1024, b"B" * 2048])
             return MockStreamResponse([b"OggData12345"])

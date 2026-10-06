@@ -126,6 +126,8 @@ async def download_media(
     url: str,
     max_bytes: int,
     timeout_s: float = 15.0,
+    headers: dict[str, str] | None = None,
+    api_key: str = "",
 ) -> tuple[bytes, str]:
     """
     Потоковая безопасная загрузка медиафайла с ограничением размера.
@@ -134,9 +136,22 @@ async def download_media(
     if not is_url_allowed(url):
         raise MediaError(f"URL не входит в список разрешённых доменов: {url}")
 
+    req_headers = dict(headers or {})
+    # Если URL указывает на Zernio API (/v1/whatsapp/media или api.zernio.com/zernio.com) — добавляем Bearer токен
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    token = api_key or os.getenv("ZERNIO_API_KEY", "").strip()
+    if token and (host == "zernio.com" or host.endswith(".zernio.com")):
+        if "authorization" not in {k.lower() for k in req_headers}:
+            req_headers["Authorization"] = f"Bearer {token}"
+
+    stream_kwargs = {}
+    if req_headers:
+        stream_kwargs["headers"] = req_headers
+
     async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
         try:
-            async with client.stream("GET", url) as response:
+            async with client.stream("GET", url, **stream_kwargs) as response:
                 if response.status_code != 200:
                     raise MediaError(f"Ошибка загрузки медиа: HTTP {response.status_code}")
 
