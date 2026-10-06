@@ -348,9 +348,13 @@ async def describe_image(
     if caption:
         user_prompt += f" Подпись клиента: {caption}"
 
+    # Для моделей o-серии / gpt-5/6 часто требуется max_completion_tokens вместо max_tokens
+    use_max_completion = any(k in model.lower() for k in ("gpt-5", "gpt-6", "o1", "o3", "o4"))
+    limit_key = "max_completion_tokens" if use_max_completion else "max_tokens"
+
     payload = {
         "model": model,
-        "max_tokens": 600,
+        limit_key: 600,
         "messages": [
             {"role": "system", "content": system_instruction},
             {
@@ -383,6 +387,34 @@ async def describe_image(
                 logger.warning("Сетевая ошибка Vision API (%s) — повтор запроса", exc)
                 return await describe_image(data, mime, caption, business_name, settings, retry=False)
             raise MediaError(f"Сетевая ошибка Vision API: {exc}") from exc
+
+        # Если 400 из-за параметра max_tokens/max_completion_tokens — адаптируем и повторяем
+        if response.status_code == 400:
+            err_text = response.text
+            if "max_completion_tokens" in err_text and "max_tokens" in payload:
+                logger.info("Vision API требует max_completion_tokens вместо max_tokens — повторяем")
+                payload.pop("max_tokens", None)
+                payload["max_completion_tokens"] = 600
+                response = await client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            elif "max_tokens" in err_text and "max_completion_tokens" in payload:
+                logger.info("Vision API требует max_tokens вместо max_completion_tokens — повторяем")
+                payload.pop("max_completion_tokens", None)
+                payload["max_tokens"] = 600
+                response = await client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
 
     if response.status_code != 200:
         if retry and response.status_code >= 500:
