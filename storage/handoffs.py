@@ -74,6 +74,36 @@ def mark_first_human_reply(handoff_id: int) -> bool:
     return result.rowcount > 0
 
 
+def mark_reminded(handoff_id: int) -> bool:
+    """Отметить, что напоминание менеджеру отправлено (reminded_at)."""
+    result = execute(
+        "UPDATE handoffs SET reminded_at = datetime('now') WHERE id = ? AND reminded_at IS NULL",
+        (handoff_id,),
+    )
+    return result.rowcount > 0
+
+
+def get_handoffs_needing_reminder(hours: int = 2) -> list[dict]:
+    """Передачи, висящие без ответа человека дольше hours часов, где напоминание ещё не отправлялось.
+
+    Возвращает handoff с полями диалога (conversation_id, client_key, contact_phone, contact_name).
+    """
+    rows = fetchall(
+        f"""
+        SELECT h.id as handoff_id, h.conversation_id, h.reason, h.summary, h.created_at,
+               c.client_key, c.contact_phone, c.contact_name
+        FROM handoffs h
+        JOIN conversations c ON h.conversation_id = c.id
+        WHERE h.first_human_reply_at IS NULL
+          AND h.resolved_at IS NULL
+          AND h.reminded_at IS NULL
+          AND h.notified_at IS NOT NULL
+          AND h.notified_at <= datetime('now', '-{int(hours)} hours')
+        """,
+    )
+    return [dict(row) for row in rows]
+
+
 def resolve_handoff(handoff_id: int) -> bool:
     """Закрыть передачу (диалог вернулся к боту или закрыт)."""
     result = execute(

@@ -1831,14 +1831,18 @@ def register_admin_api(app, settings: Settings, state) -> None:
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
-        if role != "admin":
-            # Клиент и так внутри своей карточки — ему ответ не нужен.
-            return JSONResponse(status_code=403, content={"error": "только администратору"})
         from storage import get_conversation
         conv = get_conversation(cid)
         if not conv:
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
         db_key = str(conv.get("client_key") or "")
+        # Если вошёл клиент по своему токену, проверяем, что диалог принадлежит ему
+        if role != "admin":
+            expected_key = _conversation_client_key(clients_dir, pid) if pid else ""
+            if not pid or db_key != expected_key:
+                return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+            return {"pid": pid, "conversation_id": cid}
+
         for stem in _client_pids(clients_dir):
             if _conversation_client_key(clients_dir, stem) == db_key:
                 return {"pid": stem, "conversation_id": cid}

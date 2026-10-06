@@ -934,9 +934,9 @@ async function openEditor(pid) {
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
-  show("tabStatsBtn", isAdmin);
-  show("tabTelegramBtn", isAdmin);
-  show("tabUnansweredBtn", isAdmin);
+  show("tabStatsBtn", true);
+  show("tabTelegramBtn", true);
+  show("tabUnansweredBtn", true);
   // Show Profile tab for WhatsApp (wa) and Zernio clients
   const isWhatsApp = ["wa", "zernio"].includes(data.provider);
   show("tabProfileBtn", isWhatsApp);
@@ -1655,6 +1655,7 @@ async function loadStats() {
 }
 
 async function loadStatsOverview() {
+  if (!isAdmin) { $("statsOverview").innerHTML = ""; $("statsOverviewTitle").style.display = "none"; return; }
   const { ok, code, data } = await api("GET", "/admin/stats/overview" + statsQuery());
   if (!ok || !data.clients) { $("statsOverview").innerHTML = ""; $("statsOverviewTitle").style.display = "none"; return; }
   const clients = data.clients || {};
