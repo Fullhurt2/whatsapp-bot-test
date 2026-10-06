@@ -174,6 +174,8 @@ def main():
     from main import create_app
 
     tmp = Path(tempfile.mkdtemp(prefix="bot_zernio_"))
+    import os
+    os.environ["JAUAP_DB_PATH"] = str(tmp / "test.db")
     log = LogCapture()
     logging.getLogger().addHandler(log)
     logging.getLogger().setLevel(logging.WARNING)

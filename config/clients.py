@@ -33,7 +33,7 @@ from pathlib import Path
 
 import yaml
 
-from config.settings import LLMParams, Settings, normalize_phone
+from config.settings import LLMParams, MediaSettings, Settings, normalize_phone
 from whatsapp.telegram_token import bot_id_from_token
 
 logger = logging.getLogger(__name__)
@@ -289,6 +289,13 @@ def validate_tenant_config(
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
         timeout_reply_kk=str(cfg.get("timeout_reply_kk") or "").strip(),
+        media=MediaSettings(
+            audio=bool((cfg.get("media") or {}).get("audio", getattr(base.media, "audio", True))),
+            image=bool((cfg.get("media") or {}).get("image", getattr(base.media, "image", True))),
+            max_audio_seconds=int((cfg.get("media") or {}).get("max_audio_seconds", getattr(base.media, "max_audio_seconds", 120))),
+            max_image_mb=int((cfg.get("media") or {}).get("max_image_mb", getattr(base.media, "max_image_mb", 8))),
+            daily_limit=int((cfg.get("media") or {}).get("daily_limit", getattr(base.media, "daily_limit", 50))),
+        ),
         # Per-tenant объект не указывает на реестр — иначе create_app уйдёт в цикл.
         clients_dir="",
     )

@@ -1374,9 +1374,30 @@ function renderChatList() {
     const name = c.contact_name || c.contact_phone;
     const unread = c.unread_count > 0 ? '<span class="chat-unread">' + c.unread_count + "</span>" : "";
     const badge = c.status === "manual" ? '<span class="provider-badge">вручную</span>' : "";
+
+    let preview = "";
+    const kind = c.last_message_content_kind || "";
+    if (kind === "voice" || kind === "audio") {
+      const dur = c.last_message_duration_s ? Math.round(c.last_message_duration_s) : 0;
+      const m = Math.floor(dur / 60);
+      const s = String(dur % 60).padStart(2, "0");
+      preview = "🎤 Голосовое (" + m + ":" + s + ")";
+    } else if (kind === "image") {
+      let cap = c.last_message_text || "";
+      if (cap.startsWith("[Фото]")) {
+        cap = cap.replace(/^\[Фото\]\s*/, "");
+        if (cap.startsWith("Описание:")) cap = "";
+      }
+      preview = "📷 Фото" + (cap ? ": " + cap.slice(0, 30) : "");
+    } else if (c.last_message_text) {
+      preview = c.last_message_text.slice(0, 40);
+    }
+    const previewHtml = preview ? '<div class="chat-conv-preview" style="font-size:12px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">' + esc(preview) + '</div>' : "";
+
     return '<div class="chat-conv' + active + '" data-cid="' + esc(c.id) + '">' +
       '<div class="chat-conv-name">' + esc(name) + unread + "</div>" +
       '<div class="chat-conv-sub">' + badge + " " + esc(fmtChatTime(c.last_message_at)) + "</div>" +
+      previewHtml +
       "</div>";
   }).join("");
   box.querySelectorAll(".chat-conv").forEach((row) => {
@@ -1429,11 +1450,71 @@ async function loadConversationMessages() {
   }
   box.innerHTML = messages.map((m) => {
     const statusBit = m.role === "human" && m.delivery_status ? " · " + esc(m.delivery_status) : "";
-    return '<div class="chat-msg ' + esc(m.role) + '">' + esc(m.text) +
+    let mediaHtml = "";
+    const tokenParam = "?token=" + encodeURIComponent(localStorage.getItem(STORE_KEY) || "");
+    const mediaUrl = "/admin/clients/" + encodeURIComponent(currentPid) +
+      "/conversations/" + encodeURIComponent(currentConvId) +
+      "/messages/" + m.id + "/media" + tokenParam;
+
+    const kind = (m.content_kind || "").toLowerCase();
+    if (kind === "voice" || kind === "audio") {
+      const durText = m.media_duration_s ? Math.round(m.media_duration_s) + " с" : "";
+      const modelBadge = m.media_model ? '<span class="provider-badge">' + esc(m.media_model) + '</span>' : '<span class="provider-badge">Whisper</span>';
+      if (m.media_status === "expired") {
+        mediaHtml = '<div class="media-expired" style="font-size:12px;color:#888;margin-bottom:4px;">⚠️ Файл удалён по истечении срока хранения</div>';
+      } else if (m.media_status === "failed") {
+        mediaHtml = '<div class="media-failed" style="margin-bottom:4px;"><span class="provider-badge" style="background:#fee;color:#c00;">Ошибка расшифровки</span> <button type="button" class="btn btn-sm" style="padding:2px 6px;font-size:11px;" onclick="retryMedia(' + m.id + ')">Повторить расшифровку</button></div>';
+      } else if (m.media_path) {
+        mediaHtml = '<div class="media-voice" style="margin-bottom:4px;"><audio controls src="' + esc(mediaUrl) + '" preload="none" style="max-width:100%;height:32px;"></audio><div style="font-size:11px;color:#888;margin-top:2px;">' + esc(durText) + ' ' + modelBadge + '</div></div>';
+      }
+    } else if (kind === "image") {
+      const modelBadge = m.media_model ? '<span class="provider-badge">' + esc(m.media_model) + '</span>' : '';
+      if (m.media_status === "expired") {
+        mediaHtml = '<div class="media-expired" style="font-size:12px;color:#888;margin-bottom:4px;">⚠️ Файл удалён по истечении срока хранения</div>';
+      } else if (m.media_status === "failed") {
+        mediaHtml = '<div class="media-failed" style="margin-bottom:4px;"><span class="provider-badge" style="background:#fee;color:#c00;">Ошибка распознавания</span> <button type="button" class="btn btn-sm" style="padding:2px 6px;font-size:11px;" onclick="retryMedia(' + m.id + ')">Повторить распознавание</button></div>';
+      } else if (m.media_path) {
+        mediaHtml = '<div class="media-image" style="margin-bottom:4px;"><a href="' + esc(mediaUrl) + '" target="_blank" rel="noopener"><img src="' + esc(mediaUrl) + '" style="max-width:220px;max-height:220px;border-radius:6px;display:block;cursor:pointer;"></a><div style="font-size:11px;color:#888;margin-top:2px;">' + modelBadge + '</div></div>';
+      }
+    }
+
+    let textHtml = "";
+    if (m.text) {
+      if ((kind === "voice" || kind === "audio") && m.text.startsWith("[Голосовое сообщение]")) {
+        const transcript = m.text.replace(/^\[Голосовое сообщение\]\s*/, "");
+        textHtml = '<div class="transcript-text" style="font-style:italic;color:#555;margin-top:2px;">' + esc(transcript) + '</div>';
+      } else if (kind === "image" && m.text.startsWith("[Фото]")) {
+        const desc = m.text.replace(/^\[Фото\]\s*/, "");
+        textHtml = '<div class="transcript-text" style="color:#444;margin-top:2px;">' + esc(desc) + '</div>';
+      } else {
+        textHtml = '<div>' + esc(m.text) + '</div>';
+      }
+    }
+
+    return '<div class="chat-msg ' + esc(m.role) + '">' +
+      mediaHtml +
+      textHtml +
       '<span class="chat-msg-time">' + esc(fmtChatTime(m.created_at)) + statusBit + "</span></div>";
   }).join("");
   box.scrollTop = box.scrollHeight;
 }
+
+async function retryMedia(msgId) {
+  if (!currentConvId) return;
+  status("chatStatus", "Повторная расшифровка…");
+  const { ok, code, data } = await chatApi(
+    "POST",
+    "/conversations/" + encodeURIComponent(currentConvId) + "/messages/" + msgId + "/retry-media"
+  );
+  if (!ok) {
+    status("chatStatus", humanError(code, data), true);
+    return;
+  }
+  status("chatStatus", "Расшифровка завершена.");
+  await loadConversationMessages();
+  refreshChat();
+}
+
 
 async function sendChatMessage() {
   const input = $("chatInput");
@@ -1536,9 +1617,12 @@ async function loadStats() {
     metricCard("Сэкономлено времени", (data.estimated_time_saved_minutes || 0) + " мин",
       "ответов бота вместо менеджера"),
     metricCard("Токены", ((data.tokens || {}).in || 0), "вход · выход: " + ((data.tokens || {}).out || 0)),
+    metricCard("Медиа", ((data.media || {}).voice || 0) + " гол. / " + ((data.media || {}).image || 0) + " фото",
+      "секунд: " + ((data.media || {}).duration_s || 0) + " · расход: $" + ((data.media || {}).cost || 0)),
     metricCard("Без ответа", (data.unanswered || {}).total || 0,
       "новых: " + ((data.unanswered || {}).new_count || 0)),
   ].join("");
+
 
   const byReason = (data.handoffs || {}).by_reason || {};
   const reasonKeys = Object.keys(byReason);

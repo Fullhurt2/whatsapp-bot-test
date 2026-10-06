@@ -58,6 +58,17 @@ def normalize_phone(raw: str) -> str:
 
 
 @dataclass(frozen=True)
+class MediaSettings:
+    """Настройки обработки медиа (аудио/фото) для клиента."""
+
+    audio: bool = True
+    image: bool = True
+    max_audio_seconds: int = 120
+    max_image_mb: int = 8
+    daily_limit: int = 50
+
+
+@dataclass(frozen=True)
 class LLMParams:
     """Параметры вызова LLM — всё настраивается в client_config.yaml."""
 
@@ -72,7 +83,6 @@ class LLMParams:
 class Settings:
     """Сводные настройки бота: секреты из .env + бизнес-конфиг из YAML."""
 
-    # из .env
     messaging_provider: str  # "meta", "zernio" или "telegram" (MESSAGING_PROVIDER)
     app_host: str
     app_port: int
@@ -103,6 +113,16 @@ class Settings:
     owner_phone: str | None
     fallback_triggers: list[str] = field(default_factory=list)
     llm: LLMParams = field(default_factory=lambda: LLMParams("", 0.6, 3500, 15))
+    # --- Медиа (Whisper / Vision) из .env ---
+    openai_api_key: str = ""
+    transcribe_base_url: str = "https://api.openai.com/v1"
+    transcribe_model: str = "whisper-1"
+    vision_api_url: str = ""
+    vision_api_key: str = ""
+    vision_model: str = ""
+    media_dir: str = "/data/clients/media"
+    media_retention_days: int = 30
+    media: MediaSettings = field(default_factory=MediaSettings)
     # Примеры тёплого/дружеского ответа (few-shot) — необязательное поле.
     style_examples: str = ""
     # Имя загруженного конфига клиента (для логов старта).
@@ -166,6 +186,7 @@ class Settings:
         "telegram_notify": False,
         "unanswered": False,
         "stats": False,
+        "media": False,
     })
 
     # Встроенные служебные ответы (lang — язык сообщения клиента: "ru"/"kk").
@@ -181,10 +202,11 @@ class Settings:
     def feature(self, name: str) -> bool:
         """Включена ли фича.
 
-        Фичи включаются по умолчанию: отсутствующий флаг = включено, чтобы
-        добавление нового ключа в yaml не выключало работающее поведение.
-        Выключается фича явно — `features: {live_chat: false}` в yaml клиента.
+        Для 'media' по умолчанию False (согласно ТЗ).
+        Для остальных фич отсутствующий флаг = True, если не задан явно.
         """
+        if name == "media":
+            return bool(self.features.get("media", False))
         return bool(self.features.get(name, True))
 
     def fallback_reply(self, lang: str = "ru") -> str:
@@ -340,6 +362,14 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         # Админ-API (панель /admin): полный доступ к clients/*.yaml.
         # Не обязателен — без него админ-роуты просто не регистрируются.
         admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        transcribe_base_url=os.getenv("TRANSCRIBE_BASE_URL", "").strip().rstrip("/") or "https://api.openai.com/v1",
+        transcribe_model=os.getenv("TRANSCRIBE_MODEL", "").strip() or "whisper-1",
+        vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
+        vision_api_key=os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
+        vision_model=os.getenv("VISION_MODEL", "").strip() or os.getenv("LLM_MODEL", "").strip(),
+        media_dir=os.getenv("MEDIA_DIR", "/data/clients/media").strip(),
+        media_retention_days=_int_env("MEDIA_RETENTION_DAYS", 30),
     )
     if 0 < len(settings.admin_token) < 32:
         logger.warning(
@@ -492,6 +522,21 @@ def get_settings() -> Settings:
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
         timeout_reply_kk=str(cfg.get("timeout_reply_kk") or "").strip(),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        transcribe_base_url=os.getenv("TRANSCRIBE_BASE_URL", "").strip().rstrip("/") or "https://api.openai.com/v1",
+        transcribe_model=os.getenv("TRANSCRIBE_MODEL", "").strip() or "whisper-1",
+        vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
+        vision_api_key=os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
+        vision_model=os.getenv("VISION_MODEL", "").strip() or model,
+        media_dir=os.getenv("MEDIA_DIR", "/data/clients/media").strip(),
+        media_retention_days=_int_env("MEDIA_RETENTION_DAYS", 30),
+        media=MediaSettings(
+            audio=bool((cfg.get("media") or {}).get("audio", True)),
+            image=bool((cfg.get("media") or {}).get("image", True)),
+            max_audio_seconds=int((cfg.get("media") or {}).get("max_audio_seconds", 120)),
+            max_image_mb=int((cfg.get("media") or {}).get("max_image_mb", 8)),
+            daily_limit=int((cfg.get("media") or {}).get("daily_limit", 50)),
+        ),
     )
 
     # Проверяем обязательные поля до старта, чтобы бот падал сразу с внятной ошибкой.

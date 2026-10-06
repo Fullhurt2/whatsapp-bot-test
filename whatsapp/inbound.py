@@ -24,3 +24,7 @@ class InboundMessage:
     conversation_id: str = ""
     # Zernio: accountId аккаунта-получателя (обязателен в теле запросов).
     account_id: str = ""
+    # Медиа-вложения (если есть)
+    media_url: str = ""
+    media_mime: str = ""
+    media_caption: str = ""

@@ -232,7 +232,7 @@ def main():
             hook = capture.calls_to("/webhooks/settings")[-1]
             check("секрет и событие ушли в Zernio",
                   hook["json"]["secret"] == SECRET
-                  and hook["json"]["events"] == ["message.received"]
+                  and "message.received" in hook["json"]["events"]
                   and hook["json"]["url"] == PUBLIC + "/webhooks/zernio")
 
         print("[9] нет ZERNIO_WEBHOOK_SECRET -> 409 с подсказкой")

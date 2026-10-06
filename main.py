@@ -307,8 +307,16 @@ class WebhookState:
         processor = processor or self.processor
         conversation_id = getattr(inbound, "conversation_id", "")
         try:
-            if inbound.text.strip("/").casefold() == "start":
+            if getattr(inbound, "content_kind", "text") in ("text", "") and inbound.text.strip("/").casefold() == "start":
                 await processor.handle_greeting(inbound.phone, conversation_id=conversation_id)
+            elif (
+                getattr(inbound, "media_url", None)
+                or getattr(inbound, "content_kind", "") in ("voice", "audio", "image", "video", "document", "file")
+            ):
+                await processor.handle_media(
+                    inbound.phone, inbound.display_name, inbound,
+                    conversation_id=conversation_id,
+                )
             elif inbound.text:
                 await processor.handle_incoming(
                     inbound.phone, inbound.display_name, inbound.text,
@@ -320,6 +328,7 @@ class WebhookState:
                     conversation_id=conversation_id,
                 )
         except Exception:
+
             # Падение обработки не должно крашить сервер: провайдер при не-2xx
             # начнёт ретраи, а ответ клиенту уже мог уйти.
             logger.exception("Ошибка при обработке вебхука (%s)", inbound.phone)
@@ -355,14 +364,14 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             settings.messaging_provider,
         )
 
-    # Определяем пути: приоритет CLIENTS_DIR env > RAILWAY_VOLUME_MOUNT_PATH/clients > авто-детект
+    # Определяем пути: settings.clients_dir > CLIENTS_DIR env > RAILWAY_VOLUME_MOUNT_PATH/clients > авто-детект
     railway_volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
-    explicit_clients_dir = os.getenv("CLIENTS_DIR")
+    explicit_clients_dir = settings.clients_dir or os.getenv("CLIENTS_DIR")
     
     if explicit_clients_dir:
-        # Явный CLIENTS_DIR из env имеет наивысший приоритет
+        # settings.clients_dir или явный CLIENTS_DIR из env имеет наивысший приоритет
         clients_dir = Path(explicit_clients_dir)
-        logger.info("CLIENTS_DIR задан явно: %s", clients_dir)
+        logger.info("CLIENTS_DIR задан: %s", clients_dir)
     elif railway_volume:
         # Авто-детект из Railway Volume
         clients_dir = Path(railway_volume) / "clients"
@@ -440,7 +449,14 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             deleted = await asyncio.to_thread(cleanup_old_conversations, 365)
             logger.info("Чистка старых диалогов: удалено %d диалогов", deleted)
 
+            # 4. Чистка медиафайлов старше media_retention_days (30 дней)
+            from storage import cleanup_expired_media
+            retention_days = int(getattr(settings, "media_retention_days", 30) or 30)
+            cleaned_media = await asyncio.to_thread(cleanup_expired_media, retention_days)
+            logger.info("Чистка старых медиафайлов: удалено %d файлов", cleaned_media)
+
         except Exception as e:
+
             logger.exception("Ошибка в ежедневных задачах: %s", e)
 
     # reminder_job отключен: пока только ставит reminded_at, не отправляет уведомления
@@ -549,6 +565,7 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         )
 
     state = WebhookState(settings, sender_factory)
+    app.state.state = state
 
     # Регистрация вебхуков
     if state.multitenant:

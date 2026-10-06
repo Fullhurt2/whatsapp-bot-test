@@ -63,6 +63,9 @@ def get_client_stats(client_key: str, from_date: str, to_date: str, timezone: st
     # Часы пик (конвертируем UTC -> timezone)
     hourly_tz = convert_hourly_to_timezone(hourly, timezone)
 
+    # Медиа-статистика
+    media_stats = get_media_stats(client_key, from_date, to_date)
+
     return {
         "period": {"from": from_date, "to": to_date},
         "dialogues": dialogues_count,
@@ -92,8 +95,10 @@ def get_client_stats(client_key: str, from_date: str, to_date: str, timezone: st
             "in": msg_stats.get("total_tokens_in") or 0,
             "out": msg_stats.get("total_tokens_out") or 0,
         },
+        "media": media_stats,
         "estimated_time_saved_minutes": closed_by_bot * SAVED_MINUTES_PER_DIALOGUE,
     }
+
 
 
 # Сколько минут работы менеджера экономит один диалог, закрытый ботом.
@@ -233,6 +238,44 @@ def get_admin_overview_stats(
     }
 
 
+def get_media_stats(client_key: str, from_date: str, to_date: str) -> dict:
+    """Агрегация по обработанным медиафайлам."""
+    row = fetchone(
+        """
+        SELECT
+            COUNT(CASE WHEN m.content_kind = 'voice' THEN 1 END) as voice_count,
+            COUNT(CASE WHEN m.content_kind = 'image' THEN 1 END) as image_count,
+            COUNT(CASE WHEN m.content_kind = 'video' THEN 1 END) as video_count,
+            COUNT(CASE WHEN m.content_kind IN ('document', 'file') THEN 1 END) as document_count,
+            COUNT(CASE WHEN m.media_status = 'failed' THEN 1 END) as failed_count,
+            COUNT(CASE WHEN m.media_status = 'skipped' THEN 1 END) as skipped_count,
+            COALESCE(SUM(m.media_duration_s), 0) as total_duration_s,
+            COALESCE(SUM(m.media_cost), 0.0) as total_cost
+        FROM messages m
+        JOIN conversations c ON m.conversation_id = c.id
+        WHERE c.client_key = ?
+          AND m.created_at >= ?
+          AND m.created_at <= ?
+        """,
+        (client_key, from_date, to_date),
+    )
+    if not row:
+        return {
+            "voice": 0, "image": 0, "video": 0, "document": 0,
+            "failed": 0, "skipped": 0, "duration_s": 0.0, "cost": 0.0,
+        }
+    return {
+        "voice": int(row["voice_count"] or 0),
+        "image": int(row["image_count"] or 0),
+        "video": int(row["video_count"] or 0),
+        "document": int(row["document_count"] or 0),
+        "failed": int(row["failed_count"] or 0),
+        "skipped": int(row["skipped_count"] or 0),
+        "duration_s": round(float(row["total_duration_s"] or 0.0), 1),
+        "cost": round(float(row["total_cost"] or 0.0), 4),
+    }
+
+
 def export_stats_csv(client_key: str, from_date: str, to_date: str) -> str:
     """Экспорт статистики в CSV (UTF-8 с BOM для Excel)."""
     stats = get_client_stats(client_key, from_date, to_date)
@@ -260,10 +303,16 @@ def export_stats_csv(client_key: str, from_date: str, to_date: str) -> str:
     lines.append(f"Реакция менеджера (p95 сек.),{stats['manager_reaction']['p95_seconds']}")
     lines.append(f"Токенов в,{stats['tokens']['in']}")
     lines.append(f"Токенов аут,{stats['tokens']['out']}")
+    if "media" in stats:
+        lines.append(f"Медиа: голосовых,{stats['media']['voice']}")
+        lines.append(f"Медиа: фото,{stats['media']['image']}")
+        lines.append(f"Медиа: секунд аудио,{stats['media']['duration_s']}")
+        lines.append(f"Медиа: расход ($),{stats['media']['cost']}")
     lines.append(f"Оценка сэкономленного времени (мин.),{stats['estimated_time_saved_minutes']}")
 
     # BOM для Excel
     return "\ufeff" + "\n".join(lines)
+
 
 
 def parse_date_range(from_str: Optional[str], to_str: Optional[str]) -> tuple[str, str]:

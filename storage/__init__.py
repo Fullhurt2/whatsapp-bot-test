@@ -47,7 +47,9 @@ from storage.messages import (
     get_conversation_stats,
     get_hourly_distribution,
     cleanup_old_seen_events,
+    cleanup_expired_media,
 )
+
 
 from storage.seen_events import (
     check_and_add,

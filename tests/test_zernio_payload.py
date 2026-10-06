@@ -82,7 +82,7 @@ def main():
 
     print("[3] не наше событие")
     check("иное событие -> []",
-          parse_zernio_events(envelope(event="message.sent")) == [])
+          parse_zernio_events(envelope(event="user.typing")) == [])
     check("исходящее -> []",
           parse_zernio_events(envelope(direction="outgoing")) == [])
     check("другая платформа -> []",

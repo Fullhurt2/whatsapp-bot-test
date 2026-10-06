@@ -47,6 +47,31 @@ class ZernioEvent:
     timestamp: str                     # timestamp события
     raw_payload: dict                  # оригинальный payload для логирования
 
+    # Свойства для обратной совместимости с тестами и кодом, ожидающим InboundMessage
+    @property
+    def phone(self) -> str:
+        return self.inbound.phone if self.inbound else self.sender_phone
+
+    @property
+    def display_name(self) -> str:
+        return self.inbound.display_name if self.inbound else ""
+
+    @property
+    def text(self) -> str:
+        return self.inbound.text if self.inbound else ""
+
+    @property
+    def content_kind(self) -> str:
+        return self.inbound.content_kind if self.inbound else "unknown"
+
+    @property
+    def message_id(self) -> str:
+        return self.inbound.message_id if self.inbound else self.provider_message_id
+
+    @property
+    def phone_number_id(self) -> str:
+        return self.inbound.phone_number_id if self.inbound else self.account_id
+
 
 def parse_zernio_events(payload: dict) -> list[ZernioEvent]:
     """Парсит вебхук Zernio и возвращает список событий.
@@ -71,6 +96,15 @@ def parse_zernio_events(payload: dict) -> list[ZernioEvent]:
         return []
 
     direction = str(message.get("direction") or "").lower()
+    # Только входящие для message.received
+    if event == EVENT_MESSAGE_RECEIVED and direction == DIRECTION_OUTGOING:
+        return []
+
+    # Standby в metadata
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if metadata.get("standby") is True:
+        logger.info("Zernio: входящее в режиме standby пропущено")
+        return []
 
     account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
     account_id = str(account.get("accountId") or account.get("id") or "").strip()
@@ -82,6 +116,9 @@ def parse_zernio_events(payload: dict) -> list[ZernioEvent]:
 
     sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
     sender_phone = _sender_key(sender)
+    if event == EVENT_MESSAGE_RECEIVED and not sender_phone:
+        logger.warning("Zernio: сообщение без идентификатора отправителя — пропущено")
+        return []
 
     provider_message_id = str(message.get("platformMessageId") or message.get("id") or "")
     timestamp = str(payload.get("timestamp") or "")
@@ -114,16 +151,8 @@ def parse_zernio_events(payload: dict) -> list[ZernioEvent]:
 
 def _parse_received(base: ZernioEvent, message: dict, sender: dict, payload: dict) -> ZernioEvent:
     """Парсит message.received — входящее от клиента."""
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    if metadata.get("standby") is True:
-        logger.info("Zernio: message.received в режиме standby пропущено")
-        base.is_from_business = True  # чтобы пропустить в вебхуке
-        return base
-
-    # Определить, от бизнеса ли сообщение (бизнес-номер будет проверяться в main.py)
-    # Пока ставим флаг, основная проверка — в webhook handler
     text = str(message.get("text") or "").strip()
-    content_kind = _content_kind(message, text)
+    content_kind, media_url, media_mime, media_caption = _extract_content_and_media(message, text)
 
     base.inbound = InboundMessage(
         phone=_sender_key(sender),
@@ -134,6 +163,9 @@ def _parse_received(base: ZernioEvent, message: dict, sender: dict, payload: dic
         phone_number_id=base.account_id,
         conversation_id=base.conversation_id,
         account_id=base.account_id,
+        media_url=media_url,
+        media_mime=media_mime,
+        media_caption=media_caption,
     )
     return base
 
@@ -183,13 +215,34 @@ def _sender_key(sender: dict) -> str:
     return bsuid or sender_id
 
 
-def _content_kind(message: dict, text: str) -> str:
-    """Тип контента: text для текста, иначе тип вложения или unknown."""
-    if text:
-        return "text"
+def _extract_content_and_media(message: dict, text: str) -> tuple[str, str, str, str]:
+    """Извлекает (content_kind, media_url, media_mime, media_caption)."""
     attachments = message.get("attachments")
-    if isinstance(attachments, list):
+    if isinstance(attachments, list) and attachments:
         for attachment in attachments:
-            if isinstance(attachment, dict) and attachment.get("type"):
-                return str(attachment["type"]).strip().lower() or "unknown"
-    return "unknown"
+            if isinstance(attachment, dict):
+                raw_type = str(attachment.get("type") or "").strip().lower()
+                url = str(attachment.get("url") or attachment.get("link") or "").strip()
+                mime = str(attachment.get("mimeType") or attachment.get("mime_type") or "").strip()
+                caption = str(attachment.get("caption") or text or "").strip()
+                # Нормализуем тип контента: voice/audio, image, video, document
+                if raw_type in ("voice", "audio"):
+                    kind = "voice" if raw_type == "voice" else "audio"
+                elif raw_type in ("image", "photo"):
+                    kind = "image"
+                elif raw_type in ("video",):
+                    kind = "video"
+                elif raw_type in ("document", "file"):
+                    kind = "document"
+                else:
+                    kind = raw_type or "unknown"
+                return kind, url, mime, caption
+    if text:
+        return "text", "", "", ""
+    return "unknown", "", "", ""
+
+
+def _content_kind(message: dict, text: str) -> str:
+    """Для обратной совместимости."""
+    kind, _, _, _ = _extract_content_and_media(message, text)
+    return kind

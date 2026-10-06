@@ -56,13 +56,14 @@ from pathlib import Path
 
 import yaml
 from fastapi import File, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.clients import is_valid_client_id, validate_tenant_config
 from config.settings import Settings
 from storage import (
     list_conversations,
+    get_message,
     get_messages,
     create_conversation,
     get_conversation,
@@ -72,6 +73,7 @@ from storage import (
     mark_read,
     add_message,
 )
+
 from whatsapp.meta_client import ABOUT_MAX_LENGTH, MetaWhatsAppClient
 from whatsapp.errors import MessagingError, MessagingTimeout
 from whatsapp.telegram_client import TelegramClient, TelegramError, TelegramTimeout, webhook_url
@@ -443,18 +445,26 @@ def _authorize(settings: Settings, request: Request, clients_dir: Path,
     401 — заголовков с токеном нет вовсе; 403 — токен был, но не подошёл
     (не раскрываем, какая именно из проверок провалилась).
     """
-    admin_header = request.headers.get(HEADER_ADMIN, "")
-    client_header = request.headers.get(HEADER_CLIENT, "")
+    admin_header = (
+        request.headers.get(HEADER_ADMIN, "")
+        or request.query_params.get("admin_token", "")
+        or request.query_params.get("token", "")
+    )
+    client_header = (
+        request.headers.get(HEADER_CLIENT, "")
+        or request.query_params.get("client_token", "")
+        or request.query_params.get("token", "")
+    )
     if settings.admin_token and tokens_equal(admin_header, settings.admin_token):
         return "admin", None
     if pid and client_header:
         expected_hash = _management_token_of(clients_dir, pid)
         if expected_hash and verify_token_hash(client_header, expected_hash):
             return "client", None
-            return "client", None
     if admin_header or client_header:
         return None, 403
     return None, 401
+
 
 
 def _atomic_write(path: Path, cfg: dict) -> None:
@@ -1516,9 +1526,98 @@ def register_admin_api(app, settings: Settings, state) -> None:
         msgs = get_messages(cid, before=before, limit=limit)
         return {"messages": msgs, "count": len(msgs)}
 
+    @app.get("/admin/clients/{pid}/conversations/{cid}/messages/{mid}/media")
+    async def get_message_media(pid: str, cid: str, mid: int, request: Request):
+        """Отдать медиафайл сообщения (аудио/фото)."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+
+        msg = get_message(mid)
+        if not msg or msg.get("conversation_id") != cid:
+            return JSONResponse(status_code=404, content={"error": "сообщение не найдено"})
+
+        media_path = msg.get("media_path")
+        media_status = msg.get("media_status")
+        if media_status == "expired" or not media_path:
+            return JSONResponse(status_code=404, content={"error": "Файл удалён по истечении срока хранения"})
+
+        if not os.path.exists(media_path):
+            return JSONResponse(status_code=404, content={"error": "Файл не найден на сервере"})
+
+        return FileResponse(media_path, media_type=msg.get("media_mime") or "application/octet-stream")
+
+    @app.post("/admin/clients/{pid}/conversations/{cid}/messages/{mid}/retry-media")
+    async def retry_message_media(pid: str, cid: str, mid: int, request: Request):
+        """Повторить расшифровку медиафайла при media_status == 'failed'."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        conv = get_conversation(cid)
+        if not _check_conv_ownership(conv, _conversation_client_key(clients_dir, pid)):
+            return JSONResponse(status_code=404, content={"error": "диалог не найден"})
+
+        msg = get_message(mid)
+        if not msg or msg.get("conversation_id") != cid:
+            return JSONResponse(status_code=404, content={"error": "сообщение не найдено"})
+
+        media_path = msg.get("media_path")
+        if not media_path or not os.path.exists(media_path):
+            return JSONResponse(status_code=404, content={"error": "Исходный файл не найден на сервере"})
+
+        bundle = state.tenants.get(pid)
+        t_settings = bundle.settings if bundle else settings
+
+        content_kind = msg.get("content_kind")
+        from services.media import transcribe_audio, describe_image
+        with open(media_path, "rb") as f:
+            data = f.read()
+
+        try:
+            if content_kind in ("voice", "audio"):
+                hint = f"{t_settings.business_name}. {t_settings.knowledge_base[:300]}"
+                res = await transcribe_audio(
+                    data=data,
+                    mime=msg.get("media_mime") or "audio/ogg",
+                    language=t_settings.language,
+                    hint=hint,
+                    settings=t_settings,
+                    retry=False,
+                )
+                text = f"[Голосовое сообщение] {res.text.strip()}"
+            elif content_kind in ("image", "photo"):
+                res = await describe_image(
+                    data=data,
+                    mime=msg.get("media_mime") or "image/jpeg",
+                    caption="",
+                    business_name=t_settings.business_name,
+                    settings=t_settings,
+                    retry=False,
+                )
+                text = f"[Фото] Описание: {res.text.strip()}"
+            else:
+                return JSONResponse(status_code=400, content={"error": "Неподдерживаемый тип медиа для расшифровки"})
+
+            from storage.db import execute
+            execute(
+                """
+                UPDATE messages
+                SET text = ?, media_status = 'ok', media_duration_s = ?, media_model = ?, media_cost = ?
+                WHERE id = ?
+                """,
+                (text, res.duration_s, res.model, res.cost, mid),
+            )
+            return {"ok": True, "text": text}
+        except Exception as exc:
+            logger.exception("Ошибка повторной расшифровки медиа (%d)", mid)
+            return JSONResponse(status_code=502, content={"error": f"Ошибка расшифровки: {exc}"})
 
     @app.post("/admin/clients/{pid}/conversations/{cid}/messages")
     async def send_message_in_conversation(pid: str, cid: str, request: Request):
+
         """Отправить сообщение от менеджера в диалог.
         Тело: {"text": "...", "idempotency_key": "..."}
         Возвращает 409 window_closed, если 24-часовое окно закрыто.

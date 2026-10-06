@@ -83,7 +83,7 @@ llm:
   temperature: 0.6
   max_tokens: 3500
   timeout_seconds: 15
-  reasoning_effort: ""
+  reasoning_effort: "medium"
 
 # ТОКЕН ЭТОЙ WABA (System User с доступом к WhatsApp Account клиента).
 # Только для provider: wa. Оставьте пустым, чтобы использовать глобальный
@@ -106,3 +106,16 @@ fallback_reply_ru: ""
 fallback_reply_kk: ""
 timeout_reply_ru: ""
 timeout_reply_kk: ""
+
+# Флаги функционала
+features:
+  media: false  # включить распознавание голосовых (Whisper) и фото (Vision) для Zernio
+
+# Настройки медиа и лимиты (действуют при features.media: true)
+media:
+  audio: true           # распознавать голосовые сообщения
+  image: true           # распознавать фотографии
+  max_audio_seconds: 120 # максимум секунд в одном аудио
+  max_image_mb: 8       # максимум МБ для одного изображения
+  daily_limit: 50       # максимум медиафайлов в сутки с одного номера
+

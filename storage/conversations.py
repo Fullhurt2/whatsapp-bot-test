@@ -82,27 +82,38 @@ def list_conversations(
     Список диалогов клиента с фильтрами и пагинацией.
     Сортировка: по last_message_at DESC.
     """
-    sql = "SELECT * FROM conversations WHERE client_key = ?"
+    sql = """
+        SELECT c.*,
+               m.text AS last_message_text,
+               m.content_kind AS last_message_content_kind,
+               m.media_duration_s AS last_message_duration_s
+        FROM conversations c
+        LEFT JOIN messages m ON m.id = (
+            SELECT id FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1
+        )
+        WHERE c.client_key = ?
+    """
     params = [client_key]
 
     if status:
-        sql += " AND status = ?"
+        sql += " AND c.status = ?"
         params.append(status)
 
     if q:
-        sql += " AND (contact_name LIKE ? OR contact_phone LIKE ?)"
+        sql += " AND (c.contact_name LIKE ? OR c.contact_phone LIKE ?)"
         like_q = f"%{q}%"
         params.extend([like_q, like_q])
 
     if since:
-        sql += " AND last_message_at > ?"
+        sql += " AND c.last_message_at > ?"
         params.append(since)
 
     if cursor:
-        sql += " AND last_message_at < ?"
+        sql += " AND c.last_message_at < ?"
         params.append(cursor)
 
-    sql += " ORDER BY last_message_at DESC LIMIT ?"
+    sql += " ORDER BY c.last_message_at DESC LIMIT ?"
+
     params.append(limit)
 
     rows = fetchall(sql, tuple(params))

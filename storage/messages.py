@@ -18,6 +18,13 @@ def add_message(
     tokens_out: Optional[int] = None,
     latency_ms: Optional[int] = None,
     answer_kind: Optional[str] = None,  # 'kb' | 'handoff' | 'no_answer'
+    media_path: Optional[str] = None,
+    media_mime: Optional[str] = None,
+    media_duration_s: Optional[float] = None,
+    media_size: Optional[int] = None,
+    media_status: Optional[str] = None,  # 'ok' | 'failed' | 'skipped' | 'expired'
+    media_model: Optional[str] = None,
+    media_cost: Optional[float] = None,
 ) -> int:
     """
     Добавить сообщение в диалог. Возвращает message_id (autoincrement).
@@ -30,11 +37,15 @@ def add_message(
         cursor = conn.execute(
             """
             INSERT INTO messages (conversation_id, role, text, content_kind, provider_message_id,
-                                  delivery_status, tokens_in, tokens_out, latency_ms, answer_kind, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  delivery_status, tokens_in, tokens_out, latency_ms, answer_kind,
+                                  media_path, media_mime, media_duration_s, media_size,
+                                  media_status, media_model, media_cost, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (conversation_id, role, text, content_kind, provider_message_id,
-             delivery_status, tokens_in, tokens_out, latency_ms, answer_kind, now),
+             delivery_status, tokens_in, tokens_out, latency_ms, answer_kind,
+             media_path, media_mime, media_duration_s, media_size,
+             media_status, media_model, media_cost, now),
         )
         msg_id = cursor.lastrowid
 
@@ -289,3 +300,34 @@ def cleanup_old_seen_events(days: int = 7) -> int:
         (f"-{days} days",),
     )
     return result.rowcount
+
+
+def cleanup_expired_media(days: int = 30) -> int:
+    """
+    Удаляет физические медиафайлы старше N дней и обновляет media_status на 'expired'.
+    Текст расшифровки сохраняется.
+    Возвращает количество очищенных записей.
+    """
+    from pathlib import Path
+    rows = fetchall(
+        """
+        SELECT id, media_path FROM messages
+        WHERE media_path IS NOT NULL
+          AND media_status != 'expired'
+          AND created_at < datetime('now', ?)
+        """,
+        (f"-{days} days",),
+    )
+    count = 0
+    for row in rows:
+        path_str = row["media_path"]
+        if path_str:
+            try:
+                p = Path(path_str)
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        execute("UPDATE messages SET media_status = 'expired' WHERE id = ?", (row["id"],))
+        count += 1
+    return count
