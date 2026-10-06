@@ -194,6 +194,8 @@ def main():
     from main import create_app
 
     tmp = Path(tempfile.mkdtemp(prefix="bot_clients_"))
+    old_db = os.environ.get("JAUAP_DB_PATH")
+    os.environ["JAUAP_DB_PATH"] = str(tmp / "test.db")
     log = LogCapture()
     logging.getLogger().addHandler(log)
     logging.getLogger().setLevel(logging.WARNING)
@@ -319,6 +321,10 @@ def main():
                 "hub.challenge": "1"})
             check("неверный verify_token -> 403", r.status_code == 403)
     finally:
+        if old_db is not None:
+            os.environ["JAUAP_DB_PATH"] = old_db
+        else:
+            os.environ.pop("JAUAP_DB_PATH", None)
         shutil.rmtree(tmp, ignore_errors=True)
 
     print(f"\nИТОГО: passed={passed}, failed={failed}")

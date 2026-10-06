@@ -202,11 +202,8 @@ class Settings:
     def feature(self, name: str) -> bool:
         """Включена ли фича.
 
-        Для 'media' по умолчанию False (согласно ТЗ).
-        Для остальных фич отсутствующий флаг = True, если не задан явно.
+        По умолчанию True, если не выключена явно в features: {<name>: false}.
         """
-        if name == "media":
-            return bool(self.features.get("media", False))
         return bool(self.features.get(name, True))
 
     def fallback_reply(self, lang: str = "ru") -> str:
@@ -362,7 +359,7 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         # Админ-API (панель /admin): полный доступ к clients/*.yaml.
         # Не обязателен — без него админ-роуты просто не регистрируются.
         admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
-        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
         transcribe_base_url=os.getenv("TRANSCRIBE_BASE_URL", "").strip().rstrip("/") or "https://api.openai.com/v1",
         transcribe_model=os.getenv("TRANSCRIBE_MODEL", "").strip() or "whisper-1",
         vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
@@ -522,7 +519,7 @@ def get_settings() -> Settings:
         fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
         timeout_reply_kk=str(cfg.get("timeout_reply_kk") or "").strip(),
-        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
         transcribe_base_url=os.getenv("TRANSCRIBE_BASE_URL", "").strip().rstrip("/") or "https://api.openai.com/v1",
         transcribe_model=os.getenv("TRANSCRIBE_MODEL", "").strip() or "whisper-1",
         vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),

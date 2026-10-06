@@ -125,6 +125,8 @@ CLIENT_EDITABLE_FIELDS = (
     "fallback_reply_kk",
     "timeout_reply_ru",
     "timeout_reply_kk",
+    "media",
+    "features",
 )
 
 HISTORY_DIR = ".history"
@@ -134,11 +136,9 @@ MAX_BODY_BYTES = 256 * 1024  # база знаний бывает большой
 
 # --- профиль WhatsApp (живёт в Meta, а не в clients/*.yaml) ------------------
 
-# Поля, которые панель показывает в ответе GET профиля. vertical Meta тоже
-# отдаёт, но через API он не меняется и в панели не нужен; photo_url — ссылка
-# на текущий аватар (пустая, если номера с фото нет).
+# Поля, которые панель показывает в ответе GET профиля.
 PROFILE_RESPONSE_FIELDS = ("about", "description", "email", "websites", "address",
-                           "photo_url")
+                           "vertical", "photo_url")
 
 # Поля, которые PATCH умеет применять (display name через API не меняется).
 PROFILE_WRITABLE_FIELDS = ("about", "description", "email", "websites", "address",
@@ -1890,7 +1890,6 @@ def register_admin_api(app, settings: Settings, state) -> None:
         cfg = _read_cfg(path) or {}
         old_kb = str(cfg.get("knowledge_base") or "").strip()
         new_kb = _append_answers_to_kb(old_kb, [question], answer)
-        new_kb = (old_kb + "\n\n---\n\n" + entry).strip() if old_kb else entry
         _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
                              "admin" if role == "admin" else f"client:{pid}",
                              "unanswered_answer", state)
@@ -1937,15 +1936,35 @@ def register_admin_api(app, settings: Settings, state) -> None:
         return {"ok": True, "updated_kb": True}
 
 
+    @app.post("/admin/clients/{pid}/unanswered/question/{question_id}/ignore")
+    async def ignore_unanswered_question(pid: str, question_id: int, request: Request):
+        """Скрыть (игнорировать) один несгруппированный вопрос."""
+        role, error = _authorize(settings, request, clients_dir, pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+        from storage import get_unanswered_question, mark_question_ignored
+        db_key = _conversation_client_key(clients_dir, pid)
+        question = get_unanswered_question(question_id)
+        if not question or question.get("client_key") != db_key:
+            return JSONResponse(status_code=404, content={"error": "вопрос не найден"})
+        mark_question_ignored(question_id)
+        return {"ok": True}
+
+
     @app.post("/admin/clients/{pid}/unanswered/{group_id}/ignore")
     async def ignore_unanswered(pid: str, group_id: int, request: Request):
         """Скрыть группу вопросов."""
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
-        from storage import update_group_status
-        if not update_group_status(group_id, "ignored"):
+        from storage import get_unanswered_group, update_group_status
+        from storage.db import execute
+        db_key = _conversation_client_key(clients_dir, pid)
+        group = get_unanswered_group(group_id)
+        if not group or group.get("client_key") != db_key:
             return JSONResponse(status_code=404, content={"error": "группа не найдена"})
+        update_group_status(group_id, "ignored")
+        execute("UPDATE unanswered_questions SET status = 'ignored' WHERE group_id = ? AND status = 'new'", (group_id,))
         return {"ok": True}
 
 

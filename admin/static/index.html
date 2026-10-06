@@ -361,6 +361,7 @@
           <button class="tab-btn hidden" id="tabTelegramBtn" data-tab="telegram" onclick="switchTab('telegram')">Telegram</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
+          <button class="tab-btn" data-tab="media" onclick="switchTab('media')">Медиа</button>
           <button class="tab-btn hidden" id="tabProfileBtn" data-tab="profile" onclick="switchTab('profile')">Профиль</button>
           <button class="tab-btn hidden" id="tabAdminBtn" data-tab="admin" onclick="switchTab('admin')">Служебное</button>
         </nav>
@@ -429,8 +430,9 @@
             <div id="uaQuestions"></div>
             <label for="uaAnswer">Ответ менеджера — допишется в базу знаний</label>
             <textarea id="uaAnswer" rows="3" placeholder="Например: маникюр с покрытием — 4500 ₸, запись за 1 день."></textarea>
-            <p>
+            <p style="display:flex;gap:8px;align-items:center;">
               <button type="button" class="btn btn-primary" id="uaSaveBtn" onclick="answerUnanswered()">Дописать в базу знаний</button>
+              <button type="button" class="btn btn-ghost" id="uaIgnoreBtn" onclick="ignoreUnansweredGroup()" style="color:var(--danger)">Скрыть группу</button>
               <button type="button" class="btn btn-ghost" onclick="closeUaDetail()">Назад к списку</button>
             </p>
             <div class="status" id="uaDetailStatus" role="status"></div>
@@ -533,6 +535,49 @@
             <textarea id="f_timeout_reply_ru" class="auto-resize" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
             <label>… по-казахски</label><textarea id="f_timeout_reply_kk" class="auto-resize"></textarea>
           </details>
+        </section>
+
+        <section class="tab-panel hidden" id="tab-media">
+          <div class="section-title">Распознавание медиа (голосовые и фото)</div>
+          <div class="hint">Бот распознаёт голосовые сообщения клиентов через Whisper и изображения (прайсы, фото ногтей, товары) через Vision-модель.</div>
+
+          <div style="margin: 16px 0;">
+            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+              <input type="checkbox" id="f_media_audio" checked style="width:auto;min-height:auto;">
+              Принимать и распознавать голосовые сообщения (аудио)
+            </label>
+            <div class="hint" style="margin-left:24px;">Голосовое переводится в текст и передаётся в LLM как [Голосовое сообщение] &lt;текст&gt;.</div>
+          </div>
+
+          <div style="margin: 16px 0;">
+            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+              <input type="checkbox" id="f_media_image" checked style="width:auto;min-height:auto;">
+              Принимать и распознавать фотографии
+            </label>
+            <div class="hint" style="margin-left:24px;">Vision-модель описывает фото и дословно переписывает текст (прайс-листы, вывески).</div>
+          </div>
+
+          <div class="section-title">Ограничения и лимиты</div>
+          <div class="row">
+            <div>
+              <label for="f_media_max_audio_seconds">Макс. длительность аудио (секунды)</label>
+              <input id="f_media_max_audio_seconds" type="number" min="10" max="600" value="120">
+              <div class="hint">По умолчанию 120 с (2 мин). Длинные аудио бот попросит прислать текстом.</div>
+            </div>
+            <div>
+              <label for="f_media_max_image_mb">Макс. размер фото (МБ)</label>
+              <input id="f_media_max_image_mb" type="number" min="1" max="50" value="8">
+              <div class="hint">По умолчанию 8 МБ. Большие файлы бот отклонит без вызова API.</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="f_media_daily_limit">Дневной лимит медиа на клиента</label>
+              <input id="f_media_daily_limit" type="number" min="1" max="1000" value="50">
+              <div class="hint">Лимит медиасообщений в день с одного номера (защита от спама).</div>
+            </div>
+          </div>
         </section>
 
         <section class="tab-panel hidden" id="tab-profile">
@@ -931,6 +976,13 @@ async function openEditor(pid) {
   $("f_llm_max_tokens").value = llm.max_tokens != null ? llm.max_tokens : "";
   $("f_llm_timeout_seconds").value = llm.timeout_seconds != null ? llm.timeout_seconds : "";
   $("f_llm_reasoning_effort").value = llm.reasoning_effort != null ? llm.reasoning_effort : "";
+
+  const media = data.media || {};
+  $("f_media_audio").checked = media.audio !== false;
+  $("f_media_image").checked = media.image !== false;
+  $("f_media_max_audio_seconds").value = media.max_audio_seconds != null ? media.max_audio_seconds : 120;
+  $("f_media_max_image_mb").value = media.max_image_mb != null ? media.max_image_mb : 8;
+  $("f_media_daily_limit").value = media.daily_limit != null ? media.daily_limit : 50;
   show("tabAdminBtn", isAdmin);
   show("deleteBtn", isAdmin);
   show("backBtn", isAdmin);
@@ -1008,6 +1060,13 @@ function collectForm() {
     fallback_reply_kk: value("f_fallback_reply_kk"),
     timeout_reply_ru: value("f_timeout_reply_ru"),
     timeout_reply_kk: value("f_timeout_reply_kk"),
+    media: {
+      audio: Boolean($("f_media_audio") ? $("f_media_audio").checked : true),
+      image: Boolean($("f_media_image") ? $("f_media_image").checked : true),
+      max_audio_seconds: parseInt(value("f_media_max_audio_seconds"), 10) || 120,
+      max_image_mb: parseInt(value("f_media_max_image_mb"), 10) || 8,
+      daily_limit: parseInt(value("f_media_daily_limit"), 10) || 50,
+    },
   };
   if (role === "admin") {
     config.management_token = value("f_management_token").trim();
@@ -1269,12 +1328,6 @@ async function saveProfile() {
     vertical: $("f_vertical").value.trim(),
     address: $("f_address").value.trim(),
   };
-  // Remove empty fields
-  Object.keys(payload).forEach(k => { if (!payload[k]) delete payload[k]; });
-  if (Object.keys(payload).length === 0) {
-    status($("profileStatus"), "Нечего сохранять", true);
-    return;
-  }
   const saveBtn = document.querySelector("#tab-profile .btn-primary");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Сохраняем…"; }
   try {
@@ -1282,6 +1335,7 @@ async function saveProfile() {
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
     if (!ok) { status($("profileStatus"), humanError(code, data), true); return; }
     status($("profileStatus"), "Профиль сохранён", false);
+    loadProfile();
   } catch (e) {
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
     status($("profileStatus"), "Ошибка: " + e.message, true);
@@ -1711,6 +1765,20 @@ let uaGroups = [];
 let uaUngrouped = [];
 let uaOpenGroupId = null;
 
+function uaStatusBadge(st) {
+  const s = String(st || "").toLowerCase();
+  if (s === "active" || s === "new") {
+    return '<span class="provider-badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd">Без ответа</span>';
+  }
+  if (s === "answered") {
+    return '<span class="provider-badge" style="background:#dcfce7;color:#15803d;border:1px solid #bbf7d0">Отвечен</span>';
+  }
+  if (s === "ignored") {
+    return '<span class="provider-badge" style="background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1">Скрыт</span>';
+  }
+  return '<span class="provider-badge">' + esc(st) + '</span>';
+}
+
 async function loadUnanswered() {
   status("uaStatusLine", "Загружаем…");
   const filter = $("uaStatus").value;
@@ -1730,12 +1798,13 @@ async function loadUnanswered() {
     ? '<div class="section-title">Отдельные вопросы</div>' + uaUngrouped.map((q) =>
         '<div class="ua-row" data-qid="' + q.id + '">' +
         '<div class="ua-row-head"><span>' + esc(q.question) + "</span>" +
-        '<span class="provider-badge">' + esc(q.status) + "</span></div>" +
+        uaStatusBadge(q.status) + "</div>" +
         '<div class="chat-conv-sub">' + esc(fmtChatTime(q.created_at)) + "</div>" +
         '<div class="row" style="margin-top:8px">' +
         '<input class="ua-q-answer" data-qid="' + q.id + '" placeholder="Ответ — попадёт в базу знаний">' +
-        '<div style="flex:0 0 auto"><button type="button" class="btn btn-primary btn-sm ua-q-save" ' +
-        'data-qid="' + q.id + '">Сохранить</button></div>' +
+        '<div style="flex:0 0 auto;display:flex;gap:6px;"><button type="button" class="btn btn-primary btn-sm ua-q-save" ' +
+        'data-qid="' + q.id + '">Сохранить</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm ua-q-ignore" data-qid="' + q.id + '" title="Скрыть вопрос">Скрыть</button></div>' +
         "</div></div>").join("")
     : "";
 
@@ -1744,7 +1813,7 @@ async function loadUnanswered() {
       const count = (g.question_ids || []).length;
       return '<div class="ua-row' + (g.id === uaOpenGroupId ? " active" : "") + '" data-gid="' + g.id + '">' +
         '<div class="ua-row-head"><span>' + esc(g.name || "Без названия") + "</span>" +
-        '<span class="provider-badge">' + esc(g.status) + "</span></div>" +
+        uaStatusBadge(g.status) + "</div>" +
         '<div class="chat-conv-sub">вопросов: ' + count + " · " + esc(fmtChatTime(g.updated_at || g.created_at)) + "</div></div>";
     }).join("");
   }
@@ -1760,6 +1829,12 @@ async function loadUnanswered() {
       answerSingleQuestion(Number(btn.dataset.qid));
     };
   });
+  box.querySelectorAll(".ua-q-ignore").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      ignoreSingleQuestion(Number(btn.dataset.qid));
+    };
+  });
 }
 
 async function answerSingleQuestion(questionId) {
@@ -1769,6 +1844,13 @@ async function answerSingleQuestion(questionId) {
   const { ok, code, data } = await chatApi("POST", "/unanswered/question/" + questionId + "/answer", { answer: answer });
   if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
   status("uaStatusLine", "Ответ добавлен в базу знаний — бот ответит на такой вопрос сам.", false);
+  loadUnanswered();
+}
+
+async function ignoreSingleQuestion(questionId) {
+  const { ok, code, data } = await chatApi("POST", "/unanswered/question/" + questionId + "/ignore");
+  if (!ok) { status("uaStatusLine", humanError(code, data), true); return; }
+  status("uaStatusLine", "Вопрос скрыт.", false);
   loadUnanswered();
 }
 
@@ -1812,6 +1894,18 @@ async function answerUnanswered() {
   if (!ok) { status("uaDetailStatus", humanError(code, data), true); return; }
   closeUaDetail();
   status("uaStatusLine", "Ответ добавлен в базу знаний — бот ответит на такие вопросы сам.", false);
+  loadUnanswered();
+}
+
+async function ignoreUnansweredGroup() {
+  if (!uaOpenGroupId) return;
+  const btn = $("uaIgnoreBtn");
+  if (btn) btn.disabled = true;
+  const { ok, code, data } = await chatApi("POST", "/unanswered/" + uaOpenGroupId + "/ignore");
+  if (btn) btn.disabled = false;
+  if (!ok) { status("uaDetailStatus", humanError(code, data), true); return; }
+  closeUaDetail();
+  status("uaStatusLine", "Группа вопросов скрыта.", false);
   loadUnanswered();
 }
 

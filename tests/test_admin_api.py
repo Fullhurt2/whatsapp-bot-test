@@ -475,6 +475,79 @@ def test_scheduler_basic():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_unanswered_endpoints():
+    """Тест роутов unanswered: ответ, игнорирование вопроса и группы."""
+    from main import create_app
+    from config.settings import Settings, LLMParams
+    from storage.unanswered import add_unanswered_question, get_unanswered_question, create_unanswered_group, get_unanswered_group
+    import tempfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp(prefix="bot_ua_"))
+    write_client(tmp, PID_A, "Test", mgmt_token=MGMT_A)
+    settings = Settings(
+        messaging_provider="meta",
+        whatsapp_access_token=GLOBAL_TOKEN,
+        whatsapp_phone_number_id="",
+        meta_app_secret=APP_SECRET,
+        meta_verify_token=VERIFY_TOKEN,
+        meta_graph_version="v21.0",
+        zernio_api_key="",
+        zernio_webhook_secret="",
+        zernio_base_url="https://zernio.com/api/v1",
+        zernio_account_id="",
+        app_host="127.0.0.1",
+        app_port=8000,
+        llm_api_url="https://llm.test/v1",
+        llm_api_key="test",
+        business_name="Test",
+        tone="test",
+        language="ru",
+        knowledge_base="База знаний",
+        owner_phone=None,
+        llm=LLMParams(model="test", temperature=0.6, max_tokens=100, timeout_seconds=15),
+        clients_dir=str(tmp),
+        admin_token=ADMIN_TOKEN,
+    )
+    headers = {"X-Admin-Token": ADMIN_TOKEN, "X-Real-IP": "10.0.0.99"}
+    from admin.api import _failed_auth
+    _failed_auth.clear()
+    try:
+        app = create_app(settings)
+        with TestClient(app) as client:
+            from storage.conversations import create_conversation
+            conv = create_conversation(PID_A, "whatsapp", "+77001112233")
+            cid = conv["id"]
+
+            # 1. Игнорирование одиночного вопроса
+            qid1 = add_unanswered_question(PID_A, cid, "Сколько стоит стрижка?")
+            r = client.post(f"/admin/clients/{PID_A}/unanswered/question/{qid1}/ignore", headers=headers)
+            check("скрытие вопроса -> 200", r.status_code == 200 and r.json().get("ok") is True)
+            q1 = get_unanswered_question(qid1)
+            check("статус вопроса стал ignored", q1 and q1["status"] == "ignored")
+
+            # 2. Несуществующий вопрос -> 404
+            r = client.post(f"/admin/clients/{PID_A}/unanswered/question/999999/ignore", headers=headers)
+            check("несуществующий вопрос -> 404", r.status_code == 404)
+
+            # 3. Игнорирование группы
+            qid2 = add_unanswered_question(PID_A, cid, "Какой прайс?")
+            qid3 = add_unanswered_question(PID_A, cid, "Цены можно?")
+            gid = create_unanswered_group(PID_A, "Прайс-лист", [qid2, qid3])
+            r = client.post(f"/admin/clients/{PID_A}/unanswered/{gid}/ignore", headers=headers)
+            check("скрытие группы -> 200", r.status_code == 200 and r.json().get("ok") is True)
+            g = get_unanswered_group(gid)
+            check("статус группы стал ignored", g and g["status"] == "ignored")
+            check("вопрос qid2 в группе стал ignored", get_unanswered_question(qid2)["status"] == "ignored")
+            check("вопрос qid3 в группе стал ignored", get_unanswered_question(qid3)["status"] == "ignored")
+
+            # 4. Несуществующая группа -> 404
+            r = client.post(f"/admin/clients/{PID_A}/unanswered/999999/ignore", headers=headers)
+            check("несуществующая группа -> 404", r.status_code == 404)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check(name, cond):
     global passed, failed
     if cond:
@@ -496,5 +569,8 @@ if __name__ == "__main__":
     test_token_migration()
     print("[NEW] Scheduler basic test")
     test_scheduler_basic()
+    print("[NEW] Unanswered ignore test")
+    test_unanswered_endpoints()
     print(f"\nНОВЫЕ ТЕСТЫ ИТОГО: passed={passed}, failed={failed}")
     sys.exit(1 if failed else 0)
+

@@ -194,6 +194,7 @@ def main():
                 "about": "Кофе и десерты",
                 "email": "hello@shop.example",
                 "websites": ["https://shop.example"],
+                "vertical": "OTHER",
                 "address": "Абай 12, Алматы",
                 "photo_url": "https://pps.whatsapp.net/v/t61/avatar.jpg",
             })
@@ -241,7 +242,8 @@ def main():
             call = capture.profile_calls()[-1]
             check("PATCH с телом в Meta",
                   call["method"] == "PATCH" and call["json"] == {
-                      "description": "Кофейня на Абая 12, работаем 8:00–20:00"})
+                      "description": "Кофейня на Абая 12, работаем 8:00–20:00",
+                      "messaging_product": "whatsapp"})
             entry = audit_tail(tmp)
             check("аудит: admin/profile/description/phone_number_id",
                   entry.get("actor") == "admin" and entry.get("action") == "profile"
@@ -280,10 +282,11 @@ def main():
                       "websites": ["https://a.example", "https://b.example"],
                       "email": "hello@shop.example",
                       "description": "",
-                      "address": "Абай 12"})
+                      "address": "Абай 12",
+                      "messaging_product": "whatsapp"})
             check("в ответе и в аудите — имена полей без значений",
                   "hello@shop.example" not in json.dumps(audit_tail(tmp), ensure_ascii=False))
-            r = client.patch(profile_url, headers=admin_headers, json={"vertical": "RETAIL"})
+            r = client.patch(profile_url, headers=admin_headers, json={"unknown_field": "test"})
             check("поле вне списка -> 400", r.status_code == 400)
             r = client.patch(profile_url, headers=admin_headers, json={})
             check("пустое тело -> 400", r.status_code == 400)
