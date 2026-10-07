@@ -90,6 +90,10 @@ def _parse_value(value: dict) -> list[InboundMessage]:
             continue
 
         mtype = str(message.get("type") or "unknown")
+        if mtype in ("reaction", "sticker"):
+            logger.debug("Игнорируем служебное событие Meta: type=%s", mtype)
+            continue
+
         media_url = ""
         media_mime = ""
         media_caption = ""

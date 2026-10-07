@@ -286,6 +286,15 @@ def _resolve_owner_phone(cfg: dict) -> str | None:
     return phone
 
 
+def resolve_media_dir() -> str:
+    """Папка хранения медиафайлов: MEDIA_DIR -> RAILWAY_VOLUME_MOUNT_PATH/clients/media -> /data/clients/media."""
+    if raw := os.getenv("MEDIA_DIR", "").strip():
+        return raw
+    if vol := os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip():
+        return str(Path(vol) / "clients" / "media")
+    return "/data/clients/media"
+
+
 def resolve_clients_dir() -> Path | None:
     """Папка реестра клиентов или None — значит single-tenant (как раньше).
 
@@ -375,7 +384,7 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
         vision_api_key=os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
         vision_model=os.getenv("VISION_MODEL", "").strip() or os.getenv("LLM_MODEL", "").strip(),
-        media_dir=os.getenv("MEDIA_DIR", "/data/clients/media").strip(),
+        media_dir=resolve_media_dir(),
         media_retention_days=_int_env("MEDIA_RETENTION_DAYS", 30),
     )
     if 0 < len(settings.admin_token) < 32:
@@ -535,7 +544,7 @@ def get_settings() -> Settings:
         vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
         vision_api_key=os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
         vision_model=os.getenv("VISION_MODEL", "").strip() or model,
-        media_dir=os.getenv("MEDIA_DIR", "/data/clients/media").strip(),
+        media_dir=resolve_media_dir(),
         media_retention_days=_int_env("MEDIA_RETENTION_DAYS", 30),
         media=MediaSettings(
             audio=bool((cfg.get("media") or {}).get("audio", True)),

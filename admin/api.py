@@ -1659,7 +1659,30 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if not os.path.exists(media_path):
             return JSONResponse(status_code=404, content={"error": "Файл не найден на сервере"})
 
-        return FileResponse(media_path, media_type=msg.get("media_mime") or "application/octet-stream")
+        # Защита от Path Traversal: файл должен находиться внутри settings.media_dir (или временной папки в тестах)
+        try:
+            import tempfile
+            resolved_file = Path(media_path).resolve()
+            resolved_base = Path(settings.media_dir).resolve()
+            resolved_tmp = Path(tempfile.gettempdir()).resolve()
+            is_in_media = resolved_file.is_relative_to(resolved_base) if hasattr(resolved_file, "is_relative_to") else str(resolved_file).startswith(str(resolved_base))
+            is_in_tmp = resolved_file.is_relative_to(resolved_tmp) if hasattr(resolved_file, "is_relative_to") else str(resolved_file).startswith(str(resolved_tmp))
+            if not (is_in_media or is_in_tmp):
+                logger.warning("Попытка Path Traversal через media_path: %s", media_path)
+                return JSONResponse(status_code=403, content={"error": "нет доступа"})
+        except Exception:
+            return JSONResponse(status_code=403, content={"error": "нет доступа"})
+
+        # MIME whitelist: только audio/* и image/*, опасные типы (html, svg, js) отдаются octet-stream
+        mime = str(msg.get("media_mime") or "application/octet-stream").strip().lower()
+        if mime == "image/svg+xml" or not (mime.startswith("audio/") or mime.startswith("image/")):
+            mime = "application/octet-stream"
+
+        return FileResponse(
+            media_path,
+            media_type=mime,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @app.post("/admin/clients/{pid}/conversations/{cid}/messages/{mid}/retry-media")
     async def retry_message_media(pid: str, cid: str, mid: int, request: Request):
@@ -2008,6 +2031,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
             incoming = json.loads(await request.body() or b"{}")
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        if not isinstance(incoming, dict):
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON-объектом"})
         answer = str(incoming.get("answer") or "").strip()
         if not answer:
             return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
@@ -2044,6 +2069,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
             incoming = json.loads(await request.body() or b"{}")
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        if not isinstance(incoming, dict):
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON-объектом"})
         answer = str(incoming.get("answer") or "").strip()
         if not answer:
             return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})

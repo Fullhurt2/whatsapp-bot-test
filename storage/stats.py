@@ -129,21 +129,21 @@ def get_bot_latency_p95(client_key: str, from_date: str, to_date: str) -> float:
 
 
 def get_top_unanswered_questions(client_key: str, from_date: str, to_date: str, limit: int = 10) -> list[dict]:
-    """Топ вопросов без ответа по частоте (по группам вопросов).
+    """Топ вопросов без ответа по частоте (по группам вопросов и несгруппированным).
 
     Берём вопросы, на которые ответа ещё нет (new/ignored); answered — это
     уже закрытые вопросы, они в «без ответа» не должны попадать.
     """
     rows = fetchall(
         """
-        SELECT ug.name, COUNT(uq.id) as count, MAX(uq.created_at) as last_asked
+        SELECT COALESCE(ug.name, uq.question) as name, COUNT(uq.id) as count, MAX(uq.created_at) as last_asked
         FROM unanswered_questions uq
-        JOIN unanswered_groups ug ON uq.group_id = ug.id
+        LEFT JOIN unanswered_groups ug ON uq.group_id = ug.id
         WHERE uq.client_key = ?
           AND uq.status != 'answered'
           AND uq.created_at >= ?
           AND uq.created_at <= ?
-        GROUP BY ug.id
+        GROUP BY COALESCE(ug.id, uq.id)
         ORDER BY count DESC
         LIMIT ?
         """,
@@ -276,42 +276,57 @@ def get_media_stats(client_key: str, from_date: str, to_date: str) -> dict:
     }
 
 
-def export_stats_csv(client_key: str, from_date: str, to_date: str) -> str:
-    """Экспорт статистики в CSV (UTF-8 с BOM для Excel)."""
-    stats = get_client_stats(client_key, from_date, to_date)
+def _sanitize_csv_val(val: any) -> str:
+    """Экранирует опасные начальные символы формул Excel (=, +, -, @, \t, \r)."""
+    s = str(val) if val is not None else ""
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
 
-    lines = []
-    lines.append("Метрика,Значение")
-    lines.append(f"Период с,{from_date}")
-    lines.append(f"Период по,{to_date}")
-    lines.append(f"Диалогов,{stats['dialogues']}")
-    lines.append(f"Новых контактов,{stats['new_contacts']}")
-    lines.append(f"Всего сообщений,{stats['messages']['total']}")
-    lines.append(f"Сообщений клиентов,{stats['messages']['client']}")
-    lines.append(f"Сообщений бота,{stats['messages']['bot']}")
-    lines.append(f"Закрыто ботом (шт.),{stats['closed_by_bot']['count']}")
-    lines.append(f"Закрыто ботом (%),{stats['closed_by_bot']['percentage']}")
-    lines.append(f"Передач всего,{stats['handoffs']['total']}")
+
+def export_stats_csv(client_key: str, from_date: str, to_date: str) -> str:
+    """Экспорт статистики в CSV (UTF-8 с BOM для Excel) с защитой от Formula Injection."""
+    import csv
+    import io
+
+    stats = get_client_stats(client_key, from_date, to_date)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+
+    def row(col1, col2):
+        writer.writerow([_sanitize_csv_val(col1), _sanitize_csv_val(col2)])
+
+    row("Метрика", "Значение")
+    row("Период с", from_date)
+    row("Период по", to_date)
+    row("Диалогов", stats['dialogues'])
+    row("Новых контактов", stats['new_contacts'])
+    row("Всего сообщений", stats['messages']['total'])
+    row("Сообщений клиентов", stats['messages']['client'])
+    row("Сообщений бота", stats['messages']['bot'])
+    row("Закрыто ботом (шт.)", stats['closed_by_bot']['count'])
+    row("Закрыто ботом (%)", stats['closed_by_bot']['percentage'])
+    row("Передач всего", stats['handoffs']['total'])
     for reason, cnt in stats['handoffs']['by_reason'].items():
-        lines.append(f"Передач: {reason},{cnt}")
-    lines.append(f"Вопросов без ответа всего,{stats['unanswered']['total']}")
-    lines.append(f"Вопросов без ответа (новых),{stats['unanswered']['new_count']}")
-    lines.append(f"Вопросов без ответа (отвечено),{stats['unanswered']['answered_count']}")
-    lines.append(f"Вопросов без ответа (игнорировано),{stats['unanswered']['ignored_count']}")
-    lines.append(f"Среднее время ответа бота (мс),{stats['response_time']['avg_ms']}")
-    lines.append(f"Реакция менеджера (среднее сек.),{stats['manager_reaction']['avg_seconds']}")
-    lines.append(f"Реакция менеджера (p95 сек.),{stats['manager_reaction']['p95_seconds']}")
-    lines.append(f"Токенов в,{stats['tokens']['in']}")
-    lines.append(f"Токенов аут,{stats['tokens']['out']}")
+        row(f"Передач: {reason}", cnt)
+    row("Вопросов без ответа всего", stats['unanswered']['total'])
+    row("Вопросов без ответа (новых)", stats['unanswered']['new_count'])
+    row("Вопросов без ответа (отвечено)", stats['unanswered']['answered_count'])
+    row("Вопросов без ответа (игнорировано)", stats['unanswered']['ignored_count'])
+    row("Среднее время ответа бота (мс)", stats['response_time']['avg_ms'])
+    row("Реакция менеджера (среднее сек.)", stats['manager_reaction']['avg_seconds'])
+    row("Реакция менеджера (p95 сек.)", stats['manager_reaction']['p95_seconds'])
+    row("Токенов в", stats['tokens']['in'])
+    row("Токенов аут", stats['tokens']['out'])
     if "media" in stats:
-        lines.append(f"Медиа: голосовых,{stats['media']['voice']}")
-        lines.append(f"Медиа: фото,{stats['media']['image']}")
-        lines.append(f"Медиа: секунд аудио,{stats['media']['duration_s']}")
-        lines.append(f"Медиа: расход ($),{stats['media']['cost']}")
-    lines.append(f"Оценка сэкономленного времени (мин.),{stats['estimated_time_saved_minutes']}")
+        row("Медиа: голосовых", stats['media']['voice'])
+        row("Медиа: фото", stats['media']['image'])
+        row("Медиа: секунд аудио", stats['media']['duration_s'])
+        row("Медиа: расход ($)", stats['media']['cost'])
+    row("Оценка сэкономленного времени (мин.)", stats['estimated_time_saved_minutes'])
 
     # BOM для Excel
-    return "\ufeff" + "\n".join(lines)
+    return "\ufeff" + out.getvalue()
 
 
 

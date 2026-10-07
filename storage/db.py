@@ -78,18 +78,29 @@ def transaction():
             conn.execute(...)
     При исключении — rollback, иначе — commit.
 
-    Вложенность поддерживается: коммит делает только внешний блок.
+    Вложенность поддерживается через SQLite SAVEPOINT:
+    внутренний блок откатывает только свой savepoint, а внешний
+    коммитит транзакцию целиком.
     """
     conn = get_connection()
     depth = getattr(_tx_local, "depth", 0)
     _tx_local.depth = depth + 1
+    sp_name = f"tx_sp_{depth}"
+    if depth > 0:
+        conn.execute(f"SAVEPOINT {sp_name};")
     try:
         yield conn
     except Exception:
-        conn.rollback()
+        if depth > 0:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name};")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name};")
+        else:
+            conn.rollback()
         raise
     else:
-        if depth == 0:
+        if depth > 0:
+            conn.execute(f"RELEASE SAVEPOINT {sp_name};")
+        else:
             conn.commit()
     finally:
         _tx_local.depth = depth

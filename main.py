@@ -259,8 +259,16 @@ class WebhookState:
                     stale.append(old)
                     logger.info("Клиент отключён | phone_number_id=%s", pid)
             self.tenants = new_bundles
+
+        async def _graceful_close(b: TenantBundle) -> None:
+            try:
+                await asyncio.sleep(10.0)
+                await b.close()
+            except Exception:
+                pass
+
         for bundle in stale:
-            await bundle.close()
+            asyncio.create_task(_graceful_close(bundle))
 
     # --- маршрутизация -----------------------------------------------------------
 
@@ -1140,6 +1148,14 @@ def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: We
             logger.warning("Telegram-owner вебхук с невалидным JSON: %d байт", len(raw_body))
             return {"ok": True}
 
+        # Дедупликация через БД
+        update_id = payload.get("update_id")
+        if update_id is not None:
+            from storage import check_and_add
+            if not check_and_add(f"tg_owner_{update_id}"):
+                logger.debug("Дубликат update_id Telegram-owner: %s", update_id)
+                return {"ok": True}
+
         message = payload.get("message")
         if not isinstance(message, dict):
             return {"ok": True}
@@ -1191,6 +1207,11 @@ def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: We
                 else:
                     await _owner_bot_reply(settings, chat_id,
                                            "Этот чат уже привязан — ничего менять не нужно.")
+            else:
+                await _owner_bot_reply(
+                    settings, chat_id,
+                    "👋 Привет! Чтобы подключить уведомления бота, перейдите в панель управления и нажмите «Подключить Telegram» — бот откроется со специальным кодом привязки.",
+                )
 
         elif text.strip() == "/stop":
             # Отвязка чата от всех клиентов, где он привязан.
