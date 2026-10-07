@@ -565,7 +565,31 @@ def test_all():
     assert "isinstance(incoming, dict)" in src_admin, "API должен валидировать, что тело JSON является объектом (dict)"
     print("[OK] 35. answer_unanswered валидирует JSON-объект (dict)")
 
+    # 36. Проверка N1 (Second-pass): migrate_tokens поддерживает pbkdf2 и не дублирует хэширование
+    from scripts.migrate_tokens import is_hashed_token
+    assert is_hashed_token("sha256:abcd") is True
+    assert is_hashed_token("pbkdf2:sha256:100000$salt$hash") is True
+    assert is_hashed_token("plain_secret_123") is False
+    print("[OK] 36. migrate_tokens.py распознает pbkdf2 и sha256 токены")
+
+    # 37. Проверка N2 (Second-pass): verify_meta_signature устойчив к не-ASCII символам в заголовке
+    from whatsapp.meta_security import verify_meta_signature
+    body_test = b"test payload"
+    sec_test = "secret_key"
+    import hmac, hashlib
+    expected_sig = "sha256=" + hmac.new(sec_test.encode(), body_test, hashlib.sha256).hexdigest()
+    assert verify_meta_signature(sec_test, body_test, expected_sig) is True
+    # Проверяем, что не-ASCII заголовок не роняет verify_meta_signature с TypeError/ValueError
+    assert verify_meta_signature(sec_test, body_test, "sha256=invalid\xff\xfe") is False
+    print("[OK] 37. verify_meta_signature корректно сравнивает байты и устойчив к не-ASCII")
+
+    # 38. Проверка N3 (Second-pass): wa_onboard.py использует актуальную версию v21.0
+    import wa_onboard
+    assert wa_onboard.DEFAULT_VERSION == "v21.0"
+    print("[OK] 38. wa_onboard.py использует валидную версию Graph API v21.0")
+
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 
 if __name__ == "__main__":
     test_all()
+

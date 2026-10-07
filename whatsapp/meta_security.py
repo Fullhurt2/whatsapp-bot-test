@@ -35,12 +35,13 @@ def verify_meta_signature(app_secret: str, raw_body: bytes, signature_header: st
     """
     if not (app_secret and signature_header and raw_body):
         return False
-    if not signature_header.startswith("sha256="):
-        return False
     expected = hmac.new(
         app_secret.encode("utf-8"), raw_body, hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(signature_header.strip(), "sha256=" + expected)
+    # Сравниваем байты: compare_digest со str падает на не-ASCII подписях.
+    provided = signature_header.strip().encode("utf-8")
+    expected_bytes = ("sha256=" + expected).encode("utf-8")
+    return hmac.compare_digest(provided, expected_bytes)
 
 
 def verify_subscription(hub_mode: str, verify_token: str, expected_token: str) -> bool:

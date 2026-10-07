@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 
 GRAPH = "https://graph.facebook.com"
-DEFAULT_VERSION = "v26.0"
+DEFAULT_VERSION = "v21.0"
 
 
 def api(method: str, path: str, token: str, params: dict | None = None,

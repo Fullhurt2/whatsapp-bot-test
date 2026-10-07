@@ -26,8 +26,8 @@ BACKUP_DIR = CLIENTS_DIR / f".migrate_backup_{datetime.now().strftime('%Y%m%d_%H
 
 
 def is_hashed_token(token: str) -> bool:
-    """Токен уже имеет префикс sha256:."""
-    return token.startswith("sha256:")
+    """Токен уже захэширован (sha256: или pbkdf2:sha256:)."""
+    return token.startswith("sha256:") or token.startswith("pbkdf2:sha256:")
 
 
 def migrate_tokens(dry_run: bool = False) -> dict:
@@ -75,9 +75,8 @@ def migrate_tokens(dry_run: bool = False) -> dict:
             stats["skipped"] += 1
             continue
 
-        # Хэшируем
-        hashed = "sha256:" + hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
-        cfg["management_token"] = hashed
+        # Хэшируем (PBKDF2 с солью)
+        cfg["management_token"] = hash_token(token)
 
         # Пишем атомарно (как в PUT /admin/clients/{pid})
         if not dry_run:
