@@ -59,6 +59,11 @@ def add_message(
                 "UPDATE conversations SET last_client_message_at = ?, unread_count = unread_count + 1 WHERE id = ?",
                 (now, conversation_id),
             )
+        elif role == "human":
+            conn.execute(
+                "UPDATE conversations SET last_human_message_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
 
     return msg_id
 

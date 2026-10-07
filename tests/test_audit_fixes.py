@@ -12,6 +12,7 @@ from storage import (
     add_message,
     get_context_for_llm,
     create_handoff,
+    get_handoff,
     get_handoffs_needing_reminder,
     execute,
 )
@@ -40,6 +41,8 @@ def test_all():
     execute("UPDATE handoffs SET notified_at = '2026-01-01T10:00:00' WHERE id = ?", (hid,))
     needing = get_handoffs_needing_reminder(hours=1)
     assert any(h["handoff_id"] == hid for h in needing), "Handoff с 'T' в notified_at должен попадать в выборку напоминаний!"
+    from storage.handoffs import resolve_handoff
+    resolve_handoff(hid)
     print("[OK] 2. Напоминания менеджерам (ISO 'T' vs SQLite ' ') работают корректно")
 
     # 3. Проверка deep merge вложенных настроек клиента
@@ -99,18 +102,19 @@ def test_all():
     assert role == "admin" and err is None, "Bearer токен должен распознаваться как админ!"
     print("[OK] 7. Авторизация по Authorization: Bearer работает корректно")
 
-    # 8. Проверка таймаута manual_since / last_message_at
+    # 8. Проверка таймаута manual_since / last_human_message_at
     from storage.conversations import get_conversations_needing_timeout_check, update_conversation_status
     conv_timeout = create_conversation("client_timeout", "wa", "+77019998877")
     update_conversation_status(conv_timeout["id"], "manual")
-    # Если manual_since 10 часов назад, но последнее сообщение было прямо сейчас, он НЕ должен попадать в таймаут 2 часа
-    execute("UPDATE conversations SET manual_since = datetime('now', '-10 hours'), last_message_at = datetime('now') WHERE id = ?", (conv_timeout["id"],))
+    # Если manual_since 10 часов назад, но оператор написал прямо сейчас, он НЕ должен попадать в таймаут 2 часа
+    execute("UPDATE conversations SET manual_since = datetime('now', '-10 hours'), last_human_message_at = datetime('now') WHERE id = ?", (conv_timeout["id"],))
     needing_timeout = get_conversations_needing_timeout_check(timeout_hours=2, client_key="client_timeout")
     assert not any(c["id"] == conv_timeout["id"] for c in needing_timeout), "Активный диалог не должен возвращаться к боту раньше времени!"
 
     # А если оба были 3 часа назад - должен попадать
-    execute("UPDATE conversations SET manual_since = datetime('now', '-5 hours'), last_message_at = datetime('now', '-3 hours') WHERE id = ?", (conv_timeout["id"],))
+    execute("UPDATE conversations SET manual_since = datetime('now', '-5 hours'), last_human_message_at = datetime('now', '-3 hours') WHERE id = ?", (conv_timeout["id"],))
     needing_timeout = get_conversations_needing_timeout_check(timeout_hours=2, client_key="client_timeout")
+    assert any(c["id"] == conv_timeout["id"] for c in needing_timeout), "Неактивный диалог должен возвращаться к боту"
     print("[OK] 8. Таймаут ручного режима корректно учитывает активность сообщений")
 
     # 9. Проверка get_manager_response_times при смешанных форматах дат (naive + aware ISO с 'Z')
@@ -258,6 +262,99 @@ def test_all():
     assert get_open_handoff(conv_m4["id"]) is not None, "Открытый handoff менеджера не должен закрываться клиентом!"
     assert len(dummy_sender.sent) == 0, "Бот не должен отвечать приветствием в диалоге с ручным режимом оператора!"
     print("[OK] 17. /start от клиента не прерывает manual-режим менеджера")
+
+    # 18. Проверка M3: notify_owner не блокирует троттлингом при неудачной отправке
+    from handlers.owner_handler import notify_owner, _notification_throttle
+    from whatsapp.errors import MessagingError
+    from unittest.mock import AsyncMock, patch
+    _notification_throttle.clear()
+    s_m3 = object.__new__(Settings)
+    object.__setattr__(s_m3, "business_name", "Shop")
+    object.__setattr__(s_m3, "owner_phone", "")
+    object.__setattr__(s_m3, "owner_telegram_chat_id", "12345")
+    object.__setattr__(s_m3, "notify_channels", ["telegram"])
+    object.__setattr__(s_m3, "notify_on_no_answer", "notify")
+    object.__setattr__(s_m3, "features", {"telegram_notify": True})
+    
+    with patch("handlers.owner_handler._send_telegram_notification", side_effect=MessagingError("Network fail")):
+        res = asyncio.run(notify_owner(dummy_sender, s_m3, "+79991112233", "User", "Help", "complaint", conversation_id="conv_m3"))
+        assert res is False, "Должен вернуть False при ошибке доставки"
+        assert ("conv_m3", "complaint") not in _notification_throttle, "Неуспешная доставка не должна троттлиться!"
+    
+    with patch("handlers.owner_handler._send_telegram_notification", new_callable=AsyncMock) as mock_send:
+        res = asyncio.run(notify_owner(dummy_sender, s_m3, "+79991112233", "User", "Help", "complaint", conversation_id="conv_m3"))
+        assert res is True
+        assert ("conv_m3", "complaint") in _notification_throttle, "Успешная доставка должна попасть в троттлинг"
+    print("[OK] 18. notify_owner не троттлит при сбое доставки")
+
+    # 19. Проверка M5: update_conversation_status не затирает last_message_at, таймаут не блокируется клиентом
+    from storage.conversations import get_conversations_needing_timeout_check
+    conv_m5 = create_conversation("client_m5", "wa", "+77017770033")
+    execute("UPDATE conversations SET last_message_at = '2026-01-01 10:00:00' WHERE id = ?", (conv_m5["id"],))
+    update_conversation_status(conv_m5["id"], "bot")
+    conv_check = get_conversation(conv_m5["id"])
+    assert conv_check["last_message_at"] == "2026-01-01 10:00:00", "Смена статуса на bot не должна обновлять last_message_at!"
+    
+    # Переводим в manual с manual_since 10 часов назад, но клиент писал 1 минуту назад
+    update_conversation_status(conv_m5["id"], "manual")
+    execute(
+        "UPDATE conversations SET manual_since = datetime('now', '-10 hours'), last_message_at = datetime('now', '-1 minute') WHERE id = ?",
+        (conv_m5["id"],),
+    )
+    # Таймаут 5 часов
+    needing = get_conversations_needing_timeout_check(timeout_hours=5, client_key="client_m5")
+    assert any(c["id"] == conv_m5["id"] for c in needing), "Диалог с просроченным manual_since должен попадать под таймаут даже если клиент писал недавно"
+    
+    # Но если менеджер ответил 10 минут назад — диалог не должен возвращаться к боту
+    add_message(conv_m5["id"], "human", "Ответ оператора")
+    needing_after_human = get_conversations_needing_timeout_check(timeout_hours=5, client_key="client_m5")
+    assert not any(c["id"] == conv_m5["id"] for c in needing_after_human), "Диалог с недавним ответом оператора не должен таймаутиться"
+    # 20. Проверка M2: run_reminder_job фильтрует настройки и не маркирует reminded при сбое
+    from main import run_reminder_job
+    conv_m2 = create_conversation("client_m2", "wa", "+77017770044")
+    h_m2 = create_handoff(conv_m2["id"], "booking")
+    execute("UPDATE handoffs SET created_at = datetime('now', '-3 hours'), notified_at = datetime('now', '-3 hours') WHERE id = ?", (h_m2,))
+    
+    dummy_state = MagicMock(multitenant=False, sender=DummySender())
+    
+    # 20.1 notify_on_no_answer = "off"
+    s_m2 = object.__new__(Settings)
+    object.__setattr__(s_m2, "notify_on_no_answer", "off")
+    object.__setattr__(s_m2, "features", {"telegram_notify": True})
+    object.__setattr__(s_m2, "notify_channels", ["telegram"])
+    object.__setattr__(s_m2, "owner_telegram_chat_id", "12345")
+    object.__setattr__(s_m2, "public_base_url", "")
+    object.__setattr__(s_m2, "feature", lambda name: True)
+    
+    with patch("handlers.owner_handler._send_telegram_notification", new_callable=AsyncMock) as mock_send:
+        sent = asyncio.run(run_reminder_job(s_m2, dummy_state))
+        assert sent == 0
+        assert mock_send.call_count == 0
+        assert get_handoff(h_m2)["reminded_at"] is None
+        
+    # 20.2 feature("telegram_notify") = False
+    object.__setattr__(s_m2, "notify_on_no_answer", "notify")
+    object.__setattr__(s_m2, "feature", lambda name: False if name == "telegram_notify" else True)
+    with patch("handlers.owner_handler._send_telegram_notification", new_callable=AsyncMock) as mock_send:
+        sent = asyncio.run(run_reminder_job(s_m2, dummy_state))
+        assert sent == 0
+        assert mock_send.call_count == 0
+        assert get_handoff(h_m2)["reminded_at"] is None
+        
+    # 20.3 Ошибка отправки -> не вызывать mark_reminded
+    object.__setattr__(s_m2, "feature", lambda name: True)
+    with patch("handlers.owner_handler._send_telegram_notification", side_effect=Exception("TG error")):
+        sent = asyncio.run(run_reminder_job(s_m2, dummy_state))
+        assert sent == 0
+        assert get_handoff(h_m2)["reminded_at"] is None
+        
+    # 20.4 Успешная отправка -> reminded_at выставлен
+    with patch("handlers.owner_handler._send_telegram_notification", new_callable=AsyncMock) as mock_send:
+        sent = asyncio.run(run_reminder_job(s_m2, dummy_state))
+        assert sent == 1
+        assert mock_send.call_count == 1
+        assert get_handoff(h_m2)["reminded_at"] is not None
+    print("[OK] 20. reminder_job корректно проверяет настройки и доставку")
 
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 

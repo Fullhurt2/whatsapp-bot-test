@@ -343,6 +343,74 @@ class WebhookState:
         await self.sender.close()
 
 
+async def run_reminder_job(settings: Settings, state: WebhookState) -> int:
+    """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч.
+
+    Приходит ровно одно напоминание (ставится reminded_at).
+    Возвращает количество успешно отправленных напоминаний.
+    """
+    from storage import get_handoffs_needing_reminder, mark_reminded
+    handoffs = await asyncio.to_thread(get_handoffs_needing_reminder, 2)
+    sent_count = 0
+    for h in handoffs:
+        try:
+            hid = h["handoff_id"]
+            cid = h["conversation_id"]
+            ckey = h.get("client_key")
+            # Находим подходящие settings и sender
+            target_settings = settings
+            target_sender = getattr(state, "sender", None)
+            if getattr(state, "multitenant", False) and ckey:
+                bundle = state.tenants.get(ckey)
+                if bundle:
+                    target_settings = bundle.settings
+                    target_sender = bundle.sender
+                else:
+                    logger.warning("reminder_job: клиент %s не найден в state.tenants", ckey)
+                    continue
+
+            # Проверка notify_on_no_answer
+            if getattr(target_settings, "notify_on_no_answer", "silent") == "off":
+                continue
+
+            # Проверка каналов уведомлений и флага telegram_notify
+            if hasattr(target_settings, "feature") and not target_settings.feature("telegram_notify"):
+                continue
+
+            notify_channels = getattr(target_settings, "notify_channels", ["telegram"])
+            if isinstance(notify_channels, str):
+                notify_channels = [notify_channels]
+            if "telegram" not in notify_channels:
+                continue
+
+            who = f"{h.get('contact_name') or 'клиент'} ({h.get('contact_phone') or '-'})"
+            text = (
+                f"⏰ Напоминание: диалог без ответа более 2 часов!\n"
+                f"От: {who}\n"
+                f"Причина: {h.get('reason') or '-'}"
+            )
+            from handlers.owner_handler import _notify_recipients, _dialog_button, _send_telegram_notification
+            recipients = _notify_recipients(target_settings)
+            button = _dialog_button(target_settings, cid)
+            delivered = False
+            for chat_id in recipients:
+                try:
+                    await _send_telegram_notification(
+                        target_sender, target_settings, chat_id, text, button, disable_notification=False,
+                    )
+                    delivered = True
+                except Exception as err:
+                    logger.warning("Не удалось отправить напоминание в Telegram (%s): %s", chat_id, err)
+
+            if delivered:
+                await asyncio.to_thread(mark_reminded, hid)
+                sent_count += 1
+                logger.info("Напоминание отправлено по handoff_id=%s | conv_id=%s", hid, cid)
+        except Exception as e:
+            logger.exception("Ошибка в reminder_job для handoff %s: %s", h.get("handoff_id"), e)
+    return sent_count
+
+
 def create_app(settings: Settings, sender_factory: Callable | None = None) -> FastAPI:
     """Собирает приложение: вебхук активного провайдера + healthcheck.
 
@@ -467,47 +535,8 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             logger.exception("Ошибка в ежедневных задачах: %s", e)
 
     async def reminder_job():
-        """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч.
-
-        Приходит ровно одно напоминание (ставится reminded_at).
-        """
-        from storage import get_handoffs_needing_reminder, mark_reminded
-        handoffs = await asyncio.to_thread(get_handoffs_needing_reminder, 2)
-        for h in handoffs:
-            try:
-                hid = h["handoff_id"]
-                cid = h["conversation_id"]
-                ckey = h.get("client_key")
-                # Находим подходящие settings и sender
-                target_settings = settings
-                target_sender = getattr(state, "sender", None)
-                if state.multitenant and ckey:
-                    bundle = state.tenants.get(ckey)
-                    if bundle:
-                        target_settings = bundle.settings
-                        target_sender = bundle.sender
-
-                who = f"{h.get('contact_name') or 'клиент'} ({h.get('contact_phone') or '-'})"
-                text = (
-                    f"⏰ Напоминание: диалог без ответа более 2 часов!\n"
-                    f"От: {who}\n"
-                    f"Причина: {h.get('reason') or '-'}"
-                )
-                from handlers.owner_handler import _notify_recipients, _dialog_button, _send_telegram_notification
-                recipients = _notify_recipients(target_settings)
-                button = _dialog_button(target_settings, cid)
-                for chat_id in recipients:
-                    try:
-                        await _send_telegram_notification(
-                            target_sender, target_settings, chat_id, text, button, disable_notification=False,
-                        )
-                    except Exception as err:
-                        logger.warning("Не удалось отправить напоминание в Telegram (%s): %s", chat_id, err)
-
-                await asyncio.to_thread(mark_reminded, hid)
-                logger.info("Напоминание отправлено по handoff_id=%s | conv_id=%s", hid, cid)
-            except Exception as e:
-                logger.exception("Ошибка в reminder_job для handoff %s: %s", h.get("handoff_id"), e)
+        """Напоминание менеджерам каждые 15 минут: если handoff без ответа > 2ч."""
+        await run_reminder_job(settings, state)
 
     async def manual_timeout_job():
         """Автовозврат к боту: диалоги, висевшие в manual дольше таймаута.

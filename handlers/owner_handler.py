@@ -147,6 +147,8 @@ async def notify_owner(
     # Собираем доступные контакты. Для Telegram это привязки из панели плюс
     # ручной chat_id из yaml — поэтому канал считаем доступным, если есть хоть один.
     telegram_chats = _notify_recipients(settings)
+    if hasattr(settings, "feature") and not settings.feature("telegram_notify"):
+        telegram_chats = []
     has_telegram = bool(telegram_chats)
     has_whatsapp = bool(getattr(settings, "owner_phone", ""))
     
@@ -185,6 +187,7 @@ async def notify_owner(
         return False
 
     # Троттлинг: не чаще 1 уведомления на диалог за 10 минут
+    throttle_key = None
     if conversation_id:
         throttle_key = (conversation_id, reason)
         now = datetime.utcnow()
@@ -200,7 +203,6 @@ async def notify_owner(
         if last and now - last < timedelta(minutes=THROTTLE_MINUTES):
             logger.debug("Уведомление заторможено: %s", throttle_key)
             return False
-        _notification_throttle[throttle_key] = now
 
     who = f"{display_name or 'клиент'} ({client_phone})"
     text = (
@@ -255,5 +257,8 @@ async def notify_owner(
                     delivered_any = True
             except MessagingError:
                 logger.exception("Не удалось отправить уведомление в WhatsApp (%s)", phone)
+
+    if delivered_any and conversation_id and throttle_key:
+        _notification_throttle[throttle_key] = datetime.utcnow()
 
     return delivered_any

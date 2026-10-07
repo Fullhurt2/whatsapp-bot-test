@@ -142,13 +142,13 @@ def update_conversation_status(conv_id: str, status: str) -> bool:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     if status == "manual":
         result = execute(
-            "UPDATE conversations SET status = ?, manual_since = ?, last_message_at = ? WHERE id = ? AND status != ?",
-            (status, now, now, conv_id, status),
+            "UPDATE conversations SET status = ?, manual_since = ? WHERE id = ? AND status != ?",
+            (status, now, conv_id, status),
         )
     else:
         result = execute(
-            "UPDATE conversations SET status = ?, manual_since = NULL, last_message_at = ? WHERE id = ? AND status != ?",
-            (status, now, conv_id, status),
+            "UPDATE conversations SET status = ?, manual_since = NULL WHERE id = ? AND status != ?",
+            (status, conv_id, status),
         )
     return result.rowcount > 0
 
@@ -169,12 +169,17 @@ def mark_read(conv_id: str) -> None:
     )
 
 
-def update_last_message_times(conv_id: str, is_client: bool = False) -> None:
-    """Обновить last_message_at и (опционально) last_client_message_at."""
+def update_last_message_times(conv_id: str, is_client: bool = False, is_human: bool = False) -> None:
+    """Обновить last_message_at и (опционально) last_client_message_at / last_human_message_at."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     if is_client:
         execute(
             "UPDATE conversations SET last_message_at = ?, last_client_message_at = ? WHERE id = ?",
+            (now, now, conv_id),
+        )
+    elif is_human:
+        execute(
+            "UPDATE conversations SET last_message_at = ?, last_human_message_at = ? WHERE id = ?",
             (now, now, conv_id),
         )
     else:
@@ -198,7 +203,7 @@ def get_conversations_needing_timeout_check(
     sql = """
         SELECT * FROM conversations
         WHERE status = 'manual'
-          AND datetime(COALESCE(last_message_at, manual_since), ? || ' hours') < datetime('now')
+          AND datetime(COALESCE(last_human_message_at, manual_since, created_at), ? || ' hours') < datetime('now')
     """
     params: tuple = (f"+{int(timeout_hours)}",)
     if client_key:
