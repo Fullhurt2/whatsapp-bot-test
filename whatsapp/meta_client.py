@@ -28,8 +28,6 @@ from whatsapp.errors import MessagingError, MessagingTimeout
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 # Версия Graph API (переопределяется переменной META_GRAPH_VERSION в .env).
 DEFAULT_GRAPH_VERSION = "v21.0"
 

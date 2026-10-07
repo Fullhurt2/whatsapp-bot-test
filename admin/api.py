@@ -396,20 +396,16 @@ class CSPMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def mask_secret(value: str) -> str:
-    """Маска секрета для ответов API: "EAAY…ab12" (значение не раскрывается)."""
-    value = str(value or "").strip()
-    if not value:
-        return ""
-    if len(value) <= 12:
-        return "••••"
-    return f"{value[:4]}…{value[-4:]}"
-
-
 def _client_yaml_path(clients_dir: Path, pid: str) -> Path | None:
     """Текущий файл клиента (<pid>.yaml; .yml тоже находим)."""
+    pid_str = str(pid or "").strip()
+    if not pid_str or any(sep in pid_str for sep in ("/", "\\", "..")):
+        return None
+    clean_pid = Path(pid_str).name
+    if clean_pid != pid_str:
+        return None
     for suffix in (".yaml", ".yml"):
-        candidate = clients_dir / f"{pid}{suffix}"
+        candidate = clients_dir / f"{clean_pid}{suffix}"
         if candidate.is_file():
             return candidate
     return None

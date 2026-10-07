@@ -203,8 +203,14 @@ def resize_image_if_needed(image_bytes: bytes, max_side: int = 1600) -> tuple[by
     try:
         Image.MAX_IMAGE_PIXELS = 25_000_000
         with Image.open(io.BytesIO(image_bytes)) as img:
-            # Преобразуем RGBA/P/LA/CMYK в RGB для JPEG
-            if img.mode in ("RGBA", "P", "LA", "CMYK"):
+            try:
+                from PIL import ImageOps
+                img = ImageOps.exif_transpose(img) or img
+            except Exception:
+                pass
+
+            # Преобразуем любые режимы (RGBA, P, LA, CMYK, etc.) в RGB для JPEG
+            if img.mode != "RGB":
                 img = img.convert("RGB")
 
             width, height = img.size

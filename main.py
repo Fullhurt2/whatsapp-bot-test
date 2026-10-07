@@ -535,6 +535,11 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             cleaned_media = await asyncio.to_thread(cleanup_expired_media, retention_days)
             logger.info("Чистка старых медиафайлов: удалено %d файлов", cleaned_media)
 
+            # 5. Чистка просроченных кодов привязки Telegram
+            from storage import cleanup_expired_link_codes
+            deleted_codes = await asyncio.to_thread(cleanup_expired_link_codes)
+            logger.info("Чистка просроченных кодов Telegram: удалено %d записей", deleted_codes)
+
         except Exception as e:
 
             logger.exception("Ошибка в ежедневных задачах: %s", e)
