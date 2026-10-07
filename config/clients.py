@@ -246,8 +246,22 @@ def validate_tenant_config(
     else:
         owner_phone, owner_warning = _resolve_owner_phone(cfg, file_name)
         owner_chat = ""
-    if owner_warning:
-        warnings.append(owner_warning)
+    raw_triggers = cfg.get("fallback_triggers")
+    if raw_triggers is not None and not isinstance(raw_triggers, (list, tuple)):
+        problems.append("fallback_triggers должен быть списком строк, а не строкой/числом")
+
+    raw_pause = cfg.get("pause_on")
+    if raw_pause is not None and not isinstance(raw_pause, (list, tuple)):
+        problems.append("pause_on должен быть списком строк")
+
+    raw_channels = cfg.get("notify_channels")
+    if raw_channels is not None and not isinstance(raw_channels, (list, tuple)):
+        problems.append("notify_channels должен быть списком строк")
+
+    raw_media = cfg.get("media")
+    if raw_media is not None and not isinstance(raw_media, dict):
+        problems.append("media должен быть словарем параметров")
+
     if problems:
         return None, problems, warnings
 
@@ -281,19 +295,29 @@ def validate_tenant_config(
         owner_telegram_chat_id=owner_chat,
         owner_template_name=str(cfg.get("owner_template_name") or "").strip(),
         owner_template_language=str(cfg.get("owner_template_language") or "").strip(),
-        fallback_triggers=[
-            str(t).strip() for t in (cfg.get("fallback_triggers") or []) if str(t).strip()
-        ],
+        fallback_triggers=(
+            [str(t).strip() for t in cfg["fallback_triggers"] if str(t).strip()]
+            if isinstance(cfg.get("fallback_triggers"), (list, tuple))
+            else []
+        ),
         llm=llm,
         style_examples=str(cfg.get("style_examples") or "").strip(),
         config_file=file_name,
         # Ручной режим, уведомления и флаги фич — из yaml клиента, с откатом
         # на базовые настройки сервиса, если ключа нет.
-        pause_on=[str(p).strip() for p in (cfg.get("pause_on") or base.pause_on) if str(p).strip()],
+        pause_on=(
+            [str(p).strip() for p in cfg["pause_on"] if str(p).strip()]
+            if isinstance(cfg.get("pause_on"), (list, tuple))
+            else [str(p).strip() for p in (getattr(base, "pause_on", None) or []) if str(p).strip()]
+        ),
         handoff_pauses_bot=bool(cfg.get("handoff_pauses_bot", base.handoff_pauses_bot)),
         manual_timeout_hours=_int_or(cfg.get("manual_timeout_hours"), base.manual_timeout_hours),
         timezone=str(cfg.get("timezone") or base.timezone or "").strip(),
-        notify_channels=[str(c).strip() for c in (cfg.get("notify_channels") or base.notify_channels)],
+        notify_channels=(
+            [str(c).strip() for c in cfg["notify_channels"] if str(c).strip()]
+            if isinstance(cfg.get("notify_channels"), (list, tuple))
+            else [str(c).strip() for c in (getattr(base, "notify_channels", None) or []) if str(c).strip()]
+        ),
         notify_on_no_answer=str(cfg.get("notify_on_no_answer") or base.notify_on_no_answer or "").strip(),
         minutes_per_reply=_int_or(cfg.get("minutes_per_reply"), base.minutes_per_reply),
         features=_features_of(cfg, base),
@@ -302,11 +326,11 @@ def validate_tenant_config(
         timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
         timeout_reply_kk=str(cfg.get("timeout_reply_kk") or "").strip(),
         media=MediaSettings(
-            audio=bool((cfg.get("media") or {}).get("audio", getattr(base.media, "audio", True))),
-            image=bool((cfg.get("media") or {}).get("image", getattr(base.media, "image", True))),
-            max_audio_seconds=int((cfg.get("media") or {}).get("max_audio_seconds", getattr(base.media, "max_audio_seconds", 120))),
-            max_image_mb=int((cfg.get("media") or {}).get("max_image_mb", getattr(base.media, "max_image_mb", 8))),
-            daily_limit=int((cfg.get("media") or {}).get("daily_limit", getattr(base.media, "daily_limit", 50))),
+            audio=bool((cfg.get("media") if isinstance(cfg.get("media"), dict) else {}).get("audio", getattr(base.media, "audio", True))),
+            image=bool((cfg.get("media") if isinstance(cfg.get("media"), dict) else {}).get("image", getattr(base.media, "image", True))),
+            max_audio_seconds=_int_or((cfg.get("media") if isinstance(cfg.get("media"), dict) else {}).get("max_audio_seconds"), getattr(base.media, "max_audio_seconds", 120)),
+            max_image_mb=_int_or((cfg.get("media") if isinstance(cfg.get("media"), dict) else {}).get("max_image_mb"), getattr(base.media, "max_image_mb", 8)),
+            daily_limit=_int_or((cfg.get("media") if isinstance(cfg.get("media"), dict) else {}).get("daily_limit"), getattr(base.media, "daily_limit", 50)),
         ),
         # Per-tenant объект не указывает на реестр — иначе create_app уйдёт в цикл.
         clients_dir="",
@@ -333,7 +357,12 @@ def load_tenant(path: Path, base: Settings) -> Settings | None:
         logger.warning("Клиент %s пропущен: ожидается YAML-словарь с полями бизнеса", path.name)
         return None
 
-    settings, problems, warnings = validate_tenant_config(cfg, base, tenant_key, path.name)
+    try:
+        settings, problems, warnings = validate_tenant_config(cfg, base, tenant_key, path.name)
+    except Exception as exc:
+        logger.exception("Клиент %s: непредвиденная ошибка валидации (%s)", path.name, exc)
+        return None
+
     for warning in warnings:
         logger.warning("Клиент %s: %s", path.name, warning)
     if settings is None:
@@ -417,8 +446,13 @@ class ClientRegistry:
         snapshot = self._scan()
         if self._snapshot is not None and snapshot == self._snapshot:
             return False
-        self._snapshot = snapshot
-        self.tenants = self._load_all(snapshot)
+        try:
+            new_tenants = self._load_all(snapshot)
+            self._snapshot = snapshot
+            self.tenants = new_tenants
+        except Exception:
+            logger.exception("Не удалось загрузить реестр клиентов из %s", self.dir)
+            return False
         logger.info(
             "Реестр клиентов: %d клиент(ов) в %s",
             len(self.tenants), self.dir,

@@ -742,7 +742,7 @@ BUSINESS_PHONE_CACHE_TTL = 900  # 15 минут
 
 
 async def _get_business_phone(account_id: str, zernio_client) -> str:
-    """Бизнес-номер из кэша или Zernio API (пустой результат тоже кэшируется)."""
+    """Бизнес-номер из кэша или Zernio API."""
     cached = _business_phone_cache.get(account_id)
     if cached and time.monotonic() - cached[1] < BUSINESS_PHONE_CACHE_TTL:
         return cached[0]
@@ -751,10 +751,14 @@ async def _get_business_phone(account_id: str, zernio_client) -> str:
     try:
         # Используем Zernio API для получения информации об аккаунте
         info = await zernio_client.get_number_info()
-        phone = str(info.get("username") or info.get("phoneNumber") or "").strip()
+        phone_obj = info.get("phone") if isinstance(info.get("phone"), dict) else {}
+        phone = str(phone_obj.get("display_phone_number") or info.get("phoneNumber") or info.get("username") or "").strip()
     except Exception:
         logger.debug("Не удалось получить бизнес-номер из Zernio", exc_info=True)
-    _business_phone_cache[account_id] = (phone, time.monotonic())
+        return ""
+
+    if phone:
+        _business_phone_cache[account_id] = (phone, time.monotonic())
     return phone
 
 

@@ -217,7 +217,7 @@ def delete_conversation(conv_id: str) -> bool:
 def cleanup_old_conversations(retention_days: int = 365) -> int:
     """Удалить диалоги старше retention_days (ГДПР / политика хранения)."""
     result = execute(
-        "DELETE FROM conversations WHERE datetime(created_at) < datetime('now', ?)",
+        "DELETE FROM conversations WHERE datetime(COALESCE(last_message_at, created_at)) < datetime('now', ?)",
         (f"-{retention_days} days",),
     )
     return result.rowcount

@@ -218,13 +218,13 @@ class Settings:
         """Ответ клиенту при передаче человеку на его языке."""
         override = self.fallback_reply_kk if lang == "kk" else self.fallback_reply_ru
         template = override or self._FALLBACK_TEMPLATES.get(lang, self._FALLBACK_TEMPLATES["ru"])
-        return template.format(business_name=self.business_name)
+        return template.replace("{business_name}", self.business_name or "")
 
     def timeout_reply(self, lang: str = "ru") -> str:
         """Сообщение клиенту при таймауте/ошибке LLM на его языке."""
         override = self.timeout_reply_kk if lang == "kk" else self.timeout_reply_ru
         template = override or self._TIMEOUT_TEMPLATES.get(lang, self._TIMEOUT_TEMPLATES["ru"])
-        return template.format(business_name=self.business_name)
+        return template.replace("{business_name}", self.business_name or "")
 
     def owner_notify_target(self) -> str:
         """Куда слать уведомление владельцу: chat id в TG или номер в WhatsApp.

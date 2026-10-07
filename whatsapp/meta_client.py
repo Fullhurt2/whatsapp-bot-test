@@ -87,7 +87,6 @@ class MetaWhatsAppClient:
             base_url="https://graph.facebook.com",
             headers={
                 "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
             },
             timeout=httpx.Timeout(SEND_TIMEOUT_SEC, connect=CONNECT_TIMEOUT_SEC),
             transport=transport,  # точка для тестов: подменяется на MockTransport
@@ -149,7 +148,7 @@ class MetaWhatsAppClient:
         }
 
     async def update_business_profile(self, fields: dict) -> None:
-        """PATCH текстовых полей профиля: about, description, email, websites, address.
+        """PATCH текстовых полей профиля: about, description, email, белые сайты, address.
 
         Пустое значение поля допустимо — так клиент очищает его. Проверку
         форматов (длина, ссылки, email) делает вызывающий код: Meta отвечает
@@ -180,9 +179,6 @@ class MetaWhatsAppClient:
                 "photo": (filename, content, content_type),
                 "messaging_product": (None, "whatsapp"),
             },
-            # Сбрасываем дефолтный application/json клиента, чтобы httpx
-            # сам выставил multipart/form-data со своей валидной boundary.
-            headers={"Content-Type": None},
         )
         if response.status_code != 200:
             raise MetaError(_meta_error_text(response))

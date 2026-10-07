@@ -141,6 +141,84 @@ def test_all():
     assert llm_test._use_max_completion_tokens is False
     print("[OK] 11. LLMClient корректно выполняет двустороннюю адаптацию параметров токенов")
 
+    # 12. Проверка H11: fallback_reply и timeout_reply с произвольными фигурными скобками
+    from config.settings import Settings
+    s = object.__new__(Settings)
+    object.__setattr__(s, "business_name", "MyShop")
+    object.__setattr__(s, "fallback_reply_ru", "Здравствуйте! Ожидайте {ответ} от {business_name} {100%}")
+    object.__setattr__(s, "fallback_reply_kk", "")
+    object.__setattr__(s, "timeout_reply_ru", "Уточняю {вопрос} у {business_name}...")
+    object.__setattr__(s, "timeout_reply_kk", "")
+    fb = s.fallback_reply("ru")
+    assert fb == "Здравствуйте! Ожидайте {ответ} от MyShop {100%}"
+    to = s.timeout_reply("ru")
+    assert to == "Уточняю {вопрос} у MyShop..."
+    # 13. Проверка H9: cleanup_old_conversations не удаляет активные диалоги
+    from storage.conversations import cleanup_old_conversations, get_conversation
+    conv_old_active = create_conversation("client_h9", "wa", "+77011110001")
+    conv_old_dead = create_conversation("client_h9", "wa", "+77011110002")
+    # conv_old_active создан 400 дней назад, но последнее сообщение 1 день назад
+    execute("UPDATE conversations SET created_at = datetime('now', '-400 days'), last_message_at = datetime('now', '-1 day') WHERE id = ?", (conv_old_active["id"],))
+    # conv_old_dead создан 400 дней назад, последнее сообщение 400 дней назад
+    execute("UPDATE conversations SET created_at = datetime('now', '-400 days'), last_message_at = datetime('now', '-400 days') WHERE id = ?", (conv_old_dead["id"],))
+    
+    deleted_count = cleanup_old_conversations(retention_days=365)
+    assert deleted_count == 1, f"Ожидалось удаление 1 неактивного диалога, удалено {deleted_count}"
+    assert get_conversation(conv_old_active["id"]) is not None, "Активный диалог не должен удаляться по сроку created_at!"
+    assert get_conversation(conv_old_dead["id"]) is None, "Неактивный диалог старше 365 дней должен быть удален!"
+    # 14. Проверка H3: _get_business_phone извлекает display_phone_number и не кэширует пустой результат
+    import asyncio
+    from unittest.mock import AsyncMock
+    from main import _get_business_phone, _business_phone_cache
+    _business_phone_cache.clear()
+    mock_zclient = AsyncMock()
+    mock_zclient.get_number_info.return_value = {
+        "phone": {"display_phone_number": "+7 701 555-44-33"},
+        "waba": {"name": "Test WABA"},
+    }
+    phone_res = asyncio.run(_get_business_phone("acc_test_1", mock_zclient))
+    assert phone_res == "+7 701 555-44-33", f"Ожидался номер из phone.display_phone_number, получено '{phone_res}'"
+    
+    # Проверка, что пустой результат/ошибка не кэшируется на 15 минут
+    mock_zclient_empty = AsyncMock()
+    mock_zclient_empty.get_number_info.return_value = {}
+    phone_empty = asyncio.run(_get_business_phone("acc_test_fail", mock_zclient_empty))
+    assert phone_empty == ""
+    assert "acc_test_fail" not in _business_phone_cache, "Пустой результат или ошибка не должны кэшироваться в _business_phone_cache!"
+    # 15. Проверка H8: validate_tenant_config безопасно валидирует нетипизированный YAML
+    from config.clients import validate_tenant_config
+    from config.settings import LLMParams, MediaSettings
+    object.__setattr__(s, "llm", LLMParams("gpt-4o", 0.7, 1000, 30))
+    object.__setattr__(s, "pause_on", ["booking", "complaint"])
+    object.__setattr__(s, "notify_channels", ["telegram"])
+    object.__setattr__(s, "media", MediaSettings(daily_limit=50))
+    object.__setattr__(s, "whatsapp_access_token", "default_tok")
+    object.__setattr__(s, "manual_timeout_hours", 12)
+    object.__setattr__(s, "timezone", "UTC")
+    object.__setattr__(s, "notify_on_no_answer", "off")
+    object.__setattr__(s, "minutes_per_reply", 2)
+    object.__setattr__(s, "features", {})
+    object.__setattr__(s, "handoff_pauses_bot", True)
+    bad_cfg = {
+        "provider": "wa",
+        "business_name": "Test Salon",
+        "knowledge_base": "Тестовая база знаний",
+        "access_token": "valid_token",
+        "fallback_triggers": "цена",  # строка вместо списка
+        "pause_on": 5,                 # число вместо списка
+        "notify_channels": "telegram", # строка вместо списка
+        "media": {"daily_limit": "не_число", "audio": True},
+    }
+    # Должно безопасно обработаться без TypeError / ValueError
+    s_bad, problems, _ = validate_tenant_config(bad_cfg, s, "1234567890", "1234567890.yaml")
+    # Проверяем, что fallback_triggers не разбился на отдельные символы ['ц', 'е', 'н', 'а']
+    if s_bad:
+        assert s_bad.fallback_triggers != ["ц", "е", "н", "а"], "fallback_triggers не должен итерироваться посимвольно!"
+        assert s_bad.media.daily_limit == getattr(s.media, "daily_limit", 50), "Битое число daily_limit должно откатываться к дефолту"
+    else:
+        assert any("fallback_triggers" in p or "pause_on" in p for p in problems)
+    print("[OK] 15. validate_tenant_config безопасно валидирует типы полей в YAML")
+
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 
 if __name__ == "__main__":
