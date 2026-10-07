@@ -75,13 +75,14 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 def get_messages(
     conversation_id: str,
-    before: Optional[str] = None,    # ISO8601, получить сообщения старше этого времени
+    before: Optional[str] = None,    # ISO8601 или message_id
     limit: int = 50,
     role: Optional[str] = None,
+    before_id: Optional[int] = None,
 ) -> list[dict]:
     """
     Получить сообщения диалога (новые -> старые).
-    Если before задан — пагинация назад во времени.
+    Если before или before_id задан — пагинация назад во времени / по ID.
     """
     sql = "SELECT * FROM messages WHERE conversation_id = ?"
     params = [conversation_id]
@@ -90,9 +91,20 @@ def get_messages(
         sql += " AND role = ?"
         params.append(role)
 
-    if before:
-        sql += " AND created_at < ?"
-        params.append(before)
+    if before_id is not None:
+        sql += " AND id < ?"
+        params.append(before_id)
+    elif before:
+        if isinstance(before, int) or (isinstance(before, str) and before.isdigit()):
+            sql += " AND id < ?"
+            params.append(int(before))
+        elif isinstance(before, str) and "|" in before:
+            b_time, b_id = before.split("|", 1)
+            sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            params.extend([b_time, b_time, int(b_id)])
+        else:
+            sql += " AND created_at < ?"
+            params.append(before)
 
     sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)

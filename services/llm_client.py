@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import contextvars
 import logging
+import re
 
 import httpx
 
@@ -13,8 +15,12 @@ from config.settings import LLMParams
 
 logger = logging.getLogger(__name__)
 
-# Модели, которые не принимают temperature и ждут max_completion_tokens.
-_REASONING_MODEL_MARKERS = ("o1", "o3", "o4", "gpt-5", "gpt-6")
+# Модели, которые не принимают temperature и ждут max_completion_tokens (OpenAI o-серия, gpt-5+, gpt-6).
+# Используем границы токенов, чтобы не матчить модели вроде v0.1, v0.3, audio1, hero1.
+_REASONING_MODEL_PATTERN = re.compile(
+    r"(?:^|[/_-])(?:(o[134](?:-[a-z0-9]+)?)|(?:gpt-[56](?:-[a-z0-9]+)?))(?:$|[:/_-])",
+    re.IGNORECASE,
+)
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -24,10 +30,10 @@ def _is_reasoning_model(model: str) -> bool:
     а вместо max_tokens провайдер ждёт max_completion_tokens. Знание дешёвое и
     снимает две лишних попытки запроса в начале каждого процесса.
     """
-    name = str(model or "").strip().lower()
+    name = str(model or "").strip()
     if not name:
         return False
-    return any(marker in name for marker in _REASONING_MODEL_MARKERS)
+    return bool(_REASONING_MODEL_PATTERN.search(name))
 
 # Лимит токенов для повторного запроса, когда reasoning-модель израсходовала
 # основной max_tokens и вернула пустой content (см. chat()).
@@ -35,6 +41,9 @@ EMPTY_RESPONSE_RETRY_LIMIT = 5000
 
 # Пауза перед единственным повтором при разовом сбое провайдера (5xx).
 SERVER_ERROR_RETRY_DELAY_SEC = 1.0
+
+# Изоляция расхода токенов по текущей задаче/корутине
+_last_usage_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar("llm_last_usage", default={})
 
 
 class LLMError(Exception):
@@ -73,7 +82,7 @@ class LLMClient:
             self._omit_temperature = True
         # Расход токенов последнего ответа: chat() возвращает только текст,
         # поэтому usage копим здесь — его читает аналитика в админке.
-        self.last_usage: dict = {}
+        self._last_usage_fallback: dict = {}
         # Общий таймаут = timeout_seconds из конфига; на установку соединения даём 10с.
         # read-таймаут — главная защита от «зависшего» ответа модели.
         self._client = httpx.AsyncClient(
@@ -83,6 +92,29 @@ class LLMClient:
             },
             timeout=httpx.Timeout(params.timeout_seconds, connect=10.0),
         )
+
+    @property
+    def last_usage(self) -> dict:
+        """Расход токенов текущей корутины/таски (с фолбэком на последний сохранённый)."""
+        ctx_val = _last_usage_ctx.get()
+        if ctx_val:
+            return ctx_val
+        return self._last_usage_fallback
+
+    @last_usage.setter
+    def last_usage(self, val: dict) -> None:
+        self._last_usage_fallback = val
+        _last_usage_ctx.set(val)
+
+    async def chat_with_usage(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+    ) -> tuple[str, dict]:
+        """Задаёт вопрос LLM и возвращает кортеж (текст ответа, dict расхода токенов)."""
+        content = await self.chat(system_prompt, user_message, history)
+        return content, self.last_usage
 
     async def chat(
         self,

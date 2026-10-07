@@ -93,9 +93,10 @@ class MediaLimitError(MediaError):
     """Превышение лимитов размера или частоты медиа."""
 
 
-async def check_rate_limit(phone: str) -> bool:
+async def check_rate_limit(phone: str, client_key: str = "") -> bool:
     """Проверяет скользящий лимит: не более 5 медиа в минуту с одного номера."""
     now = time.monotonic()
+    key = f"{client_key}:{phone}" if client_key else phone
     async with _rate_limit_lock:
         # Очистка устаревших ключей для предотвращения утечки памяти
         if len(_rate_limit_history) > 200:
@@ -103,14 +104,14 @@ async def check_rate_limit(phone: str) -> bool:
             for k in stale_keys:
                 _rate_limit_history.pop(k, None)
 
-        timestamps = _rate_limit_history.get(phone, [])
+        timestamps = _rate_limit_history.get(key, [])
         # Очистить записи старше 60 секунд
         timestamps = [t for t in timestamps if now - t < 60.0]
         if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
-            _rate_limit_history[phone] = timestamps
+            _rate_limit_history[key] = timestamps
             return False
         timestamps.append(now)
-        _rate_limit_history[phone] = timestamps
+        _rate_limit_history[key] = timestamps
         return True
 
 

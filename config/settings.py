@@ -297,6 +297,8 @@ def resolve_clients_dir() -> Path | None:
     Актуально только для MESSAGING_PROVIDER=meta/zernio/telegram; реестр
     обслуживает все три транспорта (провайдер задаёт каждый клиент).
     """
+    if os.getenv("CLIENT_CONFIG"):
+        return None
     raw = os.getenv("CLIENTS_DIR", "").strip()
     if raw:
         path = Path(raw)

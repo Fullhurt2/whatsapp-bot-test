@@ -441,6 +441,10 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         # settings.clients_dir или явный CLIENTS_DIR из env имеет наивысший приоритет
         clients_dir = Path(explicit_clients_dir)
         logger.info("CLIENTS_DIR задан: %s", clients_dir)
+    elif os.getenv("CLIENT_CONFIG"):
+        # Явно задан single-tenant конфиг через CLIENT_CONFIG — авто-детект из тома не выполняется
+        clients_dir = None
+        logger.info("CLIENT_CONFIG задан — single-tenant режим, авто-детект clients_dir отключён")
     elif railway_volume:
         # Авто-детект из Railway Volume
         clients_dir = Path(railway_volume) / "clients"
@@ -451,18 +455,11 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         clients_dir = None
         logger.warning("RAILWAY_VOLUME_MOUNT_PATH не задан, CLIENTS_DIR не задан — мультитенант отключён")
 
-    # Определяем путь к БД
-    if railway_volume:
-        db_dir = Path(railway_volume) / "db"
-        db_path = db_dir / "jauap.db"
-        backups_dir = db_dir / "backups"
-    else:
-        # Локальный запуск / фолбэк
-        db_path = Path(os.getenv("JAUAP_DB_PATH", "/data/jauap.db"))
-        backups_dir = db_path.parent / "backups"
+    # Определяем путь к БД через storage.db.get_db_path()
+    from storage.db import get_db_path
+    db_path = get_db_path()
+    backups_dir = db_path.parent / "backups"
 
-    # Переопределяем пути через env для совместимости с storage
-    os.environ["JAUAP_DB_PATH"] = str(db_path)
     if clients_dir:
         os.environ["CLIENTS_DIR"] = str(clients_dir)
 
@@ -503,7 +500,7 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         try:
             # 1. Бэкап БД
             from storage import backup as db_backup, get_db_path
-            backup_path = Path(os.getenv("JAUAP_DB_PATH", "/data/jauap.db")).parent / "backups" / f"jauap-{datetime.utcnow().strftime('%Y%m%d')}.db"
+            backup_path = get_db_path().parent / "backups" / f"jauap-{datetime.utcnow().strftime('%Y%m%d')}.db"
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(db_backup, backup_path)
             logger.info("Ежедневный бэкап создан: %s", backup_path)

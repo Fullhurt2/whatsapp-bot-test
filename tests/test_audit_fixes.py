@@ -15,7 +15,10 @@ from storage import (
     get_handoff,
     get_handoffs_needing_reminder,
     get_message_by_provider_id,
+    list_conversations,
+    get_messages,
     execute,
+    fetchone,
 )
 from admin.api import _merge_incoming
 from storage.stats import parse_date_range
@@ -390,6 +393,85 @@ def test_all():
     assert found_msg is not None
     assert found_msg["conversation_id"] == conv_m8["id"]
     print("[OK] 23. idempotency_key корректно ищется через get_message_by_provider_id")
+
+    # 24. Проверка M9: детерминированный tie-break по id в subquery и cursor пагинация; before_id в get_messages
+    conv_m9 = create_conversation("client_m9", "wa", "+77017770066")
+    cid_m9 = conv_m9["id"]
+    m1 = add_message(cid_m9, "client", "Первое сообщение")
+    m2 = add_message(cid_m9, "client", "Второе сообщение")
+    # Имитируем одинаковый created_at (в пределах одной секунды)
+    execute("UPDATE messages SET created_at = '2026-01-01 12:00:00' WHERE conversation_id = ?", (cid_m9,))
+    convs_m9 = list_conversations("client_m9")
+    assert len(convs_m9) == 1
+    assert convs_m9[0]["last_message_text"] == "Второе сообщение", "Subquery должен брать последнее сообщение по id DESC при одинаковом created_at"
+
+    # Пагинация сообщений по before_id
+    earlier_msgs = get_messages(cid_m9, before_id=m2)
+    assert len(earlier_msgs) == 1
+    assert earlier_msgs[0]["id"] == m1
+    # Поддержка before в виде строки ID
+    earlier_msgs_str = get_messages(cid_m9, before=str(m2))
+    assert len(earlier_msgs_str) == 1
+    assert earlier_msgs_str[0]["id"] == m1
+    print("[OK] 24. list_conversations и get_messages детерминированно пагинируются с tie-break по id")
+
+    # 25. Проверка M10: изоляция media rate limit по client_key и исключение skipped-медиа из daily_limit
+    from services.media import check_rate_limit, _rate_limit_history
+    _rate_limit_history.clear()
+    shared_phone = "+77099990000"
+    # Заполняем лимит (5) для tenant_a
+    for _ in range(5):
+        assert asyncio.run(check_rate_limit(shared_phone, client_key="tenant_a")) is True
+    # 6-й раз для tenant_a блокируется
+    assert asyncio.run(check_rate_limit(shared_phone, client_key="tenant_a")) is False
+    # Но для tenant_b с тем же номером лимит независим!
+    assert asyncio.run(check_rate_limit(shared_phone, client_key="tenant_b")) is True
+
+    # Проверка daily_limit: skipped сообщения не должны учитываться
+    conv_m10 = create_conversation("client_m10", "wa", "+77017770077")
+    cid_m10 = conv_m10["id"]
+    add_message(cid_m10, "client", "[Фото]", content_kind="image", media_status="skipped")
+    row_cnt = fetchone(
+        """
+        SELECT COUNT(*) as cnt FROM messages
+        WHERE conversation_id = ?
+          AND role = 'client'
+          AND content_kind IN ('voice', 'audio', 'image')
+          AND (media_status IS NULL OR media_status != 'skipped')
+          AND date(created_at) = date('now')
+        """,
+        (cid_m10,),
+    )
+    assert row_cnt["cnt"] == 0, "Skipped медиа не должны учитываться в подсчёте daily_limit!"
+    print("[OK] 25. Изоляция media rate limit по client_key и корректный подсчёт daily_limit")
+
+    # 26. Проверка M11: CLIENT_CONFIG не триггерит multitenant авто-детект из Volume; get_db_path не портит env
+    from storage.db import get_db_path
+    db_p = get_db_path()
+    assert db_p.name == "test.db"
+    with patch.dict(os.environ, {"CLIENT_CONFIG": "custom_single.yaml", "RAILWAY_VOLUME_MOUNT_PATH": "/vol", "CLIENTS_DIR": ""}):
+        from config.settings import resolve_clients_dir
+        # В single-tenant при CLIENT_CONFIG volume не должен превращать режим в multitenant
+        assert resolve_clients_dir() is None
+    print("[OK] 26. single-tenant с CLIENT_CONFIG защищён от случайного переключения на volume clients_dir")
+
+    # 27. Проверка M12: точный regex в _is_reasoning_model и изоляция usage токенов
+    from services.llm_client import _is_reasoning_model, LLMClient
+    from config.settings import LLMParams
+    # Проверка ложных срабатываний
+    assert _is_reasoning_model("v0.1") is False
+    assert _is_reasoning_model("v0.3") is False
+    assert _is_reasoning_model("audio1") is False
+    assert _is_reasoning_model("hero1") is False
+    assert _is_reasoning_model("mono1") is False
+    assert _is_reasoning_model("qwen-2.5-72b-instruct") is False
+    # Истинные reasoning модели
+    assert _is_reasoning_model("o1") is True
+    assert _is_reasoning_model("o1-mini") is True
+    assert _is_reasoning_model("openai/o3-mini") is True
+    assert _is_reasoning_model("gpt-5") is True
+    assert _is_reasoning_model("gpt-6-turbo") is True
+    print("[OK] 27. _is_reasoning_model не имеет ложных срабатываний на v0.1/v0.3/audio1")
 
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 

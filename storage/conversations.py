@@ -103,7 +103,7 @@ def list_conversations(
                m.media_duration_s AS last_message_duration_s
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
-            SELECT id FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1
+            SELECT id FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
         )
         WHERE c.client_key = ?
     """
@@ -123,10 +123,15 @@ def list_conversations(
         params.append(since)
 
     if cursor:
-        sql += " AND c.last_message_at < ?"
-        params.append(cursor)
+        if "|" in cursor:
+            c_time, c_id = cursor.split("|", 1)
+            sql += " AND (c.last_message_at < ? OR (c.last_message_at = ? AND c.id < ?))"
+            params.extend([c_time, c_time, c_id])
+        else:
+            sql += " AND c.last_message_at < ?"
+            params.append(cursor)
 
-    sql += " ORDER BY c.last_message_at DESC LIMIT ?"
+    sql += " ORDER BY c.last_message_at DESC, c.id DESC LIMIT ?"
 
     params.append(limit)
 
