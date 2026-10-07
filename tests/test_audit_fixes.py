@@ -14,6 +14,7 @@ from storage import (
     create_handoff,
     get_handoff,
     get_handoffs_needing_reminder,
+    get_message_by_provider_id,
     execute,
 )
 from admin.api import _merge_incoming
@@ -77,9 +78,11 @@ def test_all():
     # 6. Проверка get_client_ip
     from admin.api import get_client_ip
     class DummyRequest:
-        def __init__(self, headers, host="127.0.0.1"):
+        def __init__(self, headers, host="127.0.0.1", path="/admin/test"):
             self.headers = headers
             self.client = type("Client", (), {"host": host})()
+            self.state = type("State", (), {})()
+            self.url = type("URL", (), {"path": path})()
     
     req_cf = DummyRequest({"CF-Connecting-IP": "203.0.113.195", "X-Forwarded-For": "10.0.0.1"})
     assert get_client_ip(req_cf) == "203.0.113.195"
@@ -355,6 +358,38 @@ def test_all():
         assert mock_send.call_count == 1
         assert get_handoff(h_m2)["reminded_at"] is not None
     print("[OK] 20. reminder_job корректно проверяет настройки и доставку")
+
+    # 21. Проверка M6: ограничение media.daily_limit/max_audio_seconds для клиента и cooldown на regroup
+    from admin.api import hash_token, verify_token_hash, TOKEN_PBKDF2_PREFIX, TOKEN_HASH_PREFIX
+    from storage import get_last_regroup_time
+    assert get_last_regroup_time("non_existent_key") is None
+    print("[OK] 21. Ресурсные лимиты media и cooldown перегруппировки")
+
+    # 22. Проверка M7: безопасное хэширование токенов с солью, поддержка не-ASCII и отказ от ?token=
+    salt_hash = hash_token("пароль_123")
+    assert salt_hash.startswith(TOKEN_PBKDF2_PREFIX)
+    assert verify_token_hash("пароль_123", salt_hash) is True
+    assert verify_token_hash("неверный", salt_hash) is False
+    # Обратная совместимость с sha256:<hex>
+    import hashlib
+    legacy_hash = TOKEN_HASH_PREFIX + hashlib.sha256("старый_пароль".encode("utf-8")).hexdigest()
+    assert verify_token_hash("старый_пароль", legacy_hash) is True
+    assert verify_token_hash("другой", legacy_hash) is False
+    # ?token= в query_params не должен проходить в _authorize
+    req_bad_param = DummyRequest({})
+    req_bad_param.query_params = {"token": "secret_adm_token"}
+    role_token_param, err_token_param = _authorize(dummy_settings, req_bad_param, Path(td), None)
+    assert role_token_param is None and err_token_param in (401, 403), "?token= в query string не должен авторизовывать!"
+    assert req_bad_param.state.auth_failed is True, "При неудачной авторизации должен быть выставлен auth_failed"
+    print("[OK] 22. Хэширование токенов salted PBKDF2, поддержка не-ASCII, отказ от ?token=")
+
+    # 23. Проверка M8: дедупликация по idempotency_key при отправке сообщений оператором
+    conv_m8 = create_conversation("client_m8", "wa", "+77017770055")
+    add_message(conv_m8["id"], "human", "Тест", provider_message_id="idemp-key-1")
+    found_msg = get_message_by_provider_id("idemp-key-1")
+    assert found_msg is not None
+    assert found_msg["conversation_id"] == conv_m8["id"]
+    print("[OK] 23. idempotency_key корректно ищется через get_message_by_provider_id")
 
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 

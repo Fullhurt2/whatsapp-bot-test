@@ -199,19 +199,24 @@ def mask_secret(value: str) -> str:
 
 # Префикс для обозначения SHA-256 хэша (чтобы не путать с plaintext токенами)
 TOKEN_HASH_PREFIX = "sha256:"
+TOKEN_PBKDF2_PREFIX = "pbkdf2:sha256:"
 
 
 def hash_token(token: str) -> str:
-    """SHA-256 хэш токена для хранения в YAML с префиксом формата."""
-    return TOKEN_HASH_PREFIX + hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    """PBKDF2-HMAC-SHA256 хэш токена с солью для хранения в YAML."""
+    salt = secrets.token_hex(16)
+    iterations = 100_000
+    h = hashlib.pbkdf2_hmac("sha256", token.strip().encode("utf-8"), salt.encode("utf-8"), iterations).hex()
+    return f"{TOKEN_PBKDF2_PREFIX}{iterations}${salt}${h}"
 
 
 def verify_token_hash(provided: str, stored_hash: str) -> bool:
     """Constant-time проверка токена против хранящегося значения.
     
-    Поддерживает два формата сохранённого токена:
-    - `sha256:<hex>` — SHA-256 хэш, сравниваем хэши
-    - Plaintext — сравниваем напрямую (constant-time)
+    Поддерживает форматы сохранённого токена:
+    - `pbkdf2:sha256:<iter>$<salt>$<hex>` — безопасный хэш с солью
+    - `sha256:<hex>` — устаревший SHA-256 хэш (обратная совместимость)
+    - Plaintext — прямое сравнение байт (constant-time)
     """
     if not provided or not stored_hash:
         return False
@@ -219,13 +224,27 @@ def verify_token_hash(provided: str, stored_hash: str) -> bool:
     stored = stored_hash.strip()
     provided = provided.strip()
     
-    # Если stored начинается с префикса — это SHA-256 хэш
+    # 1. PBKDF2 хэш с солью
+    if stored.startswith(TOKEN_PBKDF2_PREFIX):
+        try:
+            parts = stored.split("$")
+            if len(parts) == 3:
+                iterations = int(parts[0].split(":")[-1])
+                salt = parts[1]
+                expected_hash = parts[2]
+                computed = hashlib.pbkdf2_hmac(
+                    "sha256", provided.encode("utf-8"), salt.encode("utf-8"), iterations
+                ).hex()
+                return hmac.compare_digest(computed.encode("utf-8"), expected_hash.encode("utf-8"))
+        except Exception:
+            return False
+
+    # 2. Устаревший unsalted sha256:<hex> хэш
     if stored.startswith(TOKEN_HASH_PREFIX):
-        stored_hex = stored[len(TOKEN_HASH_PREFIX):]
-        provided_hash = hash_token(provided)
-        return hmac.compare_digest(provided_hash, stored)
+        provided_hash = TOKEN_HASH_PREFIX + hashlib.sha256(provided.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(provided_hash.encode("utf-8"), stored.encode("utf-8"))
     
-    # Иначе — plaintext, сравниваем напрямую (constant-time)
+    # 3. Plaintext — сравниваем байты напрямую в constant-time
     return hmac.compare_digest(provided.encode("utf-8"), stored.encode("utf-8"))
 
 
@@ -341,7 +360,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 or request.query_params.get("admin_token")
                 or request.query_params.get("client_token")
             )
-            if response.status_code == 403 or (response.status_code == 401 and (is_login_path or has_auth)):
+            auth_failed = getattr(request.state, "auth_failed", False)
+            if auth_failed and (response.status_code in (401, 403) or is_login_path):
                 record_failed_auth(ip)
             
             return response
@@ -497,24 +517,35 @@ def _authorize(settings: Settings, request: Request, clients_dir: Path,
     if auth.lower().startswith("bearer "):
         bearer_token = auth[7:].strip()
 
+    # Query-параметр ?token= допустим исключительно для скачивания медиафайлов
+    # (HTML-теги <img> и <audio> в браузере не могут передавать заголовки)
+    req_path = getattr(getattr(request, "url", None), "path", "") or ""
+    media_token = request.query_params.get("token", "") if req_path.endswith("/media") else ""
+
     admin_header = (
         request.headers.get(HEADER_ADMIN, "")
         or bearer_token
         or request.query_params.get("admin_token", "")
-        or request.query_params.get("token", "")
+        or media_token
     )
     client_header = (
         request.headers.get(HEADER_CLIENT, "")
         or bearer_token
         or request.query_params.get("client_token", "")
-        or request.query_params.get("token", "")
+        or media_token
     )
     if settings.admin_token and tokens_equal(admin_header, settings.admin_token):
+        if hasattr(request, "state"):
+            request.state.auth_failed = False
         return "admin", None
     if pid and client_header:
         expected_hash = _management_token_of(clients_dir, pid)
         if expected_hash and verify_token_hash(client_header, expected_hash):
+            if hasattr(request, "state"):
+                request.state.auth_failed = False
             return "client", None
+    if hasattr(request, "state"):
+        request.state.auth_failed = True
     if admin_header or client_header:
         return None, 403
     return None, 401
@@ -1078,6 +1109,23 @@ def register_admin_api(app, settings: Settings, state) -> None:
                     status_code=403,
                     content={"error": f"изменение полей {', '.join(denied)} доступно только администратору"},
                 )
+            # Защита лимитов медиа (daily_limit, max_audio_seconds и т.д. меняет только админ)
+            if "media" in incoming and isinstance(incoming["media"], dict):
+                old_media = (old_cfg or {}).get("media") or {}
+                if not isinstance(old_media, dict):
+                    old_media = {}
+                denied_media = [
+                    f"media.{k}" for k in (
+                        "daily_limit", "max_audio_seconds", "max_image_mb",
+                        "whisper_model", "vision_model", "transcribe_model", "describe_model",
+                    )
+                    if k in incoming["media"] and incoming["media"][k] != old_media.get(k)
+                ]
+                if denied_media:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": f"изменение полей {', '.join(denied_media)} доступно только администратору"},
+                    )
             incoming = {key: value for key, value in incoming.items() if key in CLIENT_EDITABLE_FIELDS}
 
         merged = _merge_incoming(old_cfg or {}, incoming)
@@ -1085,13 +1133,13 @@ def register_admin_api(app, settings: Settings, state) -> None:
         # Хэшируем management_token перед сохранением (если он был передан и изменился)
         if "management_token" in merged:
             raw_token = str(merged["management_token"] or "").strip()
-            if raw_token.startswith(TOKEN_HASH_PREFIX):
+            if raw_token.startswith(TOKEN_HASH_PREFIX) or raw_token.startswith(TOKEN_PBKDF2_PREFIX):
                 # Уже хэш: поле не меняли или прислали маску. Повторное
                 # хэширование ломало бы ранее заданный токен — из-за этого
                 # management_token нельзя было поменять.
                 pass
             elif raw_token:
-                # Любой простой пароль («nailsstudio») хэшируется в yaml,
+                # Любой простой пароль («nailsstudio») хэшируется в yaml с солью,
                 # а вход в панели остаётся тем же, что ввёл менеджер.
                 merged["management_token"] = hash_token(raw_token)
             else:
@@ -1728,6 +1776,13 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if provider == "zernio" and not conversation_id:
             return JSONResponse(status_code=409, content={"error": "нет conversation_id для Zernio"})
 
+        # Дедупликация по idempotency_key
+        if idempotency_key:
+            from storage import get_message_by_provider_id
+            existing = get_message_by_provider_id(idempotency_key)
+            if existing and existing.get("conversation_id") == cid:
+                return {"ok": True, "delivered": True, "deduplicated": True, "message_id": existing.get("id")}
+
         # Отправляем сообщение
         try:
             if provider == "zernio":
@@ -1735,8 +1790,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             else:
                 # Meta - отправка по номеру
                 await sender.send_text(conv["contact_phone"], text)
+        except MessagingError as exc:
+            return JSONResponse(status_code=502, content={"error": str(exc)})
 
-            # Сохраняем сообщение роли human
+        # Сохраняем сообщение роли human в БД (сбой БД после успешной отправки не должен давать 500)
+        try:
             add_message(
                 conversation_id=cid,
                 role="human",
@@ -1746,18 +1804,17 @@ def register_admin_api(app, settings: Settings, state) -> None:
                 delivery_status="sent",
             )
 
-            # Обновляем last_message_at
+            # Обновляем last_message_at и last_human_message_at
             from storage import update_last_message_times
-            update_last_message_times(cid, is_client=False)
+            update_last_message_times(cid, is_client=False, is_human=True)
 
             # Если был открытый handoff — отмечаем first_human_reply
             from storage import get_open_handoff, mark_first_human_reply
             open_handoff = get_open_handoff(cid)
             if open_handoff:
                 mark_first_human_reply(open_handoff["id"])
-
-        except MessagingError as exc:
-            return JSONResponse(status_code=502, content={"error": str(exc)})
+        except Exception:
+            logger.exception("Сообщение доставлено клиенту (%s), но произошла ошибка сохранения в БД", cid)
 
         return {"ok": True, "delivered": True}
 
@@ -2061,6 +2118,26 @@ def register_admin_api(app, settings: Settings, state) -> None:
         # Получаем последние необработанные вопросы
         from storage import get_recent_unanswered_for_regroup, get_last_regroup_time, create_unanswered_group
         db_key = _conversation_client_key(clients_dir, pid)
+
+        # Ограничение частоты перегруппировки для не-админов (cooldown 10 минут)
+        if role != "admin":
+            last_time = get_last_regroup_time(db_key)
+            if last_time:
+                from datetime import datetime, timezone
+                try:
+                    dt_last = datetime.fromisoformat(last_time.replace("Z", "+00:00"))
+                    if dt_last.tzinfo is None:
+                        dt_last = dt_last.replace(tzinfo=timezone.utc)
+                    elapsed = (datetime.now(timezone.utc) - dt_last).total_seconds()
+                    if elapsed < 600:
+                        remaining = int(600 - elapsed)
+                        return JSONResponse(
+                            status_code=429,
+                            content={"error": f"Группировка уже выполнялась недавно. Повторите через {remaining} сек."},
+                        )
+                except Exception:
+                    pass
+
         questions = get_recent_unanswered_for_regroup(db_key, limit=200)
         if len(questions) < 2:
             return {"ok": True, "groups_created": 0, "message": "недостаточно вопросов для группировки"}
