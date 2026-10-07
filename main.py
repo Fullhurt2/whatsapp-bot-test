@@ -520,8 +520,7 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             get_conversations_needing_timeout_check,
             mark_read,
             update_conversation_status,
-            get_open_handoff,
-            resolve_handoff,
+            resolve_conversation_handoffs,
         )
 
         targets: list[tuple[int, str]] = []
@@ -540,9 +539,7 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             for conv in convs:
                 await asyncio.to_thread(update_conversation_status, conv["id"], "bot")
                 await asyncio.to_thread(mark_read, conv["id"])
-                open_h = await asyncio.to_thread(get_open_handoff, conv["id"])
-                if open_h:
-                    await asyncio.to_thread(resolve_handoff, open_h["id"])
+                await asyncio.to_thread(resolve_conversation_handoffs, conv["id"])
                 total += 1
                 logger.info(
                     "Диалог возвращён боту по таймауту | conv_id=%s | часов=%d",

@@ -149,6 +149,12 @@ def test_all():
     from config.settings import Settings
     s = object.__new__(Settings)
     object.__setattr__(s, "business_name", "MyShop")
+    object.__setattr__(s, "language", "ru")
+    object.__setattr__(s, "tone", "вежливый")
+    object.__setattr__(s, "knowledge_base", "База знаний MyShop")
+    object.__setattr__(s, "style_examples", "")
+    object.__setattr__(s, "messaging_provider", "wa")
+    object.__setattr__(s, "whatsapp_phone_number_id", "client_m4")
     object.__setattr__(s, "fallback_reply_ru", "Здравствуйте! Ожидайте {ответ} от {business_name} {100%}")
     object.__setattr__(s, "fallback_reply_kk", "")
     object.__setattr__(s, "timeout_reply_ru", "Уточняю {вопрос} у {business_name}...")
@@ -221,7 +227,37 @@ def test_all():
         assert s_bad.media.daily_limit == getattr(s.media, "daily_limit", 50), "Битое число daily_limit должно откатываться к дефолту"
     else:
         assert any("fallback_triggers" in p or "pause_on" in p for p in problems)
-    print("[OK] 15. validate_tenant_config безопасно валидирует типы полей в YAML")
+    # 16. Проверка M1: resolve_conversation_handoffs закрывает все открытые передачи
+    from storage import resolve_conversation_handoffs, get_open_handoff
+    conv_m1 = create_conversation("client_m1", "wa", "+77017770011")
+    h1 = create_handoff(conv_m1["id"], "complaint")
+    h2 = create_handoff(conv_m1["id"], "booking")
+    assert get_open_handoff(conv_m1["id"]) is not None
+    resolved_count = resolve_conversation_handoffs(conv_m1["id"])
+    assert resolved_count == 2, f"Должны были закрыться обе передачи, закрыто: {resolved_count}"
+    assert get_open_handoff(conv_m1["id"]) is None, "В диалоге не должно остаться открытых передач"
+    print("[OK] 16. resolve_conversation_handoffs закрывает все открытые передачи")
+
+    # 17. Проверка M4: /start от клиента не сбрасывает manual-режим
+    from handlers.message_handler import MessageProcessor
+    conv_m4 = create_conversation("client_m4", "wa", "+77017770022")
+    update_conversation_status(conv_m4["id"], "manual")
+    h_m4 = create_handoff(conv_m4["id"], "human_requested")
+    
+    class DummySender:
+        def __init__(self):
+            self.sent = []
+        async def send_text(self, to, text, conversation_id=""):
+            self.sent.append((to, text))
+            return "msg-123"
+    dummy_sender = DummySender()
+    handler = MessageProcessor(s, None, dummy_sender)
+    asyncio.run(handler.handle_greeting("+77017770022", ""))
+    conv_after = get_conversation(conv_m4["id"])
+    assert conv_after["status"] == "manual", "Клиент не должен иметь возможность сбросить manual-режим менеджера!"
+    assert get_open_handoff(conv_m4["id"]) is not None, "Открытый handoff менеджера не должен закрываться клиентом!"
+    assert len(dummy_sender.sent) == 0, "Бот не должен отвечать приветствием в диалоге с ручным режимом оператора!"
+    print("[OK] 17. /start от клиента не прерывает manual-режим менеджера")
 
     print("\nВсе проверки исправлений (включая 2-й круг ревью) успешно пройдены!")
 

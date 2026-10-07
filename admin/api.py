@@ -1784,13 +1784,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         update_conversation_status(cid, mode)
 
-        # Если переключаем на bot — сбрасываем unread_count и закрываем висящий handoff
+        # Если переключаем на bot — сбрасываем unread_count и закрываем висящие handoffs
         if mode == "bot":
-            from storage import mark_read, get_open_handoff, resolve_handoff
+            from storage import mark_read, resolve_conversation_handoffs
             mark_read(cid)
-            open_h = get_open_handoff(cid)
-            if open_h:
-                resolve_handoff(open_h["id"])
+            resolve_conversation_handoffs(cid)
 
         return {"ok": True, "conversation_id": cid, "mode": mode}
 

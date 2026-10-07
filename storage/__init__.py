@@ -69,6 +69,7 @@ from storage.handoffs import (
     mark_reminded,
     get_handoffs_needing_reminder,
     resolve_handoff,
+    resolve_conversation_handoffs,
     get_handoff_stats,
     get_manager_response_times,
 )

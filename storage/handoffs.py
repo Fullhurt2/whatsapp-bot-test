@@ -113,6 +113,15 @@ def resolve_handoff(handoff_id: int) -> bool:
     return result.rowcount > 0
 
 
+def resolve_conversation_handoffs(conversation_id: str) -> int:
+    """Закрыть все открытые передачи для диалога."""
+    result = execute(
+        "UPDATE handoffs SET resolved_at = datetime('now') WHERE conversation_id = ? AND resolved_at IS NULL",
+        (conversation_id,),
+    )
+    return result.rowcount
+
+
 def get_handoff_stats(client_key: str, from_date: str, to_date: str) -> dict:
     """Статистика передач по причинам за период."""
     rows = fetchall(

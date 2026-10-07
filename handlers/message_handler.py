@@ -258,9 +258,6 @@ class MessageProcessor:
 
     async def handle_greeting(self, phone: str, conversation_id: str = "") -> None:
         """Приветствие по слову start (аналог /start) + сброс памяти диалога."""
-        # Сброс in-memory истории (fallback)
-        self._histories.pop(phone, None)
-
         # Создаём/обновляем диалог в БД
         client_key = self._client_key()
         conv = get_conversation_by_client_and_phone(client_key, phone)
@@ -274,12 +271,22 @@ class MessageProcessor:
             )
         else:
             conv_id = conv["id"]
-            # Сброс статуса на bot при старте и закрытие висящего handoff
-            from storage import update_conversation_status, get_open_handoff, resolve_handoff
+            if conv.get("status") == "manual":
+                logger.info("Диалог в manual режиме, /start проигнорирован ботом | conv_id=%s", conv_id)
+                if _DB_AVAILABLE:
+                    add_message(
+                        conversation_id=conv_id,
+                        role="client",
+                        text="/start",
+                        content_kind="text",
+                    )
+                return
+            from storage import update_conversation_status, resolve_conversation_handoffs
             update_conversation_status(conv_id, "bot")
-            open_h = get_open_handoff(conv_id)
-            if open_h:
-                resolve_handoff(open_h["id"])
+            resolve_conversation_handoffs(conv_id)
+
+        # Сброс in-memory истории (fallback)
+        self._histories.pop(phone, None)
 
         await self.sender.send_text(
             phone,
@@ -955,8 +962,9 @@ class MessageProcessor:
                 except Exception:
                     logger.exception("Не удалось сохранить вопрос без ответа")
 
-            # Создаём запись о передаче (handoff)
-            from storage import create_handoff
+            # Создаём запись о передаче (handoff), предварительно закрыв старые открытые
+            from storage import create_handoff, resolve_conversation_handoffs
+            resolve_conversation_handoffs(conv_id)
             handoff_id = create_handoff(
                 conversation_id=conv_id,
                 reason=reason,
