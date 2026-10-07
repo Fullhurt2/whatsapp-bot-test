@@ -439,6 +439,12 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(db_backup, backup_path)
             logger.info("Ежедневный бэкап создан: %s", backup_path)
+            try:
+                old_daily = sorted(backup_path.parent.glob("jauap-*.db"), key=lambda p: p.stat().st_mtime)
+                while len(old_daily) > 7:
+                    old_daily.pop(0).unlink(missing_ok=True)
+            except Exception:
+                pass
 
             # 2. Чистка seen_events > 7 дней
             from storage import cleanup_old_seen_events
@@ -876,20 +882,24 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
                             if existing and existing.get("role") == "bot":
                                 is_bot_message = True
 
+                        matched_bot_msg = None
+                        if not is_bot_message and event_text:
+                            matched_bot_msg = fetchone(
+                                "SELECT id, role, text, provider_message_id FROM messages WHERE conversation_id = ? AND role = 'bot' AND text = ? ORDER BY id DESC LIMIT 1",
+                                (conv_id, event_text),
+                            )
+                            if matched_bot_msg:
+                                is_bot_message = True
+                                if event.provider_message_id and not matched_bot_msg["provider_message_id"]:
+                                    execute(
+                                        "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
+                                        (event.provider_message_id, matched_bot_msg["id"]),
+                                    )
+
                         last_msg = fetchone(
                             "SELECT id, role, text, provider_message_id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
                             (conv_id,),
                         )
-
-                        if not is_bot_message and last_msg and last_msg["role"] == "bot":
-                            # Сообщение бота: сопоставляем СТРОГО по совпадению текста
-                            if event_text and last_msg["text"] == event_text:
-                                is_bot_message = True
-                                if event.provider_message_id and not last_msg["provider_message_id"]:
-                                    execute(
-                                        "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
-                                        (event.provider_message_id, last_msg["id"]),
-                                    )
 
                         if not is_bot_message:
                             # Проверяем, не было ли это сообщение оператора уже сохранено из админки панели

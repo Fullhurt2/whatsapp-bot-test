@@ -47,6 +47,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -169,6 +170,8 @@ PROFILE_PHOTO_TYPES = {
 
 _PAGE_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 
+_client_write_lock = threading.Lock()
+
 # --- вспомогательные ----------------------------------------------------------
 
 
@@ -284,7 +287,16 @@ def record_failed_auth(ip: str) -> None:
 
 
 def get_client_ip(request: Request) -> str:
-    """Получить IP клиента: CF-Connecting-IP, X-Real-IP, первый из X-Forwarded-For, или прямой."""
+    """Получить IP клиента с защитой от спуфинга.
+    
+    Если TRUST_PROXY выключен (0/false) — доверяем только прямому соединению (request.client.host).
+    Если TRUST_PROXY включен (по умолчанию 1) — извлекаем IP из доверенных заголовков:
+    CF-Connecting-IP (Cloudflare) или X-Forwarded-For.
+    """
+    trust_proxy = os.getenv("TRUST_PROXY", "1").strip().lower() not in ("0", "false", "no")
+    if not trust_proxy:
+        return request.client.host if request.client else "unknown"
+
     cf_ip = request.headers.get("CF-Connecting-IP")
     if cf_ip:
         return cf_ip.strip()
@@ -295,7 +307,9 @@ def get_client_ip(request: Request) -> str:
     if forwarded:
         parts = [p.strip() for p in forwarded.split(",") if p.strip()]
         if parts:
-            return parts[0]  # первый — исходный адрес клиента до прокси
+            if os.getenv("RAILWAY_ENVIRONMENT"):
+                return parts[-1]
+            return parts[0]
     return request.client.host if request.client else "unknown"
 
 
@@ -837,12 +851,15 @@ def _client_editable_cfg(clients_dir: Path, pid: str, cfg: dict,
     path = _client_yaml_path(clients_dir, pid)
     if path is None:
         raise FileNotFoundError(pid)
-    merged = dict(cfg)
-    merged.update(fields)
-    _backup(path, clients_dir, pid)
-    _atomic_write(path, merged)
-    _audit(clients_dir, actor, action, pid, cfg, merged)
-    return merged
+    with _client_write_lock:
+        latest = _read_cfg(path)
+        base_dict = latest if latest is not None else cfg
+        merged = dict(base_dict)
+        merged.update(fields)
+        _backup(path, clients_dir, pid)
+        _atomic_write(path, merged)
+        _audit(clients_dir, actor, action, pid, cfg, merged)
+        return merged
 
 
 def _validate_redirect_url(raw: str) -> str | None:
@@ -1939,6 +1956,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
         answer = str(incoming.get("answer") or "").strip()
         if not answer:
             return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
+        if len(answer) > 20000:
+            return JSONResponse(status_code=400, content={"error": "ответ слишком длинный (максимум 20 000 символов)"})
 
         from storage import get_unanswered_question, mark_question_answered
         db_key = _conversation_client_key(clients_dir, pid)
@@ -1947,7 +1966,9 @@ def register_admin_api(app, settings: Settings, state) -> None:
             return JSONResponse(status_code=404, content={"error": "вопрос не найден"})
 
         path = _client_yaml_path(clients_dir, pid)
-        cfg = _read_cfg(path) or {}
+        cfg = _read_cfg(path)
+        if cfg is None:
+            return JSONResponse(status_code=409, content={"error": "не удалось прочитать конфигурацию клиента"})
         old_kb = str(cfg.get("knowledge_base") or "").strip()
         new_kb = _append_answers_to_kb(old_kb, [question], answer)
         _client_editable_cfg(clients_dir, pid, cfg, {"knowledge_base": new_kb},
@@ -1971,6 +1992,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
         answer = str(incoming.get("answer") or "").strip()
         if not answer:
             return JSONResponse(status_code=400, content={"error": "ответ не может быть пустым"})
+        if len(answer) > 20000:
+            return JSONResponse(status_code=400, content={"error": "ответ слишком длинный (максимум 20 000 символов)"})
 
         from storage import get_unanswered_group, get_questions_for_group, mark_question_answered, update_group_status, create_conversation
         group = get_unanswered_group(group_id)
@@ -1979,7 +2002,9 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         # Дописываем «Вопрос: … Ответ: …» в knowledge_base
         path = _client_yaml_path(clients_dir, pid)
-        cfg = _read_cfg(path) or {}
+        cfg = _read_cfg(path)
+        if cfg is None:
+            return JSONResponse(status_code=409, content={"error": "не удалось прочитать конфигурацию клиента"})
         old_kb = str(cfg.get("knowledge_base") or "").strip()
         questions = get_questions_for_group(group_id)
         new_kb = _append_answers_to_kb(old_kb, questions, answer)

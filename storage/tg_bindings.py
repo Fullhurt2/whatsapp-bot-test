@@ -23,9 +23,9 @@ def generate_link_code() -> tuple[str, str]:
     """
     Сгенерировать код привязки и его хэш.
     Возвращает (code, code_hash).
-    Код: 8 hex-символов, легко продиктовать в Telegram.
+    Код: 12 hex-символов с достаточной энтропией против перебора.
     """
-    code = secrets.token_bytes(5).hex()[:8].upper()  # 8 hex chars
+    code = secrets.token_hex(6).upper()  # 12 hex chars
     code_hash = hashlib.sha256(code.encode()).hexdigest()
     return code, code_hash
 

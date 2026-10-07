@@ -200,9 +200,10 @@ def resize_image_if_needed(image_bytes: bytes, max_side: int = 1600) -> tuple[by
         return image_bytes, "image/jpeg"
 
     try:
+        Image.MAX_IMAGE_PIXELS = 25_000_000
         with Image.open(io.BytesIO(image_bytes)) as img:
-            # Преобразуем RGBA/P в RGB для JPEG
-            if img.mode in ("RGBA", "P"):
+            # Преобразуем RGBA/P/LA/CMYK в RGB для JPEG
+            if img.mode in ("RGBA", "P", "LA", "CMYK"):
                 img = img.convert("RGB")
 
             width, height = img.size
@@ -302,7 +303,7 @@ async def transcribe_audio(
     # Если API отклонил формат, пробуем сконвертировать через ffmpeg
     if response.status_code == 400 and "format" in response.text.lower() and retry:
         logger.info("Whisper отклонил аудиоформат, пробуем конвертацию в mp3 через ffmpeg")
-        mp3_data = convert_audio_to_mp3(data)
+        mp3_data = await asyncio.to_thread(convert_audio_to_mp3, data)
         return await transcribe_audio(mp3_data, "audio/mpeg", language, hint, settings, retry=False)
 
     if response.status_code != 200:
@@ -355,7 +356,7 @@ async def describe_image(
     endpoint = api_url.rstrip("/") + "/chat/completions"
 
     # Ресайз до 1600px
-    proc_data, proc_mime = resize_image_if_needed(data, max_side=1600)
+    proc_data, proc_mime = await asyncio.to_thread(resize_image_if_needed, data, 1600)
     b64_str = base64.b64encode(proc_data).decode("utf-8")
     data_url = f"data:{proc_mime};base64,{b64_str}"
 

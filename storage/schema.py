@@ -65,30 +65,37 @@ def apply_migrations() -> None:
     conn = get_connection()
     applied = _get_applied_versions(conn)
     migrations = _get_migration_files()
+    pending = [(v, n, p) for v, n, p in migrations if v not in applied]
+    if not pending:
+        return
 
-    # Опциональный бэкап перед миграциями (если задана переменная)
+    # Опциональный бэкап перед миграциями (только если есть что накатывать)
     if os.getenv("JAUAP_BACKUP_BEFORE_MIGRATE", "1") == "1":
         from storage.db import backup, get_db_path
         from datetime import datetime
-        backup_path = get_db_path().parent / f"backups/pre_migrate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_dir = get_db_path().parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"pre_migrate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         try:
             backup(backup_path)
             print(f"[migrations] Backup created: {backup_path}")
+            # Ротация: храним 5 последних pre_migrate бэкапов
+            old_backups = sorted(backup_dir.glob("pre_migrate_*.db"), key=lambda p: p.stat().st_mtime)
+            while len(old_backups) > 5:
+                old_backups.pop(0).unlink(missing_ok=True)
         except Exception as e:
             print(f"[migrations] Warning: backup failed: {e}")
 
-    for version, name, path in migrations:
-        if version in applied:
-            continue
-
+    for version, name, path in pending:
         print(f"[migrations] Applying {version}: {name}...")
         try:
             with transaction() as tx:
                 if path.suffix == ".sql":
                     sql = path.read_text(encoding="utf-8")
-                    # Выполняем все statements в скрипте
-                    tx.executescript(sql)
+                    # Выполняем statements по одному внутри tx (без неявного COMMIT от executescript)
+                    statements = [s.strip() for s in sql.split(";") if s.strip()]
+                    for stmt in statements:
+                        tx.execute(stmt)
                 elif path.suffix == ".py":
                     # Python миграция: ожидает функцию run(conn)
                     import importlib.util

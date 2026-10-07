@@ -83,7 +83,11 @@ def test_all():
 
     req_xff = DummyRequest({"X-Forwarded-For": "198.51.100.42, 10.0.0.2"})
     assert get_client_ip(req_xff) == "198.51.100.42"
-    print("[OK] 6. get_client_ip возвращает реальный IP клиента")
+
+    os.environ["TRUST_PROXY"] = "0"
+    assert get_client_ip(req_cf) == "127.0.0.1", "При TRUST_PROXY=0 спуф-заголовки должны игнорироваться!"
+    os.environ.pop("TRUST_PROXY", None)
+    print("[OK] 6. get_client_ip возвращает реальный IP клиента и защищен от спуфинга")
 
     # 7. Проверка авторизации через Authorization: Bearer
     from admin.api import _authorize
