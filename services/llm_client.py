@@ -143,7 +143,10 @@ class LLMClient:
                     "вероятно, reasoning исчерпал max_tokens"
                 )
 
-        return str(choice["message"]["content"]).strip()
+        final_content = self._content_of(choice)
+        if not final_content:
+            raise LLMError("LLM вернула пустой ответ (content=null)")
+        return final_content
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -195,6 +198,13 @@ class LLMClient:
             logger.info("Провайдер требует max_completion_tokens вместо max_tokens — переключаюсь")
             self._use_max_completion_tokens = True
             payload.pop("max_tokens", None)
+            payload[self._limit_key()] = self._params.max_tokens
+            return payload
+        # Если провайдер/прокси не поддерживает max_completion_tokens — возвращаем max_tokens.
+        if self._use_max_completion_tokens and ("max_tokens" in text or "max_completion_tokens" in text):
+            logger.info("Провайдер требует max_tokens вместо max_completion_tokens — переключаюсь")
+            self._use_max_completion_tokens = False
+            payload.pop("max_completion_tokens", None)
             payload[self._limit_key()] = self._params.max_tokens
             return payload
         # Часть моделей принимает только дефолтную temperature (часто = 1).

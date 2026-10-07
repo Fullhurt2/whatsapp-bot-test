@@ -80,8 +80,16 @@ def verify_link_code(code: str) -> Optional[dict]:
     if row["used_at"]:
         return None  # уже использован
 
-    if datetime.fromisoformat(row["expires_at"]) < datetime.utcnow():
-        return None  # истёк
+    try:
+        from datetime import timezone
+        exp_dt = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+        now_dt = datetime.now(timezone.utc)
+        if exp_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=None)
+        if exp_dt < now_dt:
+            return None  # истёк
+    except Exception:
+        return None
 
     return {"client_key": row["client_key"], "code_hash": code_hash}
 

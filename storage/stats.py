@@ -317,15 +317,25 @@ def export_stats_csv(client_key: str, from_date: str, to_date: str) -> str:
 
 def parse_date_range(from_str: Optional[str], to_str: Optional[str]) -> tuple[str, str]:
     """Парсинг диапазона дат из query параметров. По умолчанию — последние 30 дней."""
-    now = datetime.utcnow()
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    to_dt = now
     if to_str:
-        to_dt = datetime.fromisoformat(to_str.replace("Z", "+00:00"))
-    else:
-        to_dt = now
+        try:
+            dt = datetime.fromisoformat(to_str.replace("Z", "+00:00"))
+            to_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            to_dt = now
 
+    from_dt = to_dt - timedelta(days=30)
     if from_str:
-        from_dt = datetime.fromisoformat(from_str.replace("Z", "+00:00"))
-    else:
-        from_dt = to_dt - timedelta(days=30)
+        try:
+            dt = datetime.fromisoformat(from_str.replace("Z", "+00:00"))
+            from_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            pass
 
-    return from_dt.isoformat(), to_dt.isoformat()
+    # Нормализуем к строке без таймзоны для совместимости со строками в SQLite
+    from_str_res = from_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    to_str_res = to_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return from_str_res, to_str_res

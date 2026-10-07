@@ -107,6 +107,7 @@ def apply_migrations() -> None:
                     "INSERT INTO schema_version (version, name) VALUES (?, ?)",
                     (version, name),
                 )
+                applied.add(version)
             print(f"[migrations] Applied {version}: {name} OK")
         except Exception as e:
             print(f"[migrations] FAILED {version}: {name}: {e}")

@@ -1,5 +1,6 @@
 """storage/conversations.py — CRUD для диалогов."""
 
+import sqlite3
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -39,16 +40,29 @@ def create_conversation(
         )
         return conv
 
-    # Создать новый
+    # Создать новый диалог атомарно, избегая race condition при параллельных вебхуках
     conv_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
-    execute(
-        """
-        INSERT INTO conversations (id, client_key, channel, contact_phone, contact_name, zernio_conversation_id, created_at, last_message_at, last_client_message_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (conv_id, client_key, channel, contact_phone, contact_name, zernio_conversation_id, now, now, now),
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        execute(
+            """
+            INSERT INTO conversations (id, client_key, channel, contact_phone, contact_name, zernio_conversation_id, created_at, last_message_at, last_client_message_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(client_key, contact_phone) DO NOTHING
+            """,
+            (conv_id, client_key, channel, contact_phone, contact_name, zernio_conversation_id, now, now, now),
+        )
+    except sqlite3.IntegrityError:
+        pass
+
+    # Повторный поиск после безопасной вставки
+    fresh = fetchone(
+        "SELECT * FROM conversations WHERE client_key = ? AND contact_phone = ?",
+        (client_key, contact_phone),
     )
+    if fresh:
+        return dict(fresh)
+
     return {"id": conv_id, "client_key": client_key, "channel": channel, "contact_phone": contact_phone,
             "contact_name": contact_name, "zernio_conversation_id": zernio_conversation_id,
             "status": "bot", "created_at": now, "last_message_at": now, "last_client_message_at": now,
@@ -125,7 +139,7 @@ def update_conversation_status(conv_id: str, status: str) -> bool:
     Обновить статус диалога: 'bot' или 'manual'.
     При переходе в manual — зафиксировать manual_since.
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     if status == "manual":
         result = execute(
             "UPDATE conversations SET status = ?, manual_since = ?, last_message_at = ? WHERE id = ? AND status != ?",
@@ -157,7 +171,7 @@ def mark_read(conv_id: str) -> None:
 
 def update_last_message_times(conv_id: str, is_client: bool = False) -> None:
     """Обновить last_message_at и (опционально) last_client_message_at."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     if is_client:
         execute(
             "UPDATE conversations SET last_message_at = ?, last_client_message_at = ? WHERE id = ?",
@@ -184,8 +198,7 @@ def get_conversations_needing_timeout_check(
     sql = """
         SELECT * FROM conversations
         WHERE status = 'manual'
-          AND manual_since IS NOT NULL
-          AND datetime(manual_since, ? || ' hours') < datetime('now')
+          AND datetime(COALESCE(last_message_at, manual_since), ? || ' hours') < datetime('now')
     """
     params: tuple = (f"+{int(timeout_hours)}",)
     if client_key:
@@ -204,7 +217,7 @@ def delete_conversation(conv_id: str) -> bool:
 def cleanup_old_conversations(retention_days: int = 365) -> int:
     """Удалить диалоги старше retention_days (ГДПР / политика хранения)."""
     result = execute(
-        "DELETE FROM conversations WHERE created_at < datetime('now', ?)",
+        "DELETE FROM conversations WHERE datetime(created_at) < datetime('now', ?)",
         (f"-{retention_days} days",),
     )
     return result.rowcount

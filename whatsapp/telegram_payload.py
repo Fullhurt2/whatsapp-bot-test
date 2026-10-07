@@ -55,6 +55,18 @@ def parse_telegram_update(payload: dict, tenant_key: str) -> list[InboundMessage
         logger.warning("Telegram update без chat/from id: keys=%s", list(message))
         return []
 
+    media_duration_s = 0.0
+    for key in ("voice", "audio"):
+        item = message.get(key)
+        if isinstance(item, dict):
+            try:
+                media_duration_s = float(item.get("duration") or 0.0)
+            except (ValueError, TypeError):
+                media_duration_s = 0.0
+            break
+
+    caption = str(message.get("caption") or "").strip()
+
     return [InboundMessage(
         phone=str(chat_id),
         display_name=_display_name(message, chat, sender),
@@ -62,6 +74,8 @@ def parse_telegram_update(payload: dict, tenant_key: str) -> list[InboundMessage
         content_kind=_content_kind(message),
         message_id=str(payload.get("update_id") or message.get("message_id") or ""),
         phone_number_id=tenant_key,
+        media_caption=caption,
+        media_duration_s=media_duration_s,
     )]
 
 

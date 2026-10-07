@@ -28,3 +28,4 @@ class InboundMessage:
     media_url: str = ""
     media_mime: str = ""
     media_caption: str = ""
+    media_duration_s: float = 0.0

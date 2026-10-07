@@ -240,6 +240,7 @@ def mask_token_in_log(token: str) -> str:
 _failed_auth: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_WINDOW_SEC = 600  # 10 минут
 RATE_LIMIT_MAX_ATTEMPTS = 10
+_MAX_RATE_LIMIT_ENTRIES = 2000
 
 
 def check_rate_limit(ip: str) -> tuple[bool, int]:
@@ -249,29 +250,52 @@ def check_rate_limit(ip: str) -> tuple[bool, int]:
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW_SEC
     # Очищаем старые записи
-    _failed_auth[ip] = [ts for ts in _failed_auth[ip] if ts > window_start]
-    if len(_failed_auth[ip]) >= RATE_LIMIT_MAX_ATTEMPTS:
-        oldest = _failed_auth[ip][0]
+    timestamps = [ts for ts in _failed_auth.get(ip, []) if ts > window_start]
+    if timestamps:
+        _failed_auth[ip] = timestamps
+    else:
+        _failed_auth.pop(ip, None)
+        return True, 0
+
+    if len(timestamps) >= RATE_LIMIT_MAX_ATTEMPTS:
+        oldest = timestamps[0]
         retry_after = int(oldest + RATE_LIMIT_WINDOW_SEC - now) + 1
         return False, max(retry_after, 1)
     return True, 0
 
 
 def record_failed_auth(ip: str) -> None:
-    """Записать неудачную попытку аутентификации."""
-    _failed_auth[ip].append(time.time())
+    """Записать неудачную попытку аутентификации с защитой от переполнения памяти."""
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW_SEC
+
+    # Если в словаре скопилось много адресов (сканирование ботнетом), очищаем устаревшие
+    if len(_failed_auth) >= _MAX_RATE_LIMIT_ENTRIES:
+        stale_ips = [k for k, v in _failed_auth.items() if not v or v[-1] <= window_start]
+        for k in stale_ips:
+            _failed_auth.pop(k, None)
+        # Если всё ещё превышает лимит, удаляем старейшие
+        if len(_failed_auth) >= _MAX_RATE_LIMIT_ENTRIES:
+            sorted_ips = sorted(_failed_auth.keys(), key=lambda k: _failed_auth[k][-1] if _failed_auth[k] else 0)
+            for k in sorted_ips[: _MAX_RATE_LIMIT_ENTRIES // 2]:
+                _failed_auth.pop(k, None)
+
+    _failed_auth[ip].append(now)
 
 
 def get_client_ip(request: Request) -> str:
-    """Получить IP клиента: последний из X-Forwarded-For, потом X-Real-IP, потом прямой."""
-    # X-Forwarded-For: client, proxy1, proxy2 → берём последний (ближайший к нам)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        parts = [p.strip() for p in forwarded.split(",")]
-        return parts[-1]  # последний — тот, кто стучился к нашему ingress
+    """Получить IP клиента: CF-Connecting-IP, X-Real-IP, первый из X-Forwarded-For, или прямой."""
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip.strip()
     real_ip = request.headers.get("X-Real-IP")
     if real_ip:
         return real_ip.strip()
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[0]  # первый — исходный адрес клиента до прокси
     return request.client.host if request.client else "unknown"
 
 
@@ -293,8 +317,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             
             response = await call_next(request)
             
-            # Если ответ 401/403 — записываем неудачную попытку
-            if response.status_code in (401, 403):
+            # Записываем неудачную попытку только если клиент пытался аутентифицироваться,
+            # чтобы не блокировать браузер при обычном неавторизованном GET /admin/whoami.
+            is_login_path = request.url.path in ("/admin/token", "/admin/login")
+            has_auth = bool(
+                request.headers.get(HEADER_ADMIN)
+                or request.headers.get(HEADER_CLIENT)
+                or request.headers.get("Authorization")
+                or request.query_params.get("admin_token")
+                or request.query_params.get("client_token")
+            )
+            if response.status_code == 403 or (response.status_code == 401 and (is_login_path or has_auth)):
                 record_failed_auth(ip)
             
             return response
@@ -445,13 +478,20 @@ def _authorize(settings: Settings, request: Request, clients_dir: Path,
     401 — заголовков с токеном нет вовсе; 403 — токен был, но не подошёл
     (не раскрываем, какая именно из проверок провалилась).
     """
+    bearer_token = ""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        bearer_token = auth[7:].strip()
+
     admin_header = (
         request.headers.get(HEADER_ADMIN, "")
+        or bearer_token
         or request.query_params.get("admin_token", "")
         or request.query_params.get("token", "")
     )
     client_header = (
         request.headers.get(HEADER_CLIENT, "")
+        or bearer_token
         or request.query_params.get("client_token", "")
         or request.query_params.get("token", "")
     )
@@ -520,19 +560,25 @@ def _merge_incoming(old_cfg: dict, incoming: dict) -> dict:
 
     Секретные поля с пустым/замаскированным значением сохраняют прежнее
     содержимое — токен нельзя затереть по неосторожности, вернув из формы
-    замаскированную маску.
+    замаскированную маску. Вложенные словари объединяются рекурсивно,
+    чтобы частичные обновления не затирали соседние поля (например, в llm, features, media).
     """
-    merged = dict(old_cfg)
-    for key, value in incoming.items():
-        if key in SECRET_FIELDS:
-            provided = str(value if value is not None else "").strip()
-            old_value = str(old_cfg.get(key) or "")
-            if provided and provided != mask_secret(old_value):
-                merged[key] = provided
-            # пустое/замаскированное значение = оставить прежнее
-        else:
-            merged[key] = value
-    return merged
+    def _deep_merge(old: dict, fresh: dict) -> dict:
+        result = dict(old)
+        for key, value in fresh.items():
+            if key in SECRET_FIELDS:
+                provided = str(value if value is not None else "").strip()
+                old_value = str(old.get(key) or "")
+                if provided and provided != mask_secret(old_value):
+                    result[key] = provided
+                # пустое/замаскированное значение = оставить прежнее
+            elif isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = _deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    return _deep_merge(old_cfg, incoming)
 
 
 def _incoming_differs(key: str, old_value, new_value) -> bool:
@@ -1568,7 +1614,8 @@ def register_admin_api(app, settings: Settings, state) -> None:
         if not media_path or not os.path.exists(media_path):
             return JSONResponse(status_code=404, content={"error": "Исходный файл не найден на сервере"})
 
-        bundle = state.tenants.get(pid)
+        db_key = _conversation_client_key(clients_dir, pid)
+        bundle = state.tenants.get(db_key) or state.tenants.get(pid)
         t_settings = bundle.settings if bundle else settings
 
         content_kind = msg.get("content_kind")
@@ -1635,9 +1682,11 @@ def register_admin_api(app, settings: Settings, state) -> None:
             from storage import get_last_client_message_at
             last_client = get_last_client_message_at(cid)
             if last_client:
-                from datetime import datetime, timedelta
+                from datetime import datetime, timedelta, timezone
                 last_dt = datetime.fromisoformat(last_client.replace("Z", "+00:00"))
-                if datetime.utcnow() - last_dt > timedelta(hours=24):
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - last_dt > timedelta(hours=24):
                     return JSONResponse(
                         status_code=409,
                         content={"error": "window_closed", "message": "24-часовое окно закрыто, используйте шаблон"}
@@ -1718,10 +1767,13 @@ def register_admin_api(app, settings: Settings, state) -> None:
 
         update_conversation_status(cid, mode)
 
-        # Если переключаем на bot — сбрасываем unread_count
+        # Если переключаем на bot — сбрасываем unread_count и закрываем висящий handoff
         if mode == "bot":
-            from storage import mark_read
+            from storage import mark_read, get_open_handoff, resolve_handoff
             mark_read(cid)
+            open_h = get_open_handoff(cid)
+            if open_h:
+                resolve_handoff(open_h["id"])
 
         return {"ok": True, "conversation_id": cid, "mode": mode}
 
@@ -1828,25 +1880,33 @@ def register_admin_api(app, settings: Settings, state) -> None:
         клиента, поэтому панель спрашивает, чей это диалог, и открывает нужную
         карточку сама.
         """
-        role, error = _authorize(settings, request, clients_dir, pid)
-        if error is not None:
-            return JSONResponse(status_code=error, content={"error": "нет доступа"})
         from storage import get_conversation
         conv = get_conversation(cid)
         if not conv:
             return JSONResponse(status_code=404, content={"error": "диалог не найден"})
         db_key = str(conv.get("client_key") or "")
+
+        target_pid = pid
+        if not target_pid:
+            for stem in _client_pids(clients_dir):
+                if _conversation_client_key(clients_dir, stem) == db_key:
+                    target_pid = stem
+                    break
+
+        role, error = _authorize(settings, request, clients_dir, target_pid)
+        if error is not None:
+            return JSONResponse(status_code=error, content={"error": "нет доступа"})
+
+        if not target_pid:
+            return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+
         # Если вошёл клиент по своему токену, проверяем, что диалог принадлежит ему
         if role != "admin":
-            expected_key = _conversation_client_key(clients_dir, pid) if pid else ""
-            if not pid or db_key != expected_key:
+            expected_key = _conversation_client_key(clients_dir, target_pid)
+            if db_key != expected_key:
                 return JSONResponse(status_code=404, content={"error": "диалог не найден"})
-            return {"pid": pid, "conversation_id": cid}
 
-        for stem in _client_pids(clients_dir):
-            if _conversation_client_key(clients_dir, stem) == db_key:
-                return {"pid": stem, "conversation_id": cid}
-        return JSONResponse(status_code=404, content={"error": "клиент не найден"})
+        return {"pid": target_pid, "conversation_id": cid}
 
 
     @app.get("/admin/clients/{pid}/unanswered")
@@ -2031,8 +2091,13 @@ def register_admin_api(app, settings: Settings, state) -> None:
         # Создаём группы в БД
         created = 0
         for g in groups:
+            if not isinstance(g, dict):
+                continue
             name = str(g.get("name") or "").strip()
-            ids = g.get("question_ids") or []
+            raw_ids = g.get("question_ids")
+            if not isinstance(raw_ids, list):
+                continue
+            ids = [int(x) for x in raw_ids if str(x).isdigit()]
             if name and ids:
                 create_unanswered_group(db_key, name, ids)
                 created += 1

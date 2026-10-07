@@ -30,7 +30,7 @@ def add_message(
     Добавить сообщение в диалог. Возвращает message_id (autoincrement).
     Обновляет last_message_at в conversations.
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     is_client = (role == "client")
 
     with transaction() as conn:
@@ -89,7 +89,7 @@ def get_messages(
         sql += " AND created_at < ?"
         params.append(before)
 
-    sql += " ORDER BY created_at DESC LIMIT ?"
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)
 
     rows = fetchall(sql, tuple(params))
@@ -112,7 +112,7 @@ def get_context_for_llm(
         SELECT role, text, created_at
         FROM messages
         WHERE conversation_id = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT ?
         """,
         (conversation_id, max_messages),
@@ -121,11 +121,11 @@ def get_context_for_llm(
     if not rows:
         return []
 
-    # Реверс для хронологического порядка
-    messages = []
+    # Отбираем сообщения от самых новых к старым в пределах бюджета
+    selected = []
     total_chars = 0
 
-    for row in reversed(rows):
+    for row in rows:
         role = row["role"]
         text = row["text"] or ""
 
@@ -140,21 +140,22 @@ def get_context_for_llm(
         if len(text) > max_chars_per_msg:
             text = text[:max_chars_per_msg] + "…"
 
-        # Бюджет символов: переполнение пропускаем, а не обрываем — иначе
-        # вместе с лишним текстом выпали бы самые новые сообщения диалога.
+        # Бюджет символов: прекращаем добавление более старых сообщений
         if total_chars + len(text) > total_char_budget:
-            continue
+            break
 
-        messages.append({"role": role, "content": text})
+        selected.append({"role": role, "content": text})
         total_chars += len(text)
 
-    return messages
+    # Реверс для хронологического порядка (от старых к новым для LLM)
+    selected.reverse()
+    return selected
 
 
 def get_last_client_message_at(conversation_id: str) -> Optional[str]:
     """Время последнего сообщения от клиента (role='client')."""
     row = fetchone(
-        "SELECT created_at FROM messages WHERE conversation_id = ? AND role = 'client' ORDER BY created_at DESC LIMIT 1",
+        "SELECT created_at FROM messages WHERE conversation_id = ? AND role = 'client' ORDER BY created_at DESC, id DESC LIMIT 1",
         (conversation_id,),
     )
     return row["created_at"] if row else None

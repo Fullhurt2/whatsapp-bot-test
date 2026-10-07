@@ -131,7 +131,7 @@ class DummyLLM:
         return self.reply
 
 
-async def test_media_security_and_download():
+async def _subtest_media_security_and_download():
     print("[1] Безопасность URL и потоковое скачивание")
     check("https zernio.com разрешён", is_url_allowed("https://zernio.com/media/file.ogg"))
     check("https api.zernio.com разрешён", is_url_allowed("https://api.zernio.com/v1/download/123"))
@@ -188,7 +188,7 @@ async def test_media_security_and_download():
         check("download_media отсекает файлы больше max_bytes", hit_limit)
 
 
-async def test_rate_limit_and_image_resize():
+async def _subtest_rate_limit_and_image_resize():
     print("[2] Rate-limiting и ресайз изображений")
     test_phone = "+77089990011"
     # Первые 5 запросов проходят
@@ -213,7 +213,7 @@ async def test_rate_limit_and_image_resize():
         check("Пропорции сохранены (1600x800)", (w, h) == (1600, 800))
 
 
-async def test_transcribe_and_describe_mocked():
+async def _subtest_transcribe_and_describe_mocked():
     print("[3] Транскрибация Whisper и Vision (mock)")
     settings = make_test_settings()
 
@@ -266,7 +266,7 @@ async def test_transcribe_and_describe_mocked():
         check("Vision статус ok", vision_res.status == "ok")
 
 
-async def test_save_and_cleanup_media():
+async def _subtest_save_and_cleanup_media():
     print("[4] Хранилище файлов и очистка старых медиа (retention)")
     media_dir = os.path.join(test_dir, "media_store")
     local_path = save_media_file(
@@ -311,7 +311,7 @@ async def test_save_and_cleanup_media():
     check("Текст сообщения сохранён", "[Голосовое сообщение]" in m_after["text"])
 
 
-async def test_message_processor_media_flows():
+async def _subtest_message_processor_media_flows():
     print("[5] MessageProcessor: полный пайплайн медиа")
     settings = make_test_settings(media_feature=True)
     sender = DummySender()
@@ -420,7 +420,7 @@ async def test_message_processor_media_flows():
         check("В manual режиме расшифровка сохранена в БД для оператора", bool(manual_msg))
 
 
-async def test_admin_api_media_endpoints():
+async def _subtest_admin_api_media_endpoints():
     print("[6] Админ-API: выдача медиафайла и повторная расшифровка")
     from admin.api import register_admin_api
     from fastapi import FastAPI
@@ -507,16 +507,21 @@ async def main():
     init_db()
     apply_migrations()
 
-    await test_media_security_and_download()
-    await test_rate_limit_and_image_resize()
-    await test_transcribe_and_describe_mocked()
-    await test_save_and_cleanup_media()
-    await test_message_processor_media_flows()
-    await test_admin_api_media_endpoints()
+    await _subtest_media_security_and_download()
+    await _subtest_rate_limit_and_image_resize()
+    await _subtest_transcribe_and_describe_mocked()
+    await _subtest_save_and_cleanup_media()
+    await _subtest_message_processor_media_flows()
+    await _subtest_admin_api_media_endpoints()
 
     print(f"\nИтог: passed={passed}, failed={failed}")
     if failed > 0:
         sys.exit(1)
+
+
+def test_all_media():
+    """Единая точка входа для pytest."""
+    asyncio.run(main())
 
 
 if __name__ == "__main__":

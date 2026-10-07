@@ -173,7 +173,6 @@ class MetaWhatsAppClient:
         Файл уходит в Meta и у нас нигде не остаётся. Расширение в filename
         Meta обязательно (jpg/png) — вызывающий код подставляет его по типу.
         """
-        boundary = f"{_MULTIPART_PREFIX}{secrets.token_hex(16)}"
         response = await self._call(
             "POST",
             self._profile_endpoint,
@@ -181,9 +180,9 @@ class MetaWhatsAppClient:
                 "photo": (filename, content, content_type),
                 "messaging_product": (None, "whatsapp"),
             },
-            # Своя граница + заголовок: дефолтный Content-Type клиента
-            # (application/json) иначе перебил бы multipart-тело.
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            # Сбрасываем дефолтный application/json клиента, чтобы httpx
+            # сам выставил multipart/form-data со своей валидной boundary.
+            headers={"Content-Type": None},
         )
         if response.status_code != 200:
             raise MetaError(_meta_error_text(response))

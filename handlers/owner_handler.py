@@ -188,6 +188,14 @@ async def notify_owner(
     if conversation_id:
         throttle_key = (conversation_id, reason)
         now = datetime.utcnow()
+
+        # Очистка устаревших ключей для предотвращения утечки памяти
+        if len(_notification_throttle) > 200:
+            cutoff = now - timedelta(minutes=THROTTLE_MINUTES)
+            expired = [k for k, v in _notification_throttle.items() if v < cutoff]
+            for k in expired:
+                _notification_throttle.pop(k, None)
+
         last = _notification_throttle.get(throttle_key)
         if last and now - last < timedelta(minutes=THROTTLE_MINUTES):
             logger.debug("Уведомление заторможено: %s", throttle_key)

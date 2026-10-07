@@ -152,12 +152,12 @@ def parse_zernio_events(payload: dict) -> list[ZernioEvent]:
 def _parse_received(base: ZernioEvent, message: dict, sender: dict, payload: dict) -> ZernioEvent:
     """Парсит message.received — входящее от клиента."""
     text = str(message.get("text") or "").strip()
-    content_kind, media_url, media_mime, media_caption = _extract_content_and_media(message, text)
+    content_kind, media_url, media_mime, media_caption, media_duration_s = _extract_content_and_media(message, text)
 
     base.inbound = InboundMessage(
         phone=_sender_key(sender),
         display_name=str(sender.get("name") or sender.get("username") or "").strip(),
-        text=text,
+        text=text or media_caption,
         content_kind=content_kind,
         message_id=str(message.get("platformMessageId") or message.get("id") or ""),
         phone_number_id=base.account_id,
@@ -166,6 +166,7 @@ def _parse_received(base: ZernioEvent, message: dict, sender: dict, payload: dic
         media_url=media_url,
         media_mime=media_mime,
         media_caption=media_caption,
+        media_duration_s=media_duration_s,
     )
     return base
 
@@ -215,8 +216,8 @@ def _sender_key(sender: dict) -> str:
     return bsuid or sender_id
 
 
-def _extract_content_and_media(message: dict, text: str) -> tuple[str, str, str, str]:
-    """Извлекает (content_kind, media_url, media_mime, media_caption)."""
+def _extract_content_and_media(message: dict, text: str) -> tuple[str, str, str, str, float]:
+    """Извлекает (content_kind, media_url, media_mime, media_caption, duration_s)."""
     attachments = message.get("attachments")
     if isinstance(attachments, list) and attachments:
         for attachment in attachments:
@@ -224,7 +225,12 @@ def _extract_content_and_media(message: dict, text: str) -> tuple[str, str, str,
                 raw_type = str(attachment.get("type") or "").strip().lower()
                 url = str(attachment.get("url") or attachment.get("link") or "").strip()
                 mime = str(attachment.get("mimeType") or attachment.get("mime_type") or "").strip()
-                caption = str(attachment.get("caption") or text or "").strip()
+                caption = str(attachment.get("caption") or "").strip()
+                try:
+                    duration_s = float(attachment.get("duration") or 0.0)
+                except (ValueError, TypeError):
+                    duration_s = 0.0
+
                 # Нормализуем тип контента: voice/audio, image, video, document
                 if raw_type in ("voice", "audio"):
                     kind = "voice" if raw_type == "voice" else "audio"
@@ -236,13 +242,13 @@ def _extract_content_and_media(message: dict, text: str) -> tuple[str, str, str,
                     kind = "document"
                 else:
                     kind = raw_type or "unknown"
-                return kind, url, mime, caption
+                return kind, url, mime, caption, duration_s
     if text:
-        return "text", "", "", ""
-    return "unknown", "", "", ""
+        return "text", "", "", "", 0.0
+    return "unknown", "", "", "", 0.0
 
 
 def _content_kind(message: dict, text: str) -> str:
     """Для обратной совместимости."""
-    kind, _, _, _ = _extract_content_and_media(message, text)
+    kind, _, _, _, _ = _extract_content_and_media(message, text)
     return kind

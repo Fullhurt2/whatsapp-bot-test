@@ -97,6 +97,12 @@ async def check_rate_limit(phone: str) -> bool:
     """Проверяет скользящий лимит: не более 5 медиа в минуту с одного номера."""
     now = time.monotonic()
     async with _rate_limit_lock:
+        # Очистка устаревших ключей для предотвращения утечки памяти
+        if len(_rate_limit_history) > 200:
+            stale_keys = [k for k, v in _rate_limit_history.items() if not v or (now - v[-1] >= 60.0)]
+            for k in stale_keys:
+                _rate_limit_history.pop(k, None)
+
         timestamps = _rate_limit_history.get(phone, [])
         # Очистить записи старше 60 секунд
         timestamps = [t for t in timestamps if now - t < 60.0]
@@ -136,32 +142,48 @@ async def download_media(
     if not is_url_allowed(url):
         raise MediaError(f"URL не входит в список разрешённых доменов: {url}")
 
-    req_headers = dict(headers or {})
-    # Если URL указывает на Zernio API (/v1/whatsapp/media или api.zernio.com/zernio.com) — добавляем Bearer токен
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    token = api_key or os.getenv("ZERNIO_API_KEY", "").strip()
-    if token and (host == "zernio.com" or host.endswith(".zernio.com")):
-        if "authorization" not in {k.lower() for k in req_headers}:
-            req_headers["Authorization"] = f"Bearer {token}"
+    target_url = url
+    max_redirects = 3
 
-    stream_kwargs = {}
-    if req_headers:
-        stream_kwargs["headers"] = req_headers
-
-    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=False) as client:
         try:
-            async with client.stream("GET", url, **stream_kwargs) as response:
-                if response.status_code != 200:
-                    raise MediaError(f"Ошибка загрузки медиа: HTTP {response.status_code}")
+            for _ in range(max_redirects + 1):
+                if not is_url_allowed(target_url):
+                    raise MediaError(f"URL не входит в список разрешённых доменов: {target_url}")
 
-                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > max_bytes:
-                        raise MediaLimitError(f"Размер файла превышает лимит ({len(data)} > {max_bytes} байт)")
-                return bytes(data), content_type or "application/octet-stream"
+                req_headers = dict(headers or {})
+                parsed = urlparse(target_url)
+                host = (parsed.hostname or "").lower()
+                token = api_key or os.getenv("ZERNIO_API_KEY", "").strip()
+                if token and (host == "zernio.com" or host.endswith(".zernio.com")):
+                    if "authorization" not in {k.lower() for k in req_headers}:
+                        req_headers["Authorization"] = f"Bearer {token}"
+
+                stream_kwargs = {}
+                if req_headers:
+                    stream_kwargs["headers"] = req_headers
+
+                async with client.stream("GET", target_url, **stream_kwargs) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise MediaError("Редирект без заголовка Location")
+                        from urllib.parse import urljoin
+                        target_url = urljoin(target_url, location)
+                        continue
+
+                    if response.status_code != 200:
+                        raise MediaError(f"Ошибка загрузки медиа: HTTP {response.status_code}")
+
+                    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        data.extend(chunk)
+                        if len(data) > max_bytes:
+                            raise MediaLimitError(f"Размер файла превышает лимит ({len(data)} > {max_bytes} байт)")
+                    return bytes(data), content_type or "application/octet-stream"
+
+            raise MediaError("Слишком много редиректов при скачивании медиа")
         except httpx.TimeoutException as exc:
             raise MediaError(f"Таймаут скачивания медиа ({timeout_s} с)") from exc
         except httpx.HTTPError as exc:
@@ -425,7 +447,9 @@ async def describe_image(
 
     try:
         data_json = response.json()
-        description = data_json["choices"][0]["message"]["content"].strip()
+        choice_msg = (data_json.get("choices") or [{}])[0].get("message") or {}
+        content_val = choice_msg.get("content")
+        description = str(content_val or "").strip()
     except Exception as exc:
         raise MediaError("Невалидный ответ Vision API") from exc
 

@@ -15,7 +15,7 @@ def add_unanswered_question(
     """
     Добавить вопрос без ответа. Возвращает question_id.
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     with transaction() as conn:
         cursor = conn.execute(
             """
@@ -91,12 +91,12 @@ def create_unanswered_group(
         )
         group_id = cursor.lastrowid
 
-        # Обновить вопросы: привязать к группе
+        # Обновить вопросы: привязать к группе строго для текущего клиента (защита от cross-tenant манипуляций)
         if question_ids:
             placeholders = ",".join("?" * len(question_ids))
             conn.execute(
-                f"UPDATE unanswered_questions SET group_id = ? WHERE id IN ({placeholders})",
-                [group_id] + question_ids,
+                f"UPDATE unanswered_questions SET group_id = ? WHERE id IN ({placeholders}) AND client_key = ?",
+                [group_id] + list(question_ids) + [client_key],
             )
     return group_id
 

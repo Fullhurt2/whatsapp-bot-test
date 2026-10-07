@@ -42,19 +42,31 @@ def get_connection() -> sqlite3.Connection:
     Получить соединение для текущего потока.
     Соединение создаётся лениво и кешируется в thread-local.
     """
-    if not hasattr(_thread_local, "conn") or _thread_local.conn is None:
-        path = get_db_path()
-        conn = sqlite3.connect(str(path), check_same_thread=False)
+    current_path = str(get_db_path())
+    conn = getattr(_thread_local, "conn", None)
+    cached_path = getattr(_thread_local, "conn_path", None)
+    if conn is None or cached_path != current_path:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        conn = sqlite3.connect(current_path, check_same_thread=False)
         _configure_connection(conn)
         _thread_local.conn = conn
+        _thread_local.conn_path = current_path
     return _thread_local.conn
 
 
 def close_connection() -> None:
     """Закрыть соединение текущего потока (для тестов / graceful shutdown)."""
     if hasattr(_thread_local, "conn") and _thread_local.conn is not None:
-        _thread_local.conn.close()
+        try:
+            _thread_local.conn.close()
+        except Exception:
+            pass
         _thread_local.conn = None
+        _thread_local.conn_path = None
 
 
 @contextmanager
@@ -84,9 +96,18 @@ def transaction():
 
 
 def _is_write(sql: str) -> bool:
-    """Запрос меняет данные (нужен commit)."""
-    head = sql.lstrip()[:8].upper()
-    return head.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
+    """Запрос меняет данные или схему (нужен commit)."""
+    # Удаляем ведущие пробелы и любые комментарии -- в начале запроса
+    lines = [line.strip() for line in sql.strip().splitlines() if line.strip() and not line.strip().startswith("--")]
+    if not lines:
+        return False
+    first_word = lines[0].split()[0].upper() if lines[0].split() else ""
+    if first_word in ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"):
+        return True
+    if first_word == "WITH":
+        clean = " ".join(lines).upper()
+        return any(f" {kw} " in f" {clean} " for kw in ("INSERT", "UPDATE", "DELETE", "REPLACE"))
+    return False
 
 
 def execute(sql: str, params: tuple = ()) -> sqlite3.Cursor:

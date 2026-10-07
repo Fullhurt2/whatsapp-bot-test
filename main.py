@@ -49,6 +49,7 @@ from storage import (
     update_conversation_status,
     increment_unread,
     get_open_handoff,
+    resolve_handoff,
     update_delivery_status,
     get_message_by_provider_id,
     get_handoffs_for_conversation,
@@ -513,6 +514,8 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             get_conversations_needing_timeout_check,
             mark_read,
             update_conversation_status,
+            get_open_handoff,
+            resolve_handoff,
         )
 
         targets: list[tuple[int, str]] = []
@@ -531,6 +534,9 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             for conv in convs:
                 await asyncio.to_thread(update_conversation_status, conv["id"], "bot")
                 await asyncio.to_thread(mark_read, conv["id"])
+                open_h = await asyncio.to_thread(get_open_handoff, conv["id"])
+                if open_h:
+                    await asyncio.to_thread(resolve_handoff, open_h["id"])
                 total += 1
                 logger.info(
                     "Диалог возвращён боту по таймауту | conv_id=%s | часов=%d",
@@ -589,18 +595,6 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     # одного IP) и защитные заголовки (CSP, nosniff, frame-ancestors none).
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(CSPMiddleware)
-
-    if settings.clients_dir:
-        logger.info(
-            "Запуск бота | режим: мультитенант | папка клиентов: %s | провайдер: %s",
-            settings.clients_dir, settings.messaging_provider,
-        )
-    else:
-        logger.info(
-            "Запуск бота | бизнес: %s | конфиг: %s | модель: %s | провайдер: %s",
-            settings.business_name, settings.config_file, settings.llm.model,
-            settings.messaging_provider,
-        )
 
     state = WebhookState(settings, sender_factory)
     app.state.state = state
@@ -818,9 +812,10 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
             return {"ok": True}
 
         for event in events:
-            # Дедупликация через БД
-            event_id = event.provider_message_id or event.timestamp or ""
-            if not check_and_add(event_id):
+            # Дедупликация через БД (с учётом типа события, чтобы sent/delivered/read не блокировали друг друга)
+            raw_id = event.provider_message_id or event.timestamp or ""
+            event_id = f"zernio:{event.event_type}:{raw_id}" if raw_id else ""
+            if event_id and not check_and_add(event_id):
                 logger.debug("Дубликат вебхука Zernio проигнорирован: event_id=%s", event_id)
                 continue
 
@@ -853,29 +848,76 @@ def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookSta
 
             elif event.event_type == "message_sent":
                 # Исходящее от бизнеса/оператора — обновляем статус доставки
-                # и если диалог в manual — фиксируем first_human_reply
                 if event.provider_message_id:
                     update_delivery_status(event.provider_message_id, "sent")
 
-                # Найти диалог и обновить last_message_at, проверить first_human_reply
                 if event.conversation_id:
-                    from storage import get_conversation_by_client_and_phone
-                    # conversation_id в БД — это UUID, ищем по zernio_conversation_id
-                    from storage.db import fetchone
+                    from storage.db import fetchone, execute
                     row = fetchone(
                         "SELECT id FROM conversations WHERE zernio_conversation_id = ? AND client_key = ?",
                         (event.conversation_id, event.account_id),
                     )
                     if row:
                         conv_id = row["id"]
-                        from storage import update_last_message_times
+                        from storage import update_last_message_times, get_message_by_provider_id, add_message
                         update_last_message_times(conv_id, is_client=False)
 
-                        # Если есть открытый handoff — отметить first_human_reply
-                        open_handoff = get_open_handoff(conv_id)
-                        if open_handoff:
-                            from storage import mark_first_human_reply
-                            mark_first_human_reply(open_handoff["id"])
+                        raw_msg = (event.raw_payload.get("message") or {}) if isinstance(event.raw_payload, dict) else {}
+                        event_text = str(raw_msg.get("text") or "").strip()
+
+                        # Проверяем: это исходящее от самого бота или ответ живого оператора
+                        is_bot_message = False
+                        if event.provider_message_id:
+                            existing = get_message_by_provider_id(event.provider_message_id)
+                            if existing and existing.get("role") == "bot":
+                                is_bot_message = True
+
+                        last_msg = fetchone(
+                            "SELECT id, role, text, provider_message_id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                            (conv_id,),
+                        )
+
+                        if not is_bot_message and last_msg and last_msg["role"] == "bot":
+                            # Сообщение бота: сопоставляем СТРОГО по совпадению текста
+                            if event_text and last_msg["text"] == event_text:
+                                is_bot_message = True
+                                if event.provider_message_id and not last_msg["provider_message_id"]:
+                                    execute(
+                                        "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
+                                        (event.provider_message_id, last_msg["id"]),
+                                    )
+
+                        if not is_bot_message:
+                            # Проверяем, не было ли это сообщение оператора уже сохранено из админки панели
+                            existing_human = None
+                            if event.provider_message_id:
+                                existing_human = get_message_by_provider_id(event.provider_message_id)
+
+                            # Если сообщение отправлено из веб-панели (с временным idempotency ID), связываем его
+                            if not existing_human and last_msg and last_msg["role"] == "human":
+                                if event_text and last_msg["text"] == event_text:
+                                    existing_human = last_msg
+                                    if event.provider_message_id:
+                                        execute(
+                                            "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
+                                            (event.provider_message_id, last_msg["id"]),
+                                        )
+
+                            if not existing_human and event_text:
+                                # Сообщение отправлено человеком напрямую (из приложения WhatsApp / Inbox)
+                                add_message(
+                                    conversation_id=conv_id,
+                                    role="human",
+                                    text=event_text,
+                                    content_kind="text",
+                                    provider_message_id=event.provider_message_id,
+                                    delivery_status="sent",
+                                )
+
+                            open_handoff = get_open_handoff(conv_id)
+                            if open_handoff:
+                                from storage import mark_first_human_reply
+                                mark_first_human_reply(open_handoff["id"])
 
             elif event.event_type == "message_failed":
                 if event.provider_message_id:
@@ -996,6 +1038,11 @@ def _register_telegram_webhook(app: FastAPI, settings: Settings, state: WebhookS
             if not hmac.compare_digest(provided, expected_secret):
                 logger.warning("Telegram вебхук отклонён: секрет не совпал (bot_id=%s)", bot_id)
                 return JSONResponse(status_code=401, content={"ok": False})
+        else:
+            logger.warning(
+                "Telegram вебхук принят без проверки секретного токена: TELEGRAM_WEBHOOK_SECRET не настроен (bot_id=%s)",
+                bot_id,
+            )
 
         raw_body = await request.body()
         try:
@@ -1086,17 +1133,17 @@ def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: We
 
                 client_key = result["client_key"]
                 code_hash = result["code_hash"]
-                # Код одноразовый: если его уже заняли — привязка не пройдёт.
-                if not complete_link_code(code_hash, chat_id):
-                    await _owner_bot_reply(settings, chat_id,
-                                           "⚠️ Этот код уже использован. Попросите новый в панели.")
-                    return {"ok": True}
                 if count_bindings(client_key) >= MAX_BINDINGS_PER_CLIENT:
                     await _owner_bot_reply(
                         settings, chat_id,
                         f"⚠️ У клиента уже {MAX_BINDINGS_PER_CLIENT} привязанных чатов. "
                         "Отвяжите лишний в панели или удалите этого бота.",
                     )
+                    return {"ok": True}
+                # Код одноразовый: если его уже заняли — привязка не пройдёт.
+                if not complete_link_code(code_hash, chat_id):
+                    await _owner_bot_reply(settings, chat_id,
+                                           "⚠️ Этот код уже использован. Попросите новый в панели.")
                     return {"ok": True}
                 if add_tg_binding(client_key, chat_id):
                     logger.info("Telegram: чат %s привязан к клиенту %s", chat_id, client_key)

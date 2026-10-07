@@ -15,7 +15,7 @@ def create_handoff(
     Создать запись о передаче. Возвращает handoff_id.
     reason: 'booking' | 'complaint' | 'human_requested' | 'no_answer' | 'llm_error' | 'llm_timeout' | 'keyword:<trigger>'
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     with transaction() as conn:
         cursor = conn.execute(
             """
@@ -98,7 +98,7 @@ def get_handoffs_needing_reminder(hours: int = 2) -> list[dict]:
           AND h.resolved_at IS NULL
           AND h.reminded_at IS NULL
           AND h.notified_at IS NOT NULL
-          AND h.notified_at <= datetime('now', '-{int(hours)} hours')
+          AND datetime(h.notified_at) <= datetime('now', '-{int(hours)} hours')
         """,
     )
     return [dict(row) for row in rows]
@@ -154,11 +154,23 @@ def get_manager_response_times(client_key: str, from_date: str, to_date: str) ->
         return {"avg_seconds": 0, "p95_seconds": 0, "count": 0}
 
     import statistics
+    from datetime import timezone
     diffs = []
     for row in rows:
-        created = datetime.fromisoformat(row["created_at"])
-        replied = datetime.fromisoformat(row["first_human_reply_at"])
-        diffs.append((replied - created).total_seconds())
+        try:
+            created_s = str(row["created_at"]).replace("Z", "+00:00")
+            replied_s = str(row["first_human_reply_at"]).replace("Z", "+00:00")
+            created = datetime.fromisoformat(created_s)
+            replied = datetime.fromisoformat(replied_s)
+            if created.tzinfo is not None:
+                created = created.astimezone(timezone.utc).replace(tzinfo=None)
+            if replied.tzinfo is not None:
+                replied = replied.astimezone(timezone.utc).replace(tzinfo=None)
+            sec = (replied - created).total_seconds()
+            if sec >= 0:
+                diffs.append(sec)
+        except Exception:
+            continue
 
     diffs.sort()
     n = len(diffs)

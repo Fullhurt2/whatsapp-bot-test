@@ -48,6 +48,7 @@ try:
         add_message,
         get_context_for_llm,
         increment_unread,
+        mark_read,
         update_delivery_status,
         get_message_by_provider_id,
     )
@@ -74,6 +75,9 @@ except Exception:
         return []
 
     def increment_unread(*args, **kwargs):
+        pass
+
+    def mark_read(*args, **kwargs):
         pass
 
     def update_delivery_status(*args, **kwargs):
@@ -270,9 +274,12 @@ class MessageProcessor:
             )
         else:
             conv_id = conv["id"]
-            # Сброс статуса на bot при старте
-            from storage import update_conversation_status
+            # Сброс статуса на bot при старте и закрытие висящего handoff
+            from storage import update_conversation_status, get_open_handoff, resolve_handoff
             update_conversation_status(conv_id, "bot")
+            open_h = get_open_handoff(conv_id)
+            if open_h:
+                resolve_handoff(open_h["id"])
 
         await self.sender.send_text(
             phone,
@@ -363,7 +370,6 @@ class MessageProcessor:
                     provider_message_id=getattr(inbound, "message_id", ""),
                     media_status="skipped",
                 )
-                increment_unread(conv_id)
             try:
                 await self.sender.send_text(phone, NON_TEXT_REPLY, conversation_id=conversation_id)
             except MessagingError:
@@ -489,6 +495,20 @@ class MessageProcessor:
         media_result = None
         try:
             if is_audio:
+                inbound_duration = float(getattr(inbound, "media_duration_s", 0.0) or 0.0)
+                if inbound_duration > media_cfg.max_audio_seconds:
+                    logger.warning(
+                        "Аудио длиннее лимита (%.1f > %d с) | phone=%s (проверка до Whisper)",
+                        inbound_duration, media_cfg.max_audio_seconds, phone,
+                    )
+                    await self._skip_media(
+                        phone, display_name, conversation_id, conv_id, inbound,
+                        f"[Голосовое сообщение > {media_cfg.max_audio_seconds}с]",
+                        f"Голосовое сообщение длиннее {media_cfg.max_audio_seconds} секунд. Пожалуйста, пришлите более короткое или напишите текстом 🙏",
+                        local_path=local_path, mime=mime, duration_s=inbound_duration, size=len(data),
+                    )
+                    return
+
                 hint = f"{self.settings.business_name}. {self.settings.knowledge_base[:300]}"
                 media_result = await transcribe_audio(
                     data=data,
@@ -561,7 +581,6 @@ class MessageProcessor:
                     text=synthesized_text,
                     **media_params,
                 )
-                increment_unread(conv_id)
             return
 
         # Режим бота: передаём синтезированный текст в основной пайплайн
@@ -594,7 +613,6 @@ class MessageProcessor:
                 media_size=size,
                 media_status="skipped",
             )
-            increment_unread(conv_id)
         try:
             await self.sender.send_text(phone, reply_text, conversation_id=conversation_id)
         except MessagingError:
@@ -619,7 +637,6 @@ class MessageProcessor:
                 media_size=size,
                 media_status="failed",
             )
-            increment_unread(conv_id)
         try:
             await self.sender.send_text(phone, reply_text, conversation_id=conversation_id)
         except MessagingError:
@@ -681,7 +698,6 @@ class MessageProcessor:
                 text=text,
                 content_kind="text",
             )
-            increment_unread(conv_id)
             return
 
         async with self._lock_for(phone):
@@ -736,7 +752,6 @@ class MessageProcessor:
                 media_model=mp.get("media_model"),
                 media_cost=mp.get("media_cost"),
             )
-            increment_unread(conv_id)
 
 
         # Служебные фразы бота не генерирует модель — выбираем язык по
@@ -884,6 +899,8 @@ class MessageProcessor:
                 latency_ms=int(llm_sec * 1000),
                 answer_kind="kb",
             )
+            # Так как бот успешно ответил клиенту, диалог не требует внимания оператора
+            mark_read(conv_id)
         else:
             # Fallback: in-memory history - сохраняем только assistant (user уже добавлен в начале _process)
             self._remember(self._history_for(phone), "assistant", reply)
