@@ -108,6 +108,8 @@ def setup_logging(level: str) -> None:
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level, logging.INFO))
+    # Защита от дублирования хэндлеров при повторных вызовах setup_logging
+    root.handlers.clear()
     root.addHandler(file_handler)
     root.addHandler(console_handler)
 
@@ -593,6 +595,9 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     scheduler.add_job(manual_timeout_job, "interval", hours=1, id="manual_timeout", replace_existing=True)
     scheduler.add_job(reminder_job, "interval", minutes=15, id="reminder_job", replace_existing=True)
 
+    # Создаём состояние вебхуков и привязываем к приложению
+    state = WebhookState(settings, sender_factory)
+
     # Lifespan контекст-менеджер (должен быть определён до создания FastAPI app)
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -632,14 +637,14 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
 
     # Создаём FastAPI приложение
     app = FastAPI(lifespan=lifespan)
+    app.state.state = state
+    app.state.scheduler = scheduler
+    app.state.volume_ok = volume_ok
 
     # Безопасность панели /admin: ограничение попыток входа (10 за 10 минут с
     # одного IP) и защитные заголовки (CSP, nosniff, frame-ancestors none).
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(CSPMiddleware)
-
-    state = WebhookState(settings, sender_factory)
-    app.state.state = state
 
     # Регистрация вебхуков
     if state.multitenant:
