@@ -318,7 +318,7 @@ class WebhookState:
         processor = processor or self.processor
         conversation_id = getattr(inbound, "conversation_id", "")
         try:
-            if getattr(inbound, "content_kind", "text") in ("text", "") and inbound.text.strip("/").casefold() == "start":
+            if getattr(inbound, "content_kind", "text") in ("text", "") and (inbound.text or "").strip("/").casefold() == "start":
                 await processor.handle_greeting(inbound.phone, conversation_id=conversation_id)
             elif (
                 getattr(inbound, "media_url", None)
@@ -1225,7 +1225,7 @@ def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: We
 
         elif text.strip() == "/stop":
             # Отвязка чата от всех клиентов, где он привязан.
-            from storage import get_tg_bindings, remove_tg_binding
+            from storage import remove_tg_binding
             removed = 0
             for binding in get_tg_bindings_for_notify_all():
                 if binding["chat_id"] == chat_id and remove_tg_binding(binding["client_key"], binding["id"]):

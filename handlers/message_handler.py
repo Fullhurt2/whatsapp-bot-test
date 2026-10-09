@@ -411,7 +411,6 @@ class MessageProcessor:
 
         # Rate limit: не более 5 медиа в минуту с номера
         from services.media import check_rate_limit
-        client_key = getattr(self.settings, "client_key", "") or getattr(self.settings, "client_name", "")
         if not await check_rate_limit(phone, client_key=client_key):
             logger.warning("Превышен лимит медиа в минуту (5/мин) | phone=%s", phone)
             await self._skip_media(

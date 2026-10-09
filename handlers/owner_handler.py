@@ -44,10 +44,13 @@ def _notify_recipients(settings: Settings) -> list[str]:
     Привязки хранятся в БД по ключу клиента; для zernio это accountId — тот же,
     под которым лежат диалоги, поэтому уведомление найдёт нужный диалог.
     """
+    from whatsapp.telegram_token import bot_id_from_token
+
     chat_ids: list[str] = []
     client_key = (
         getattr(settings, "whatsapp_phone_number_id", "")
         or getattr(settings, "zernio_account_id", "")
+        or bot_id_from_token(getattr(settings, "telegram_bot_token", ""))
         or ""
     )
     if client_key:

@@ -43,7 +43,7 @@ EMPTY_RESPONSE_RETRY_LIMIT = 5000
 SERVER_ERROR_RETRY_DELAY_SEC = 1.0
 
 # Изоляция расхода токенов по текущей задаче/корутине
-_last_usage_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar("llm_last_usage", default={})
+_last_usage_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar("llm_last_usage", default=None)
 
 
 class LLMError(Exception):

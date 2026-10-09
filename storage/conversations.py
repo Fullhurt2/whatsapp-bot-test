@@ -38,6 +38,10 @@ def create_conversation(
             """,
             (contact_name, zernio_conversation_id, conv["id"]),
         )
+        if contact_name and not conv.get("contact_name"):
+            conv["contact_name"] = contact_name
+        if zernio_conversation_id and not conv.get("zernio_conversation_id"):
+            conv["zernio_conversation_id"] = zernio_conversation_id
         return conv
 
     # Создать новый диалог атомарно, избегая race condition при параллельных вебхуках

@@ -49,7 +49,7 @@ def api(method: str, path: str, token: str, params: dict | None = None,
     except urllib.error.HTTPError as error:
         try:
             body = json.loads(error.read().decode())
-        except Exception:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             body = {}
         return error.code, body
 
@@ -80,8 +80,6 @@ def main() -> None:
                         help="показать WABA и номера, доступные токену")
     parser.add_argument("--graph-version", default=DEFAULT_VERSION)
     args = parser.parse_args()
-
-    base = f"{GRAPH}/{args.graph_version}"
 
     # 1. Токен работает? Кто он такой?
     code, me = api("GET", "me", args.token, version=args.graph_version)

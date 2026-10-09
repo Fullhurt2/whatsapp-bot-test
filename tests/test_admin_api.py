@@ -410,7 +410,9 @@ def test_token_migration():
         token = str(cfg.get("management_token") or "").strip()
         if not token:
             continue
-        bare = token[len("sha256:"):] if token.startswith("sha256:") else token
+        if token.startswith("pbkdf2:sha256:") or token.startswith("sha256:"):
+            continue  # уже хэш
+        bare = token
         if len(bare) == 64 and all(c in "0123456789abcdef" for c in bare.lower()):
             continue  # уже хэш
         _atomic_write(path, {**cfg, "management_token": hash_token(token)})

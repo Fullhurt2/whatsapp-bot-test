@@ -19,7 +19,6 @@ upload_profile_photo обслуживают его из админ-панели.
 
 import asyncio
 import logging
-import secrets
 
 import httpx
 

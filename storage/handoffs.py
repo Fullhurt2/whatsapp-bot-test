@@ -162,7 +162,6 @@ def get_manager_response_times(client_key: str, from_date: str, to_date: str) ->
     if not rows:
         return {"avg_seconds": 0, "p95_seconds": 0, "count": 0}
 
-    import statistics
     from datetime import timezone
     diffs = []
     for row in rows:
