@@ -354,8 +354,12 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
         meta_graph_version=os.getenv("META_GRAPH_VERSION", "").strip() or "v21.0",
         app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
         app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
-        llm_api_url=os.getenv("LLM_API_URL", "").strip(),
-        llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
+        llm_api_url=os.getenv("LLM_API_URL", "").strip() or "https://openrouter.ai/api/v1",
+        llm_api_key=(
+            os.getenv("LLM_API_KEY", "").strip()
+            or os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        ),
         business_name="",
         tone="",
         language="ru",

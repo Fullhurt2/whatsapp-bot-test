@@ -85,9 +85,19 @@ class LLMClient:
         self._last_usage_fallback: dict = {}
         # Общий таймаут = timeout_seconds из конфига; на установку соединения даём 10с.
         # read-таймаут — главная защита от «зависшего» ответа модели.
+        # Если api_key пришёл пустым, пробуем взять из переменных окружения
+        resolved_key = (
+            str(api_key or "").strip()
+            or os.getenv("LLM_API_KEY", "").strip()
+            or os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        if not resolved_key:
+            logger.error("LLMClient инициализирован с ПУСТЫМ API-ключом! Запросы к LLM завершатся с 401.")
+
         self._client = httpx.AsyncClient(
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {resolved_key}",
                 "Content-Type": "application/json",
             },
             timeout=httpx.Timeout(params.timeout_seconds, connect=10.0),
