@@ -195,8 +195,8 @@ function switchTab(name) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("hidden", panel.id !== "tab-" + name);
   });
-  // Load profile data when Profile tab is opened
-  if (name === "profile") {
+  // Load profile data when Business tab is opened for WhatsApp/Zernio
+  if (name === "business" && ["wa", "zernio"].includes(currentProvider)) {
     loadProfile();
     setupProfileCounters();
   }
@@ -262,9 +262,13 @@ async function openEditor(pid) {
   show("tabStatsBtn", true);
   show("tabTelegramBtn", true);
   show("tabUnansweredBtn", true);
-  // Show Profile tab for WhatsApp (wa) and Zernio clients
+  // Show WhatsApp Profile section for WhatsApp (wa) and Zernio clients
   const isWhatsApp = ["wa", "zernio"].includes(data.provider);
-  show("tabProfileBtn", isWhatsApp);
+  show("businessProfileSection", isWhatsApp);
+  if (isWhatsApp) {
+    loadProfile();
+    setupProfileCounters();
+  }
   currentProvider = ["tg", "zernio"].includes(data.provider) ? data.provider : "wa";
   applyProviderUI(currentProvider);
   // Zernio: сбрасываем состояние блока подключения при открытии другого клиента.
@@ -315,10 +319,15 @@ async function openEditor(pid) {
   status("editorStatus", "");
   switchTab("business");
   renderClientList($("clientSearch") ? $("clientSearch").value : "");
-  updateKnowledgeHelpers();
+  parseKnowledgeBase(data.knowledge_base);
+  setKbMode("sections");
+  updateKnowledgeNotice();
 }
 
 function collectForm() {
+  if (currentKbMode === "sections") {
+    assembleKnowledgeBase();
+  }
   const value = (id) => $(id).value;
   const config = {
     business_name: value("f_business_name").trim(),
@@ -608,16 +617,16 @@ async function saveProfile() {
     vertical: $("f_vertical").value.trim(),
     address: $("f_address").value.trim(),
   };
-  const saveBtn = document.querySelector("#tab-profile .btn-primary");
+  const saveBtn = $("saveProfileBtn");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Сохраняем…"; }
   try {
     const { ok, code, data } = await api("PATCH", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile", payload);
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль WhatsApp"; }
     if (!ok) { status($("profileStatus"), humanError(code, data), true); return; }
     status($("profileStatus"), "Профиль сохранён", false);
     loadProfile();
   } catch (e) {
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль"; }
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль WhatsApp"; }
     status($("profileStatus"), "Ошибка: " + e.message, true);
   }
 }
@@ -1459,14 +1468,191 @@ switchTab = function(name) {
   document.querySelectorAll("textarea.auto-resize").forEach((ta) => autoResizeTextarea(ta));
 };
 
-// --- образец, счётчик и подсказка для «Информации о бизнесе» ---
-const KNOWLEDGE_TEMPLATE = "Адрес:\nЧасы работы:\nУслуги и цены:\nКак записаться:\nЧастые вопросы:";
-const KNOWLEDGE_SECTIONS = ["Адрес", "Часы работы", "Услуги и цены", "Как записаться", "Частые вопросы"];
+// --- База знаний: разделы, шаблоны по типам бизнеса, переключение режимов ---
 
-function knowledgeFilledCount(text) {
-  return KNOWLEDGE_SECTIONS.filter((name) =>
-    new RegExp("^\\s*" + name + "\\s*:\\s*\\S", "m").test(text)
-  ).length;
+let currentKbMode = "sections";
+
+const KB_TEMPLATES = {
+  services: {
+    about: "Салон красоты «Эстетика».\nАдрес: г. Алматы, ул. Абая 50, 2 этаж (вход со стороны проспекта).\nГрафик: ежедневно с 10:00 до 21:00.",
+    services: "Маникюр с гель-лаком — 5000 ₸\nПедикюр комплексный — 7000 ₸\nСнятие старого покрытия — 1000 ₸\nСтрижка женская — от 6000 ₸\nОкрашивание волос — от 12 000 ₸\nInstagram с нашими работами: instagram.com/estetika_almaty",
+    booking: "Запись предварительная — минимум за 1 день.\nДля новых клиентов действует предоплата 2000 ₸ на Kaspi.\nПеренос записи возможен не позже чем за 3 часа до визита.\nОплата: Kaspi QR, наличные, банковская карта.",
+    faq: "Есть ли парковка? — Да, бесплатная во дворе за шлагбаумом.\nСколько длится процедура? — Примерно 1.5–2 часа.\nРаботаете ли в праздники? — Да, по обычному графику.",
+    rules: "При опоздании более чем на 15 минут время визита может быть сокращено.\nСкидка 10% в день рождения (при предъявлении удостоверения)."
+  },
+  shop: {
+    about: "Магазин одежды и аксессуаров «Trend».\nШоурум: г. Астана, ул. Достык 10.\nГрафик: ежедневно с 11:00 до 20:00 без выходных.\nОтправляем заказы по всему Казахстану.",
+    services: "Платья вечерние и повседневные — от 15 000 ₸\nКостюмы деловые — от 25 000 ₸\nБазовые футболки — от 6 000 ₸\nСумки и аксессуары — от 8 000 ₸\nПолный каталог с фото и размерами: trend-shop.kz",
+    booking: "Как заказать: отправьте фото или название товара и нужный размер прямо в чат.\nДоставка по городу курьером — 1500 ₸ (при заказе от 30 000 ₸ — бесплатно).\nДоставка по Казахстану через CDEK / Казпочту — 3–5 рабочих дней.\nОплата: Kaspi Pay, перевод, картой на сайте.",
+    faq: "Есть ли примерка? — Да, в нашем шоуруме.\nМожно ли вернуть товар? — Да, в течение 14 дней при сохранении товарного вида и бирок.\nКакой размерный ряд? — В наличии размеры от XS до XL.",
+    rules: "Товары из категории «Распродажа» со скидкой от 50% возврату не подлежат."
+  },
+  cafe: {
+    about: "Семейный ресторан «Олива».\nАдрес: г. Алматы, пр. Достык 45.\nВремя работы: пн–чт с 11:00 до 23:00, пт–вс с 11:00 до 01:00.",
+    services: "Пицца Маргарита — 3200 ₸\nПаста Карбонара — 3600 ₸\nСтейк Рибай — 7500 ₸\nАвторские лимонады — 1800 ₸\nБизнес-ланчи по будням с 12:00 до 16:00 — 2500 ₸.\nПолное меню с фотографиями: oliva-menu.kz",
+    booking: "Бронирование столов бесплатное.\nПри бронировании на компанию от 8 человек — депозит 5000 ₸ с человека.\nДоставка работает через сервис Яндекс Еда, а также есть самовывоз со скидкой 10%.\nОплата: Kaspi QR, банковские карты, наличные.",
+    faq: "Есть ли детская комната? — Да, есть игровая зона, по выходным работает аниматор.\nВсе ли блюда Halal? — Все мясные блюда сертифицированы Halal.\nМожно ли со своим тортом на день рождения? — Да, без доплат.",
+    rules: "Курение кальяна разрешено только на открытой летней террасе."
+  },
+  consulting: {
+    about: "Консалтинговая компания «ПрофЭксперт».\nОфис: БЦ «Алатау», офис 402.\nГрафик: пн–пт с 09:00 до 18:00 (сб–вс — выходные).\nРаботаем как очно в офисе, так и онлайн по Zoom / WhatsApp.",
+    services: "Первичная консультация эксперта (30 мин) — 10 000 ₸\nАудит и проверка договоров — от 20 000 ₸\nРегистрация ТОО / ИП под ключ — от 35 000 ₸\nКомплексное абонентское обслуживание бизнеса — от 150 000 ₸/мес.",
+    booking: "Как начать: кратко опишите вашу задачу прямо здесь в чате. Менеджер согласует время созвона.\nОплата: по безналичному расчету для компаний или Kaspi QR для физлиц.",
+    faq: "Заключается ли официальный договор? — Да, обязательно подписываем договор и соглашение о конфиденциальности (NDA).\nРаботаете ли вы с другими городами? — Да, большинство проектов ведём полностью дистанционно.",
+    rules: "Срочные задачи в день обращения тарифицируются с наценкой 30%."
+  }
+};
+
+function parseKnowledgeBase(text) {
+  text = (text || "").trim();
+  if (!text || text === "База знаний пока не заполнена.") {
+    $("kb_sec_about").value = "";
+    $("kb_sec_services").value = "";
+    $("kb_sec_booking").value = "";
+    $("kb_sec_faq").value = "";
+    $("kb_sec_rules").value = "";
+    return;
+  }
+
+  // Сначала проверяем заголовки markdown вида ## ...
+  const headerRegex = /^##\s+(?:[0-9]+\.\s*)?([^\n\r]+)/gim;
+  const matches = [...text.matchAll(headerRegex)];
+
+  if (matches.length >= 2) {
+    const sections = { about: "", services: "", booking: "", faq: "", rules: "" };
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const title = match[1].toLowerCase();
+      const startIndex = match.index + match[0].length;
+      const endIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      const content = text.slice(startIndex, endIndex).trim();
+
+      if (title.includes("компан") || title.includes("бизнес") || title.includes("контакт") || title.includes("график") || title.includes("адрес")) {
+        sections.about = sections.about ? sections.about + "\n\n" + content : content;
+      } else if (title.includes("товар") || title.includes("услуг") || title.includes("цен") || title.includes("прайс") || title.includes("меню")) {
+        sections.services = sections.services ? sections.services + "\n\n" + content : content;
+      } else if (title.includes("заказ") || title.includes("запис") || title.includes("доставк") || title.includes("оплат") || title.includes("бронир")) {
+        sections.booking = sections.booking ? sections.booking + "\n\n" + content : content;
+      } else if (title.includes("вопрос") || title.includes("faq")) {
+        sections.faq = sections.faq ? sections.faq + "\n\n" + content : content;
+      } else if (title.includes("правил") || title.includes("нюанс") || title.includes("акци") || title.includes("важно") || title.includes("ограничен")) {
+        sections.rules = sections.rules ? sections.rules + "\n\n" + content : content;
+      } else {
+        sections.about = sections.about ? sections.about + "\n\n" + content : content;
+      }
+    }
+    $("kb_sec_about").value = sections.about;
+    $("kb_sec_services").value = sections.services;
+    $("kb_sec_booking").value = sections.booking;
+    $("kb_sec_faq").value = sections.faq;
+    $("kb_sec_rules").value = sections.rules;
+    return;
+  }
+
+  // Проверяем старый образец: Адрес:, Часы работы:, Услуги и цены: и т.д.
+  const legacySections = ["Адрес", "Часы работы", "Услуги и цены", "Как записаться", "Частые вопросы"];
+  const hasLegacy = legacySections.some(s => new RegExp("^\\s*" + s + "\\s*:", "mi").test(text));
+  if (hasLegacy) {
+    let about = "";
+    let services = "";
+    let booking = "";
+    let faq = "";
+
+    const getField = (name) => {
+      const re = new RegExp("(?:^|\\n)\\s*" + name + "\\s*:\\s*([\\s\\S]*?)(?=(?:\\n\\s*(?:Адрес|Часы работы|Услуги и цены|Как записаться|Частые вопросы)\\s*:|$))", "i");
+      const m = text.match(re);
+      return m ? m[1].trim() : "";
+    };
+
+    const addr = getField("Адрес");
+    const hours = getField("Часы работы");
+    if (addr || hours) {
+      about = (addr ? "Адрес: " + addr + "\n" : "") + (hours ? "Часы работы: " + hours : "");
+      about = about.trim();
+    }
+    services = getField("Услуги и цены");
+    booking = getField("Как записаться");
+    faq = getField("Частые вопросы");
+
+    $("kb_sec_about").value = about;
+    $("kb_sec_services").value = services;
+    $("kb_sec_booking").value = booking;
+    $("kb_sec_faq").value = faq;
+    $("kb_sec_rules").value = "";
+    return;
+  }
+
+  // Произвольный / сплошной текст
+  const qaSplit = text.indexOf("Вопрос:");
+  if (qaSplit !== -1) {
+    $("kb_sec_about").value = text.slice(0, qaSplit).trim();
+    $("kb_sec_services").value = "";
+    $("kb_sec_booking").value = "";
+    $("kb_sec_faq").value = text.slice(qaSplit).trim();
+    $("kb_sec_rules").value = "";
+  } else {
+    $("kb_sec_about").value = text;
+    $("kb_sec_services").value = "";
+    $("kb_sec_booking").value = "";
+    $("kb_sec_faq").value = "";
+    $("kb_sec_rules").value = "";
+  }
+}
+
+function assembleKnowledgeBase() {
+  const parts = [];
+  const secAbout = ($("kb_sec_about").value || "").trim();
+  const secServices = ($("kb_sec_services").value || "").trim();
+  const secBooking = ($("kb_sec_booking").value || "").trim();
+  const secFaq = ($("kb_sec_faq").value || "").trim();
+  const secRules = ($("kb_sec_rules").value || "").trim();
+
+  if (secAbout) parts.push("## О компании, контакты и график\n" + secAbout);
+  if (secServices) parts.push("## Товары, услуги и цены\n" + secServices);
+  if (secBooking) parts.push("## Заказ, запись, доставка и оплата\n" + secBooking);
+  if (secFaq) parts.push("## Частые вопросы (FAQ)\n" + secFaq);
+  if (secRules) parts.push("## Особые правила и важные нюансы\n" + secRules);
+
+  const assembled = parts.join("\n\n");
+  $("f_knowledge_base").value = assembled;
+  updateKnowledgeNotice();
+  return assembled;
+}
+
+function setKbMode(mode) {
+  currentKbMode = mode;
+  const isSections = mode === "sections";
+  $("kbModeSectionsBtn").classList.toggle("active", isSections);
+  $("kbModeRawBtn").classList.toggle("active", !isSections);
+  show("kbSectionsWrap", isSections);
+  show("kbRawWrap", !isSections);
+
+  if (isSections) {
+    parseKnowledgeBase($("f_knowledge_base").value);
+    document.querySelectorAll("#kbSectionsWrap textarea.auto-resize").forEach(autoResizeTextarea);
+  } else {
+    assembleKnowledgeBase();
+    autoResizeTextarea($("f_knowledge_base"));
+  }
+}
+
+function applyKbTemplate(type) {
+  const tmpl = KB_TEMPLATES[type];
+  if (!tmpl) return;
+  const currentVal = ($("f_knowledge_base").value || "").trim();
+  if (currentVal && !confirm("Заменить текущую информацию о бизнесе этим образцом?")) {
+    return;
+  }
+  $("kb_sec_about").value = tmpl.about;
+  $("kb_sec_services").value = tmpl.services;
+  $("kb_sec_booking").value = tmpl.booking;
+  $("kb_sec_faq").value = tmpl.faq;
+  $("kb_sec_rules").value = tmpl.rules;
+
+  setKbMode("sections");
+  assembleKnowledgeBase();
+  document.querySelectorAll("#kbSectionsWrap textarea.auto-resize").forEach(autoResizeTextarea);
+  setDirty(true);
 }
 
 // Жёлтая полоска сверху — только клиенту и только пока информация не заполнена.
@@ -1476,27 +1662,17 @@ function updateKnowledgeNotice() {
   show("knowledgeNotice", !text || text === "База знаний пока не заполнена.");
 }
 
-function updateKnowledgeHelpers() {
-  const ta = $("f_knowledge_base");
-  const empty = !ta.value.trim();
-  show("knowledgeTemplateRow", empty);
-  $("knowledgeProgress").textContent = empty
-    ? ""
-    : "Заполнено: " + knowledgeFilledCount(ta.value) + " из " + KNOWLEDGE_SECTIONS.length + " разделов";
-}
-
-function insertKnowledgeTemplate() {
-  const ta = $("f_knowledge_base");
-  ta.value = KNOWLEDGE_TEMPLATE;
-  autoResizeTextarea(ta);
-  updateKnowledgeHelpers();
-  updateKnowledgeNotice();
-  setDirty(true);
-  ta.focus();
-}
+["kb_sec_about", "kb_sec_services", "kb_sec_booking", "kb_sec_faq", "kb_sec_rules"].forEach((id) => {
+  const el = $(id);
+  if (el) {
+    el.addEventListener("input", () => {
+      assembleKnowledgeBase();
+      updateKnowledgeNotice();
+    });
+  }
+});
 
 $("f_knowledge_base").addEventListener("input", () => {
-  updateKnowledgeHelpers();
   updateKnowledgeNotice();
 });
 

@@ -120,8 +120,6 @@
           <button class="tab-btn hidden" id="tabTelegramBtn" data-tab="telegram" onclick="switchTab('telegram')">Telegram</button>
           <button class="tab-btn" data-tab="knowledge" onclick="switchTab('knowledge')">Информация о бизнесе</button>
           <button class="tab-btn" data-tab="auto" onclick="switchTab('auto')">Когда бот зовёт вас</button>
-          <button class="tab-btn" data-tab="media" onclick="switchTab('media')">Медиа</button>
-          <button class="tab-btn hidden" id="tabProfileBtn" data-tab="profile" onclick="switchTab('profile')">Профиль</button>
           <button class="tab-btn hidden" id="tabAdminBtn" data-tab="admin" onclick="switchTab('admin')">Служебное</button>
         </nav>
 
@@ -131,6 +129,52 @@
           <label for="f_tone">Как бот общается</label>
           <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
           <div class="hint">Язык ответа выбирается автоматически: бот отвечает на том же языке, на котором написал клиент.</div>
+
+          <div id="businessProfileSection" class="hidden">
+            <div class="section-title" style="margin-top:24px">Профиль в WhatsApp</div>
+            <div class="hint">Что видят клиенты рядом с именем: описание, контакты, аватар. Изменения сохраняются через Meta/Zernio API.</div>
+
+            <label for="f_description">Описание (до 512 символов)</label>
+            <textarea id="f_description" class="auto-resize" placeholder="Описание бизнеса…" maxlength="512"></textarea>
+            <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
+
+            <div class="row">
+              <div>
+                <label for="f_email">Email</label>
+                <input id="f_email" class="mono" placeholder="hello@example.com">
+              </div>
+              <div>
+                <label for="f_vertical">Категория бизнеса</label>
+                <select id="f_vertical" class="mono"></select>
+              </div>
+            </div>
+            <div class="hint">Список категорий задан WhatsApp. Не нашли свою — оставьте «Не выбрана».</div>
+
+            <label for="f_websites">Сайты (до 2, по одному на строку)</label>
+            <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://shop.example.com" rows="2"></textarea>
+
+            <label for="f_address">Адрес</label>
+            <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
+
+            <div class="section-title" style="margin-top:20px">Аватар</div>
+            <div class="hint">JPG/PNG/WebP, до 5 МБ. Рекомендуется 640×640.</div>
+            <div class="row" style="align-items:center;">
+              <div style="flex:1">
+                <label>Текущий аватар</label>
+                <div id="avatarCurrent" class="hint">не загружен</div>
+              </div>
+              <div>
+                <label>Загрузить новый</label>
+                <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp">
+                <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px" onclick="uploadProfilePhoto()">Загрузить</button>
+              </div>
+            </div>
+
+            <p style="margin-top:18px">
+              <button type="button" class="btn btn-primary btn-sm" id="saveProfileBtn" onclick="saveProfile()">Сохранить профиль WhatsApp</button>
+            </p>
+            <div class="status" id="profileStatus" role="status"></div>
+          </div>
         </section>
 
         <section class="tab-panel hidden" id="tab-chat">
@@ -258,10 +302,70 @@
         </section>
 
         <section class="tab-panel hidden" id="tab-knowledge">
-          <div class="hint">Единственный источник фактов: часы работы, адрес, услуги и цены, правила записи. Бот отвечает только на основе этого текста и не выдумывает. Чем полнее — тем точнее ответы.</div>
-          <p id="knowledgeTemplateRow"><button type="button" class="btn btn-sm" id="knowledgeTemplateBtn" onclick="insertKnowledgeTemplate()">Вставить образец</button></p>
-          <div class="hint" id="knowledgeProgress"></div>
-          <textarea id="f_knowledge_base" class="auto-resize" placeholder="Введите информацию о бизнесе…"></textarea>
+          <div class="hint">
+            Единственный источник фактов для бота. Заполняйте только те разделы, которые актуальны для вашего бизнеса. Бот отвечает строго по этим данным.
+          </div>
+
+          <div class="kb-header-row">
+            <div class="seg" id="kbModeSeg">
+              <button type="button" class="seg-btn active" id="kbModeSectionsBtn" onclick="setKbMode('sections')">По разделам</button>
+              <button type="button" class="seg-btn" id="kbModeRawBtn" onclick="setKbMode('raw')">Единый текст</button>
+            </div>
+            <div class="kb-templates-wrap">
+              <span class="muted kb-templates-label">Образцы:</span>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="applyKbTemplate('services')">💅 Услуги</button>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="applyKbTemplate('shop')">🛍️ Магазин</button>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="applyKbTemplate('cafe')">🍽️ Кафе</button>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="applyKbTemplate('consulting')">💼 B2B / Услуги</button>
+            </div>
+          </div>
+
+          <div id="kbSectionsWrap">
+            <div class="kb-card">
+              <div class="kb-card-head">
+                <label for="kb_sec_about">🏢 1. О компании, контакты и график</label>
+                <span class="muted">Чем занимаетесь, адрес (или онлайн-формат), график работы, ориентиры</span>
+              </div>
+              <textarea id="kb_sec_about" class="auto-resize" placeholder="Например: Салон красоты «Эстетика». Адрес: ул. Абая 50. График: ежедневно 10:00–21:00…"></textarea>
+            </div>
+
+            <div class="kb-card">
+              <div class="kb-card-head">
+                <label for="kb_sec_services">🏷️ 2. Товары, услуги и цены</label>
+                <span class="muted">Прайс-лист, перечень услуг или товаров, меню, ссылки на каталог</span>
+              </div>
+              <textarea id="kb_sec_services" class="auto-resize" placeholder="Например: Маникюр — 5000 ₸, Педикюр — 7000 ₸. Каталог в Instagram…"></textarea>
+            </div>
+
+            <div class="kb-card">
+              <div class="kb-card-head">
+                <label for="kb_sec_booking">📋 3. Заказ, запись, доставка и оплата</label>
+                <span class="muted">Как сделать заказ или записаться, условия доставки, способы оплаты, правила отмены</span>
+              </div>
+              <textarea id="kb_sec_booking" class="auto-resize" placeholder="Например: Запись за 1 день. Предоплата 2000 ₸ на Kaspi. Доставка курьером 1500 ₸…"></textarea>
+            </div>
+
+            <div class="kb-card">
+              <div class="kb-card-head">
+                <label for="kb_sec_faq">❓ 4. Частые вопросы (FAQ)</label>
+                <span class="muted">Типичные вопросы и готовые ответы (парковка, гарантия, возврат, сертификаты)</span>
+              </div>
+              <textarea id="kb_sec_faq" class="auto-resize" placeholder="Например: Есть ли парковка? — Да, бесплатная во дворе.&#10;Сколько длится процедура? — Около 1.5 часов…"></textarea>
+            </div>
+
+            <div class="kb-card">
+              <div class="kb-card-head">
+                <label for="kb_sec_rules">💡 5. Особые правила и важные нюансы</label>
+                <span class="muted">Ограничения, акции, скидки, особые указания для бота</span>
+              </div>
+              <textarea id="kb_sec_rules" class="auto-resize" placeholder="Например: Скидка 10% в день рождения. При опоздании более 15 минут визит переносится…"></textarea>
+            </div>
+          </div>
+
+          <div id="kbRawWrap" class="hidden">
+            <div class="hint" style="margin-bottom:8px">Полный текст базы знаний так, как его видит бот:</div>
+            <textarea id="f_knowledge_base" class="auto-resize" placeholder="Введите информацию о бизнесе…"></textarea>
+          </div>
         </section>
 
         <section class="tab-panel hidden" id="tab-auto">
@@ -297,91 +401,6 @@
             <textarea id="f_timeout_reply_ru" class="auto-resize" placeholder="Секунду, уточняю у нас… ⏳"></textarea>
             <label>… по-казахски</label><textarea id="f_timeout_reply_kk" class="auto-resize"></textarea>
           </details>
-        </section>
-
-        <section class="tab-panel hidden" id="tab-media">
-          <div class="section-title">Распознавание медиа (голосовые и фото)</div>
-          <div class="hint">Бот распознаёт голосовые сообщения клиентов через Whisper и изображения (прайсы, фото ногтей, товары) через Vision-модель.</div>
-
-          <div style="margin: 16px 0;">
-            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
-              <input type="checkbox" id="f_media_audio" checked style="width:auto;min-height:auto;">
-              Принимать и распознавать голосовые сообщения (аудио)
-            </label>
-            <div class="hint" style="margin-left:24px;">Голосовое переводится в текст и передаётся в LLM как [Голосовое сообщение] &lt;текст&gt;.</div>
-          </div>
-
-          <div style="margin: 16px 0;">
-            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
-              <input type="checkbox" id="f_media_image" checked style="width:auto;min-height:auto;">
-              Принимать и распознавать фотографии
-            </label>
-            <div class="hint" style="margin-left:24px;">Vision-модель описывает фото и дословно переписывает текст (прайс-листы, вывески).</div>
-          </div>
-
-          <div class="section-title">Ограничения и лимиты</div>
-          <div class="row">
-            <div>
-              <label for="f_media_max_audio_seconds">Макс. длительность аудио (секунды)</label>
-              <input id="f_media_max_audio_seconds" type="number" min="10" max="600" value="120">
-              <div class="hint">По умолчанию 120 с (2 мин). Длинные аудио бот попросит прислать текстом.</div>
-            </div>
-            <div>
-              <label for="f_media_max_image_mb">Макс. размер фото (МБ)</label>
-              <input id="f_media_max_image_mb" type="number" min="1" max="50" value="8">
-              <div class="hint">По умолчанию 8 МБ. Большие файлы бот отклонит без вызова API.</div>
-            </div>
-          </div>
-
-          <div class="row">
-            <div>
-              <label for="f_media_daily_limit">Дневной лимит медиа на клиента</label>
-              <input id="f_media_daily_limit" type="number" min="1" max="1000" value="50">
-              <div class="hint">Лимит медиасообщений в день с одного номера (защита от спама).</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="tab-panel hidden" id="tab-profile">
-          <div class="section-title">Профиль WhatsApp</div>
-          <div class="hint">Что видят клиенты рядом с именем: описание, контакты, аватар. Правится через Zernio/Meta API.</div>
-
-          <div class="section-title">О компании</div>
-          <label for="f_description">Описание (до 512 символов)</label>
-          <textarea id="f_description" class="auto-resize" placeholder="Описание бизнеса…" maxlength="512"></textarea>
-          <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
-
-          <label for="f_email">Email</label>
-          <input id="f_email" class="mono" placeholder="hello@example.com">
-
-          <label for="f_websites">Сайты (до 2, по одному на строку)</label>
-          <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://shop.example.com" rows="2"></textarea>
-
-          <label for="f_vertical">Категория бизнеса</label>
-          <select id="f_vertical" class="mono"></select>
-          <div class="hint">Список категорий задан WhatsApp: значение попадает в профиль номера в Zernio и Meta. Не нашли свою — оставьте «Не выбрана».</div>
-
-          <label for="f_address">Адрес</label>
-          <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
-
-          <div class="section-title">Аватар</div>
-          <div class="hint">JPG/PNG/WebP, до 5 МБ. Рекомендуется 640×640.</div>
-          <div class="row">
-            <div style="flex:1">
-              <label>Текущий аватар</label>
-              <div id="avatarCurrent" class="hint">не загружен</div>
-            </div>
-            <div>
-              <label>Загрузить новый</label>
-              <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp">
-              <button type="button" class="btn btn-primary btn-sm" onclick="uploadProfilePhoto()">Загрузить</button>
-            </div>
-          </div>
-
-          <p>
-            <button type="button" class="btn btn-primary" onclick="saveProfile()">Сохранить профиль</button>
-          </p>
-          <div class="status" id="profileStatus" role="status"></div>
         </section>
 
         <section class="tab-panel hidden" id="tab-admin">
@@ -456,6 +475,47 @@
 
           <label>management_token — токен клиента для этой панели</label>
           <input id="f_management_token" class="mono">
+
+          <div class="section-title">Распознавание медиа (голосовые и фото)</div>
+          <div class="hint">Бот распознаёт голосовые сообщения клиентов через Whisper и изображения (прайсы, фото ногтей, товары) через Vision-модель.</div>
+
+          <div style="margin: 16px 0;">
+            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+              <input type="checkbox" id="f_media_audio" checked style="width:auto;min-height:auto;">
+              Принимать и распознавать голосовые сообщения (аудио)
+            </label>
+            <div class="hint" style="margin-left:24px;">Голосовое переводится в текст и передаётся в LLM как [Голосовое сообщение] &lt;текст&gt;.</div>
+          </div>
+
+          <div style="margin: 16px 0;">
+            <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+              <input type="checkbox" id="f_media_image" checked style="width:auto;min-height:auto;">
+              Принимать и распознавать фотографии
+            </label>
+            <div class="hint" style="margin-left:24px;">Vision-модель описывает фото и дословно переписывает текст (прайс-листы, вывески).</div>
+          </div>
+
+          <div class="section-title">Лимиты медиа</div>
+          <div class="row">
+            <div>
+              <label for="f_media_max_audio_seconds">Макс. длительность аудио (секунды)</label>
+              <input id="f_media_max_audio_seconds" type="number" min="10" max="600" value="120">
+              <div class="hint">По умолчанию 120 с (2 мин). Длинные аудио бот попросит прислать текстом.</div>
+            </div>
+            <div>
+              <label for="f_media_max_image_mb">Макс. размер фото (МБ)</label>
+              <input id="f_media_max_image_mb" type="number" min="1" max="50" value="8">
+              <div class="hint">По умолчанию 8 МБ. Большие файлы бот отклонит без вызова API.</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="f_media_daily_limit">Дневной лимит медиа на клиента</label>
+              <input id="f_media_daily_limit" type="number" min="1" max="1000" value="50">
+              <div class="hint">Лимит медиасообщений в день с одного номера (защита от спама).</div>
+            </div>
+          </div>
 
           <div class="section-title">Параметры LLM (обычно менять не нужно)</div>
           <div class="row">
