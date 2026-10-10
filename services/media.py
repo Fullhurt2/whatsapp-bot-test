@@ -314,15 +314,16 @@ async def transcribe_audio(
             f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек. Если в аудио только шум или тишина, выведи пустую строку."
         )
 
-        # google/gemini-3.5-transcribe — это именно модель транскрибации, она ждёт /api/v1/audio/transcriptions
-        # Только обычные чат-модели flash (например, gemini-3.5-flash) идут в chat/completions
+        # google/gemini-3.5-transcribe, elevenlabs/scribe-v2, whisper — это эндпоинт /api/v1/audio/transcriptions.
+        # Модели google/gemini-2.5-flash, google/gemini-3.5-flash — это мультимодальные модели через /chat/completions,
+        # которые в разы качественнее понимают казахский, русский и их смесь без галлюцинаций.
         is_transcribe_endpoint_model = (
             "transcribe" in model.lower()
             or "scribe" in model.lower()
             or "whisper" in model.lower()
         )
 
-        if not is_transcribe_endpoint_model and "gemini" in model.lower():
+        if not is_transcribe_endpoint_model and ("gemini" in model.lower() or "flash" in model.lower()):
             endpoint = f"{base_url}/chat/completions"
             payload = {
                 "model": model,
@@ -334,7 +335,7 @@ async def transcribe_audio(
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Расшифруй это аудиосообщение точно по правилам:"},
+                            {"type": "text", "text": "Транскрибируй аудиосообщение клиента:"},
                             {
                                 "type": "input_audio",
                                 "input_audio": {
@@ -345,7 +346,7 @@ async def transcribe_audio(
                         ],
                     },
                 ],
-                "temperature": 0.1,
+                "temperature": 0.0,
             }
         else:
             # Для google/gemini-3.5-transcribe, elevenlabs/scribe-v2, openai/whisper-large-v3
@@ -358,13 +359,13 @@ async def transcribe_audio(
                 },
                 "prompt": custom_prompt,
             }
-            # Если язык явно не задан, для Казахстана задаём приоритет казахского или русского,
-            # чтобы модель транскрибации не определяла ошибочно экзотические языки (хинди/арабский)
+            # Если язык явно задан в клиенте (например, kk или ru)
             eff_lang = (language or "").strip().lower()
             if eff_lang and eff_lang not in ("auto", "none"):
                 payload["language"] = eff_lang
-            else:
-                payload["language"] = "ru"
+            elif "gemini" in model.lower():
+                # У Gemini-3.5-Transcribe без language=kk казахская речь уходит в галлюцинации (Price Blue Book / хинди)
+                payload["language"] = "kk"
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             try:
