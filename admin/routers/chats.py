@@ -2,11 +2,12 @@
 
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from admin.routers.common import (
     _authorize,
@@ -124,14 +125,58 @@ def register_chats_routes(app, settings: Settings, state, clients_dir: Path) -> 
         except Exception:
             return JSONResponse(status_code=403, content={"error": "нет доступа"})
 
-        mime = str(msg.get("media_mime") or "application/octet-stream").strip().lower()
+        mime = str(msg.get("media_mime") or "").strip().lower()
+        if not mime or mime == "application/octet-stream":
+            guessed, _ = mimetypes.guess_type(str(media_path))
+            mime = guessed or "application/octet-stream"
+
         if mime == "image/svg+xml" or not (mime.startswith("audio/") or mime.startswith("image/")):
             mime = "application/octet-stream"
+
+        # Если это аудио или видео, поддерживаем HTTP Range (206 Partial Content)
+        # для бесперебойного воспроизведения и перемотки в браузере (HTML5 <audio>)
+        range_header = request.headers.get("range", "").strip()
+        try:
+            file_size = os.path.getsize(media_path)
+        except OSError:
+            file_size = 0
+
+        if (mime.startswith("audio/") or mime.startswith("image/")) and range_header.startswith("bytes=") and file_size > 0:
+            try:
+                ranges = range_header.replace("bytes=", "").split("-")
+                start = int(ranges[0]) if ranges[0] else 0
+                end = int(ranges[1]) if len(ranges) > 1 and ranges[1] else file_size - 1
+                if end >= file_size:
+                    end = file_size - 1
+                if start <= end:
+                    chunk_len = end - start + 1
+                    with open(media_path, "rb") as f:
+                        f.seek(start)
+                        chunk_data = f.read(chunk_len)
+
+                    return Response(
+                        content=chunk_data,
+                        status_code=206,
+                        media_type=mime,
+                        headers={
+                            "Content-Range": f"bytes {start}-{end}/{file_size}",
+                            "Accept-Ranges": "bytes",
+                            "Content-Length": str(chunk_len),
+                            "Content-Disposition": "inline",
+                            "X-Content-Type-Options": "nosniff",
+                        },
+                    )
+            except Exception as exc:
+                logger.warning("Ошибка обработки Range-запроса для медиа: %s", exc)
 
         return FileResponse(
             media_path,
             media_type=mime,
-            headers={"X-Content-Type-Options": "nosniff"},
+            content_disposition_type="inline",
+            headers={
+                "Accept-Ranges": "bytes",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/admin/clients/{pid}/conversations/{cid}/messages/{mid}/retry-media")

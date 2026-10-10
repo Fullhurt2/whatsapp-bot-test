@@ -286,21 +286,32 @@ async def transcribe_audio(
         if not api_key:
             raise MediaError("OPENROUTER_API_KEY не задан для транскрибации")
 
-        endpoint = f"{base_url}/audio/transcriptions"
-        audio_b64 = base64.b64encode(data).decode("utf-8")
+        # Для OpenRouter приводим ogg/opus к стандартизированному MP3 (16kHz mono),
+        # так как сырые ogg opus контейнеры из WhatsApp часто вызывают галлюцинации моделей
+        # (например, индийский/хинди текст) или 400 ошибки.
+        proc_data = data
         fmt = "ogg" if "ogg" in mime or "opus" in mime else ("mp3" if "mp3" in mime or "mpeg" in mime else "wav")
+        if fmt == "ogg":
+            try:
+                proc_data = convert_audio_to_mp3(data, "ogg")
+                fmt = "mp3"
+            except Exception as e:
+                logger.warning("Не удалось конвертировать ogg в mp3, отправляем исходный: %s", e)
+                proc_data = data
+
+        audio_b64 = base64.b64encode(proc_data).decode("utf-8")
         # Формируем кастомный контекстный промпт на основе базы знаний конкретного клиента
         biz_name = settings.business_name or "бизнеса"
         kb_context = (settings.knowledge_base or hint or "").strip()[:500]
         custom_prompt = (
-            f"Ты — высокоточный транскрибатор аудиосообщений WhatsApp для «{biz_name}» в Казахстане.\n"
-            f"Клиенты говорят на казахском, русском или смеси обоих языков (суржик).\n"
+            f"Ты — высокоточный транскрибатор голосовых сообщений WhatsApp для «{biz_name}» в Казахстане.\n"
+            f"Клиенты говорят на казахском, русском или смеси обоих языков (суржик/шала-казахский).\n"
             f"Правила:\n"
             f"1. Дословно распознай речь клиента без искажений.\n"
             f"2. Казахские слова пиши грамотно, сохраняя буквы ә, і, ң, ғ, ү, ұ, қ, ө, һ.\n"
             f"3. Используй термины и позиции из базы знаний клиента:\n"
             f"{kb_context}\n"
-            f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек."
+            f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек. Если в аудио только шум или тишина, выведи пустую строку."
         )
 
         # google/gemini-3.5-transcribe — это именно модель транскрибации, она ждёт /api/v1/audio/transcriptions
@@ -347,8 +358,13 @@ async def transcribe_audio(
                 },
                 "prompt": custom_prompt,
             }
-            if language and language.lower() not in ("auto", "none"):
-                payload["language"] = language.lower()
+            # Если язык явно не задан, для Казахстана задаём приоритет казахского или русского,
+            # чтобы модель транскрибации не определяла ошибочно экзотические языки (хинди/арабский)
+            eff_lang = (language or "").strip().lower()
+            if eff_lang and eff_lang not in ("auto", "none"):
+                payload["language"] = eff_lang
+            else:
+                payload["language"] = "ru"
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             try:
