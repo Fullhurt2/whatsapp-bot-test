@@ -289,17 +289,30 @@ async def transcribe_audio(
         endpoint = f"{base_url}/audio/transcriptions"
         audio_b64 = base64.b64encode(data).decode("utf-8")
         fmt = "ogg" if "ogg" in mime or "opus" in mime else ("mp3" if "mp3" in mime or "mpeg" in mime else "wav")
+        # Формируем кастомный контекстный промпт на основе базы знаний конкретного клиента
+        biz_name = settings.business_name or "бизнеса"
+        kb_context = (settings.knowledge_base or hint or "").strip()[:500]
+        custom_prompt = (
+            f"Ты — высокоточный транскрибатор аудиосообщений WhatsApp для «{biz_name}» в Казахстане.\n"
+            f"Клиенты говорят на казахском, русском или смеси обоих языков (суржик).\n"
+            f"Правила:\n"
+            f"1. Дословно распознай речь клиента без искажений.\n"
+            f"2. Казахские слова пиши грамотно, сохраняя буквы ә, і, ң, ғ, ү, ұ, қ, ө, һ.\n"
+            f"3. Используй термины и позиции из базы знаний клиента:\n"
+            f"{kb_context}\n"
+            f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек."
+        )
+
         payload: dict = {
             "model": model,
             "input_audio": {
                 "data": audio_b64,
                 "format": fmt,
             },
+            "prompt": custom_prompt,
         }
         if language and language.lower() not in ("auto", "none"):
             payload["language"] = language.lower()
-        if hint:
-            payload["prompt"] = hint[:400]
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             try:
