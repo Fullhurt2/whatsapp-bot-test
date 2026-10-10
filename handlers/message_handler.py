@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 import os
 
+import services.media as media_service
+
+
+
 # Флаг: доступна ли БД (инициализирована ли storage)
 # Отключается в тестах через переменную окружения JAUAP_TEST_MODE=1
 _DB_AVAILABLE = not os.getenv("JAUAP_TEST_MODE", "").strip()
@@ -51,7 +55,11 @@ try:
         mark_read,
         update_delivery_status,
         get_message_by_provider_id,
+        resolve_conversation_handoffs,
+        add_unanswered_question,
+        create_handoff,
     )
+    from storage.db import execute, fetchone
 except Exception:
     _DB_AVAILABLE = False
 
@@ -85,6 +93,22 @@ except Exception:
 
     def get_message_by_provider_id(*args, **kwargs):
         return None
+
+    def resolve_conversation_handoffs(*args, **kwargs):
+        pass
+
+    def add_unanswered_question(*args, **kwargs):
+        pass
+
+    def create_handoff(*args, **kwargs):
+        return 1
+
+    def execute(*args, **kwargs):
+        pass
+
+    def fetchone(*args, **kwargs):
+        return None
+
 
 # --- Память диалога -----------------------------------------------------------
 # Минимальный контекст в памяти процесса (без БД — осознанно для MVP):
@@ -281,9 +305,11 @@ class MessageProcessor:
                         content_kind="text",
                     )
                 return
-            from storage import update_conversation_status, resolve_conversation_handoffs
             update_conversation_status(conv_id, "bot")
             resolve_conversation_handoffs(conv_id)
+
+
+
 
         # Сброс in-memory истории (fallback)
         self._histories.pop(phone, None)
@@ -356,11 +382,11 @@ class MessageProcessor:
             )
         else:
             if conversation_id and conv.get("zernio_conversation_id") != conversation_id:
-                from storage import execute
                 execute(
                     "UPDATE conversations SET zernio_conversation_id = ? WHERE id = ?",
                     (conversation_id, conv["id"]),
                 )
+
         conv_id = conv["id"]
 
         content_kind = (getattr(inbound, "content_kind", "") or "").lower()
@@ -410,8 +436,7 @@ class MessageProcessor:
             return
 
         # Rate limit: не более 5 медиа в минуту с номера
-        from services.media import check_rate_limit
-        if not await check_rate_limit(phone, client_key=client_key):
+        if not await media_service.check_rate_limit(phone, client_key=client_key):
             logger.warning("Превышен лимит медиа в минуту (5/мин) | phone=%s", phone)
             await self._skip_media(
                 phone, display_name, conversation_id, conv_id, inbound,
@@ -422,7 +447,6 @@ class MessageProcessor:
         # Daily limit: не более N медиа в день для этого диалога
         today_count = 0
         if _DB_AVAILABLE:
-            from storage.db import fetchone
             r = fetchone(
                 """
                 SELECT COUNT(*) as cnt FROM messages
@@ -457,20 +481,16 @@ class MessageProcessor:
         # Лимиты размера загрузки
         max_bytes = (media_cfg.max_image_mb * 1024 * 1024) if is_image else (25 * 1024 * 1024)
 
-        from services.media import (
-            download_media, save_media_file, transcribe_audio, describe_image,
-            MediaLimitError, MediaError,
-        )
-
         local_path = ""
+
         try:
-            data, mime = await download_media(
+            data, mime = await media_service.download_media(
                 media_url,
                 max_bytes=max_bytes,
                 timeout_s=15.0,
                 api_key=self.settings.zernio_api_key,
             )
-        except MediaLimitError as exc:
+        except media_service.MediaLimitError as exc:
             logger.warning("Медиа превышает лимит размера: %s | phone=%s", exc, phone)
             await self._skip_media(
                 phone, display_name, conversation_id, conv_id, inbound,
@@ -488,7 +508,7 @@ class MessageProcessor:
         # Сохранение оригинала на диск
         msg_id_str = getattr(inbound, "message_id", "") or f"msg_{int(time.time()*1000)}"
         try:
-            local_path = save_media_file(
+            local_path = media_service.save_media_file(
                 data=data,
                 media_dir=self.settings.media_dir,
                 client_key=client_key,
@@ -518,7 +538,7 @@ class MessageProcessor:
                     return
 
                 hint = f"{self.settings.business_name}. {self.settings.knowledge_base[:300]}"
-                media_result = await transcribe_audio(
+                media_result = await media_service.transcribe_audio(
                     data=data,
                     mime=mime,
                     language=self.settings.language,
@@ -546,7 +566,7 @@ class MessageProcessor:
 
             else:  # is_image
                 caption = getattr(inbound, "media_caption", "") or getattr(inbound, "text", "") or ""
-                media_result = await describe_image(
+                media_result = await media_service.describe_image(
                     data=data,
                     mime=mime,
                     caption=caption,
@@ -554,6 +574,7 @@ class MessageProcessor:
                     settings=self.settings,
                     retry=True,
                 )
+
                 description = media_result.text.strip()
                 caption_part = f"{caption}. " if caption else ""
                 synthesized_text = f"[Фото] {caption_part}Описание: {description}"
@@ -688,11 +709,11 @@ class MessageProcessor:
             conv_id = conv["id"]
             # Обновить conversation_id если новый (Zernio может сменить)
             if conversation_id and conv.get("zernio_conversation_id") != conversation_id:
-                from storage import execute
                 execute(
                     "UPDATE conversations SET zernio_conversation_id = ? WHERE id = ?",
                     (conversation_id, conv_id),
                 )
+
 
         conv_id = conv["id"]
 
@@ -953,7 +974,6 @@ class MessageProcessor:
             # хранилище: из него собирается вкладка «Вопросы без ответа»,
             # а ответ менеджера дописывается обратно в базу знаний.
             if reason == "no_answer":
-                from storage import add_unanswered_question
                 try:
                     add_unanswered_question(
                         client_key=self._client_key(),
@@ -964,13 +984,13 @@ class MessageProcessor:
                     logger.exception("Не удалось сохранить вопрос без ответа")
 
             # Создаём запись о передаче (handoff), предварительно закрыв старые открытые
-            from storage import create_handoff, resolve_conversation_handoffs
             resolve_conversation_handoffs(conv_id)
             handoff_id = create_handoff(
                 conversation_id=conv_id,
                 reason=reason,
                 summary=text_for_owner if reason == "booking" else "",
             )
+
 
             # Определяем, нужно ли ставить диалог на паузу (manual)
             should_pause = (

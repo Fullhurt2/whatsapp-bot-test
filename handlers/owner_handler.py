@@ -21,17 +21,23 @@ owner_template_language из yaml клиента, две переменные т
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 
 from config.settings import Settings
+from services.cache import TTLCache
+from storage import get_open_handoff, get_tg_bindings_for_notify
 from whatsapp.errors import MessagingError
-from storage import get_open_handoff
+from whatsapp.telegram_client import TelegramClient
+from whatsapp.telegram_token import bot_id_from_token
 
 logger = logging.getLogger(__name__)
 
-# In-memory троттлинг: (conversation_id, reason) -> last_notified_at
-_notification_throttle: dict[tuple[str, str], datetime] = {}
+
+# In-memory троттлинг: (conversation_id, reason) -> timestamp
 THROTTLE_MINUTES = 10
+_notification_throttle: TTLCache[float] = TTLCache(maxsize=1000, ttl=THROTTLE_MINUTES * 60.0)
+
 
 
 # Текст кнопки в уведомлении менеджеру
@@ -44,8 +50,6 @@ def _notify_recipients(settings: Settings) -> list[str]:
     Привязки хранятся в БД по ключу клиента; для zernio это accountId — тот же,
     под которым лежат диалоги, поэтому уведомление найдёт нужный диалог.
     """
-    from whatsapp.telegram_token import bot_id_from_token
-
     chat_ids: list[str] = []
     client_key = (
         getattr(settings, "whatsapp_phone_number_id", "")
@@ -55,10 +59,10 @@ def _notify_recipients(settings: Settings) -> list[str]:
     )
     if client_key:
         try:
-            from storage import get_tg_bindings_for_notify
             chat_ids.extend(get_tg_bindings_for_notify(client_key))
         except Exception:
             logger.exception("Не удалось прочитать привязки Telegram (%s)", client_key)
+
 
     manual = str(getattr(settings, "owner_telegram_chat_id", "") or "")
     for chat_id in [c.strip() for c in manual.split(",") if c.strip()]:
@@ -99,9 +103,9 @@ async def _send_telegram_notification(
     """
     owner_token = str(getattr(settings, "telegram_owner_bot_token", "") or "").strip()
     if owner_token:
-        from whatsapp.telegram_client import TelegramClient
         bot = TelegramClient(owner_token)
         try:
+
             await bot.send_text(
                 chat_id,
                 text,
@@ -193,19 +197,10 @@ async def notify_owner(
     throttle_key = None
     if conversation_id:
         throttle_key = (conversation_id, reason)
-        now = datetime.utcnow()
-
-        # Очистка устаревших ключей для предотвращения утечки памяти
-        if len(_notification_throttle) > 200:
-            cutoff = now - timedelta(minutes=THROTTLE_MINUTES)
-            expired = [k for k, v in _notification_throttle.items() if v < cutoff]
-            for k in expired:
-                _notification_throttle.pop(k, None)
-
-        last = _notification_throttle.get(throttle_key)
-        if last and now - last < timedelta(minutes=THROTTLE_MINUTES):
+        if _notification_throttle.get(throttle_key) is not None:
             logger.debug("Уведомление заторможено: %s", throttle_key)
             return False
+
 
     who = f"{display_name or 'клиент'} ({client_phone})"
     text = (
@@ -262,6 +257,7 @@ async def notify_owner(
                 logger.exception("Не удалось отправить уведомление в WhatsApp (%s)", phone)
 
     if delivered_any and conversation_id and throttle_key:
-        _notification_throttle[throttle_key] = datetime.utcnow()
+        _notification_throttle.set(throttle_key, time.monotonic())
 
     return delivered_any
+

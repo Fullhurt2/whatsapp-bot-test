@@ -31,7 +31,11 @@ from urllib.parse import urlparse
 
 import httpx
 
+from services.cache import TTLCache
+
+
 try:
+
     from PIL import Image
     HAS_PIL = True
 except ImportError:
@@ -67,7 +71,7 @@ ALLOWED_MEDIA_HOSTS = (
 
 # Ограничение частоты: номер -> список таймстемпов последних медиа (за 60 сек)
 _rate_limit_lock = asyncio.Lock()
-_rate_limit_history: dict[str, list[float]] = {}
+_rate_limit_history: TTLCache[list[float]] = TTLCache(maxsize=1000, ttl=60.0)
 RATE_LIMIT_PER_MINUTE = 5
 
 
@@ -98,21 +102,17 @@ async def check_rate_limit(phone: str, client_key: str = "") -> bool:
     now = time.monotonic()
     key = f"{client_key}:{phone}" if client_key else phone
     async with _rate_limit_lock:
-        # Очистка устаревших ключей для предотвращения утечки памяти
-        if len(_rate_limit_history) > 200:
-            stale_keys = [k for k, v in _rate_limit_history.items() if not v or (now - v[-1] >= 60.0)]
-            for k in stale_keys:
-                _rate_limit_history.pop(k, None)
-
-        timestamps = _rate_limit_history.get(key, [])
+        raw_ts = _rate_limit_history.get(key)
+        timestamps = list(raw_ts) if raw_ts else []
         # Очистить записи старше 60 секунд
         timestamps = [t for t in timestamps if now - t < 60.0]
         if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
-            _rate_limit_history[key] = timestamps
+            _rate_limit_history.set(key, timestamps, ttl=60.0)
             return False
         timestamps.append(now)
-        _rate_limit_history[key] = timestamps
+        _rate_limit_history.set(key, timestamps, ttl=60.0)
         return True
+
 
 
 def is_url_allowed(url: str) -> bool:

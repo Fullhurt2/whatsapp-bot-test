@@ -38,7 +38,17 @@ from config.clients import ClientRegistry
 from config.settings import Settings, get_settings
 from handlers.message_handler import MessageProcessor
 from handlers.owner_handler import notify_owner
+from routers.webhooks import (
+    register_meta_webhook,
+    register_zernio_webhook,
+    register_telegram_webhook,
+    register_telegram_owner_webhook,
+)
+_register_telegram_owner_webhook = register_telegram_owner_webhook
+from routers.webhooks.webhooks_zernio import _get_business_phone, _business_phone_cache
+from services.cache import TTLCache
 from services.llm_client import LLMClient
+
 from storage import (
     init_db,
     check_and_add,
@@ -194,31 +204,18 @@ class WebhookState:
         self._reload_lock = asyncio.Lock()
         # Мультитенант обслуживает все транспорты: WhatsApp-клиенты (meta или
         # zernio) и Telegram-клиенты (telegram) живут в одном реестре clients/.
-        self.multitenant = bool(settings.clients_dir) and settings.messaging_provider in (
-            "meta", "zernio", "telegram",
-        )
-
-        if not self.multitenant:
-            # Single-tenant: один LLM-клиент и один транспорт на всё приложение.
-            # Провайдер задаёт MESSAGING_PROVIDER (meta / zernio / telegram).
-            self.registry = None
-            self.tenants: dict[str, TenantBundle] = {}
-            self.llm_client = LLMClient(settings.llm_api_url, settings.llm_api_key, settings.llm)
-            self.sender = build_sender(settings)
-            self.processor = MessageProcessor(settings, self.llm_client, self.sender)
-            return
-
-        # Мультитенант: по бандлу на каждого клиента реестра.
-        self.registry = ClientRegistry(Path(settings.clients_dir), settings)
+        self.multitenant = True
+        clients_path = Path(settings.clients_dir) if settings.clients_dir else (BASE_DIR / "clients")
+        self.registry = ClientRegistry(clients_path, settings)
         self.sender_factory = sender_factory or build_sender
         self.tenants: dict[str, TenantBundle] = {
             pid: self._build_tenant(tenant_settings)
             for pid, tenant_settings in self.registry.tenants.items()
         }
-        # В мультитенанте общих sender/processor нет — только per-tenant.
         self.llm_client = None
         self.sender = None
         self.processor = None
+
 
     # --- мультитенант: бандлы клиентов ------------------------------------------
 
@@ -282,11 +279,15 @@ class WebhookState:
         по inbound.phone_number_id (у Meta — ID бизнес-номера, у Zernio —
         accountId); None — номер/аккаунт не зарегистрирован.
         """
-        if not self.multitenant:
-            return self.processor
         await self.refresh_tenants()
-        bundle = self.tenants.get(inbound.phone_number_id)
-        return bundle.processor if bundle else None
+        pid = getattr(inbound, "phone_number_id", None) or getattr(inbound, "account_id", None)
+        bundle = self.tenants.get(pid)
+        if bundle:
+            return bundle.processor
+        if self.processor:
+            return self.processor
+        return None
+
 
     # --- дедупликация доставок ---------------------------------------------------
 
@@ -345,12 +346,9 @@ class WebhookState:
             logger.exception("Ошибка при обработке вебхука (%s)", inbound.phone)
 
     async def shutdown(self) -> None:
-        if self.multitenant:
-            for bundle in self.tenants.values():
-                await bundle.close()
-            return
-        await self.llm_client.close()
-        await self.sender.close()
+        for bundle in self.tenants.values():
+            await bundle.close()
+
 
 
 async def run_reminder_job(settings: Settings, state: WebhookState) -> int:
@@ -443,27 +441,20 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
             settings.messaging_provider,
         )
 
-    # Определяем пути: settings.clients_dir > CLIENTS_DIR env > RAILWAY_VOLUME_MOUNT_PATH/clients > авто-детект
+    # Режим всегда мультитенант: settings.clients_dir > CLIENTS_DIR env > RAILWAY_VOLUME_MOUNT_PATH/clients > BASE_DIR/clients
     railway_volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
     explicit_clients_dir = settings.clients_dir or os.getenv("CLIENTS_DIR")
-    
+
     if explicit_clients_dir:
-        # settings.clients_dir или явный CLIENTS_DIR из env имеет наивысший приоритет
         clients_dir = Path(explicit_clients_dir)
         logger.info("CLIENTS_DIR задан: %s", clients_dir)
-    elif os.getenv("CLIENT_CONFIG"):
-        # Явно задан single-tenant конфиг через CLIENT_CONFIG — авто-детект из тома не выполняется
-        clients_dir = None
-        logger.info("CLIENT_CONFIG задан — single-tenant режим, авто-детект clients_dir отключён")
-    elif railway_volume:
-        # Авто-детект из Railway Volume
+    elif railway_volume and (Path(railway_volume) / "clients").is_dir():
         clients_dir = Path(railway_volume) / "clients"
-        if not clients_dir.exists():
-            logger.warning("CLIENTS_DIR не найден в Volume: %s не существует", clients_dir)
         logger.info("CLIENTS_DIR авто-детект из Volume: %s", clients_dir)
     else:
-        clients_dir = None
-        logger.warning("RAILWAY_VOLUME_MOUNT_PATH не задан, CLIENTS_DIR не задан — мультитенант отключён")
+        clients_dir = BASE_DIR / "clients"
+        logger.info("CLIENTS_DIR по умолчанию: %s", clients_dir)
+
 
     # Определяем путь к БД через storage.db.get_db_path()
     from storage.db import get_db_path
@@ -565,14 +556,12 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         )
 
         targets: list[tuple[int, str]] = []
-        if state.multitenant:
-            await state.refresh_tenants()
-            for bundle in state.tenants.values():
-                ts = bundle.settings
-                db_key = ts.whatsapp_phone_number_id or ts.zernio_account_id
-                targets.append((int(ts.manual_timeout_hours or 12), db_key))
-        else:
-            targets.append((int(settings.manual_timeout_hours or 12), None))
+        await state.refresh_tenants()
+        for bundle in state.tenants.values():
+            ts = bundle.settings
+            db_key = ts.whatsapp_phone_number_id or ts.zernio_account_id
+            targets.append((int(ts.manual_timeout_hours or 12), db_key))
+
 
         total = 0
         for hours, db_key in targets:
@@ -652,30 +641,25 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
         # только если заданы секреты провайдера (иначе деплой чисто для
         # Telegram), Telegram-вебхук — всегда (у каждого бота свой токен).
         if settings.meta_app_secret and settings.meta_verify_token:
-            _register_meta_webhook(app, settings, state)
+            register_meta_webhook(app, settings, state)
         else:
             logger.warning(
                 "Вебхук Meta не зарегистрирован: не заданы META_APP_SECRET/"
                 "META_VERIFY_TOKEN — Meta-клиенты не обслуживаются"
             )
         if settings.zernio_webhook_secret:
-            _register_zernio_webhook(app, settings, state)
+            register_zernio_webhook(app, settings, state)
         else:
             logger.warning(
                 "Вебхук Zernio не зарегистрирован: не задан ZERNIO_WEBHOOK_SECRET "
                 "— Zernio-клиенты не обслуживаются"
             )
-        _register_telegram_webhook(app, settings, state)
-    elif settings.messaging_provider == "meta":
-        _register_meta_webhook(app, settings, state)
-    elif settings.messaging_provider == "zernio":
-        _register_zernio_webhook(app, settings, state)
-    elif settings.messaging_provider == "telegram":
-        _register_telegram_webhook(app, settings, state)
+        register_telegram_webhook(app, settings, state)
 
     # Вебхук Telegram-бота владельца (для уведомлений): регистрируем, если задан токен.
     if settings.telegram_owner_bot_token:
-        _register_telegram_owner_webhook(app, settings, state)
+        register_telegram_owner_webhook(app, settings, state)
+
         if not settings.telegram_owner_webhook_secret:
             logger.warning(
                 "Секрет вебхука бота JAUAP не задан (TELEGRAM_OWNER_WEBHOOK_SECRET) — "
@@ -709,15 +693,11 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
 
     @app.get("/privacy")
     async def privacy():
-        """Короткая памятка о данных клиента — открывается по ссылке из браузера.
-
-        Ссылку удобно указать в профиле бизнеса WhatsApp: клиенты видят,
-        какие данные собираются и как их удалить. В мультитенанте страница
-        общая для всех клиентов (свой текст появится с админкой/БД).
-        """
-        if state.multitenant:
-            return _multitenant_privacy()
-        return _single_tenant_privacy(settings)
+        """Короткая памятка о данных клиента — открывается по ссылке из браузера."""
+        doc = _multitenant_privacy()
+        if settings.business_name and settings.business_name != "помощник бизнеса в WhatsApp":
+            doc["business"] = settings.business_name
+        return doc
 
     @app.get("/connect/done")
     async def connect_done():
@@ -739,26 +719,6 @@ def create_app(settings: Settings, sender_factory: Callable | None = None) -> Fa
     return app
 
 
-def _single_tenant_privacy(settings: Settings) -> dict:
-    """Памятка о данных клиента для single-tenant (имя бизнеса подставляется)."""
-    return {
-        "business": settings.business_name,
-        "what_we_store": (
-            "Бот хранит только несколько последних сообщений этого диалога "
-            "— в оперативной памяти, без базы данных. История стирается "
-            "командой «start» от вас или при перезапуске сервиса."
-        ),
-        "how_we_use": (
-            "Ваши сообщения используются только для ответов на вопросы "
-            f"о {settings.business_name}. Мы не пересылаем их третьим "
-            "лицам: при необходимости менеджеру уходит лишь ваш вопрос."
-        ),
-        "delete": (
-            "Чтобы удалить переписку и связаться с человеком, напишите "
-            "«хочу человека» — владелец свяжется с вами."
-        ),
-    }
-
 
 def _multitenant_privacy() -> dict:
     """Общая памятка для всех клиентов мультитенантного деплоя."""
@@ -779,482 +739,6 @@ def _multitenant_privacy() -> dict:
             "«хочу человека» — владелец свяжется с вами."
         ),
     }
-
-
-# Кэш бизнес-номеров по accountId (для фильтрации message.sent от бизнеса).
-# Храним и пустой результат: запрос в Zernio идёт больше секунды, а без кэша
-# пустого ответа он повторялся на каждом входящем и задерживал подтверждение.
-_business_phone_cache: dict[str, tuple[str, float]] = {}
-BUSINESS_PHONE_CACHE_TTL = 900  # 15 минут
-
-
-async def _get_business_phone(account_id: str, zernio_client) -> str:
-    """Бизнес-номер из кэша или Zernio API."""
-    cached = _business_phone_cache.get(account_id)
-    if cached and time.monotonic() - cached[1] < BUSINESS_PHONE_CACHE_TTL:
-        return cached[0]
-
-    phone = ""
-    try:
-        # Используем Zernio API для получения информации об аккаунте
-        info = await zernio_client.get_number_info()
-        phone_obj = info.get("phone") if isinstance(info.get("phone"), dict) else {}
-        phone = str(phone_obj.get("display_phone_number") or info.get("phoneNumber") or info.get("username") or "").strip()
-    except Exception:
-        logger.debug("Не удалось получить бизнес-номер из Zernio", exc_info=True)
-        return ""
-
-    if phone:
-        _business_phone_cache[account_id] = (phone, time.monotonic())
-    return phone
-
-
-async def _handle_zernio_inbound(state: WebhookState, event, processor) -> None:
-    """Фоновая обработка входящего Zernio: фильтр «от бизнеса» + сценарий бота.
-
-    Вынесено из вебхука, чтобы ack не ждал сетевых запросов к Zernio: чем
-    раньше подтверждено событие, тем раньше клиент увидит ответ.
-    """
-    try:
-        business_phone = await _get_business_phone(event.account_id, processor.sender)
-        sender_digits = re.sub(r"\D", "", event.sender_phone or "")
-        business_digits = re.sub(r"\D", "", business_phone or "")
-        if business_digits and sender_digits == business_digits:
-            logger.debug("Zernio: message.received от бизнеса пропущено | sender=%s", event.sender_phone)
-            return
-        await state.handle_event(event.inbound, processor)
-    except Exception:
-        logger.exception("Ошибка обработки входящего Zernio (account=%s)", event.account_id)
-
-
-def _register_zernio_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
-    @app.post("/webhooks/zernio")
-    async def zernio_webhook(request: Request, background_tasks: BackgroundTasks):
-        """Приём вебхука Zernio: проверка X-Zernio-Signature -> ack 200 -> фон.
-
-        Обрабатывает: message.received, message.sent, message.failed, message.delivered, message.read.
-        Фильтрует сообщения от бизнеса (sender.phoneNumber == бизнес-номер).
-        Дедупликация через БД (storage.seen_events.check_and_add).
-        """
-        raw_body = await request.body()
-        received_at = time.monotonic()
-        signature = (
-            request.headers.get(ZERNIO_HEADER_SIGNATURE, "")
-            or request.headers.get(ZERNIO_HEADER_SIGNATURE_LEGACY, "")
-        )
-        if not verify_zernio_signature(settings.zernio_webhook_secret, raw_body, signature):
-            logger.warning("Вебхук Zernio отклонён: подпись не прошла проверку")
-            return JSONResponse(status_code=401, content={"error": "invalid signature"})
-
-        try:
-            payload = json.loads(raw_body)
-        except ValueError:
-            logger.warning("Вебхук Zernio с невалидным JSON: %d байт", len(raw_body))
-            return {"ok": True}
-
-        events = parse_zernio_events(payload)
-        # Замер разбора вебхука: если он упирается в сотни миллисекунд, Zernio
-        # может ретраить, и вся задержка до клиента растёт.
-        logger.info(
-            "Вебхук Zernio разобран | событий=%d | %.3f с",
-            len(events), time.monotonic() - received_at,
-        )
-        if not events:
-            return {"ok": True}
-
-        for event in events:
-            # Дедупликация через БД (с учётом типа события, чтобы sent/delivered/read не блокировали друг друга)
-            raw_id = event.provider_message_id or event.timestamp or ""
-            event_id = f"zernio:{event.event_type}:{raw_id}" if raw_id else ""
-            if event_id and not check_and_add(event_id):
-                logger.debug("Дубликат вебхука Zernio проигнорирован: event_id=%s", event_id)
-                continue
-
-            # Получить процессор для этого аккаунта
-            # Создаём mock inbound для processor_for
-            class MockInbound:
-                phone_number_id = event.account_id
-                account_id = event.account_id
-
-            processor = await state.processor_for(MockInbound())
-            if processor is None:
-                logger.warning(
-                    "Событие для незарегистрированного аккаунта Zernio: "
-                    "account_id=%s — подтверждено без обработки",
-                    event.account_id,
-                )
-                continue
-
-            # Обработка по типу события
-            if event.event_type == "message_received":
-                if event.inbound is None:
-                    continue
-
-                # Фильтр «это сообщение от самого бизнеса» делаем уже после
-                # подтверждения: запрос номера в Zernio занимает больше секунды,
-                # и на нём задерживался ответ клиенту.
-                background_tasks.add_task(
-                    _handle_zernio_inbound, state, event, processor
-                )
-
-            elif event.event_type == "message_sent":
-                # Исходящее от бизнеса/оператора — обновляем статус доставки
-                if event.provider_message_id:
-                    update_delivery_status(event.provider_message_id, "sent")
-
-                if event.conversation_id:
-                    from storage.db import fetchone, execute
-                    row = fetchone(
-                        "SELECT id FROM conversations WHERE zernio_conversation_id = ? AND client_key = ?",
-                        (event.conversation_id, event.account_id),
-                    )
-                    if row:
-                        conv_id = row["id"]
-                        from storage import update_last_message_times, get_message_by_provider_id, add_message
-                        update_last_message_times(conv_id, is_client=False)
-
-                        raw_msg = (event.raw_payload.get("message") or {}) if isinstance(event.raw_payload, dict) else {}
-                        event_text = str(raw_msg.get("text") or "").strip()
-
-                        # Проверяем: это исходящее от самого бота или ответ живого оператора
-                        is_bot_message = False
-                        if event.provider_message_id:
-                            existing = get_message_by_provider_id(event.provider_message_id)
-                            if existing and existing.get("role") == "bot":
-                                is_bot_message = True
-
-                        matched_bot_msg = None
-                        if not is_bot_message and event_text:
-                            matched_bot_msg = fetchone(
-                                "SELECT id, role, text, provider_message_id FROM messages WHERE conversation_id = ? AND role = 'bot' AND text = ? ORDER BY id DESC LIMIT 1",
-                                (conv_id, event_text),
-                            )
-                            if matched_bot_msg:
-                                is_bot_message = True
-                                if event.provider_message_id and not matched_bot_msg["provider_message_id"]:
-                                    execute(
-                                        "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
-                                        (event.provider_message_id, matched_bot_msg["id"]),
-                                    )
-
-                        last_msg = fetchone(
-                            "SELECT id, role, text, provider_message_id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-                            (conv_id,),
-                        )
-
-                        if not is_bot_message:
-                            # Проверяем, не было ли это сообщение оператора уже сохранено из админки панели
-                            existing_human = None
-                            if event.provider_message_id:
-                                existing_human = get_message_by_provider_id(event.provider_message_id)
-
-                            # Если сообщение отправлено из веб-панели (с временным idempotency ID), связываем его
-                            if not existing_human and last_msg and last_msg["role"] == "human":
-                                if event_text and last_msg["text"] == event_text:
-                                    existing_human = last_msg
-                                    if event.provider_message_id:
-                                        execute(
-                                            "UPDATE messages SET provider_message_id = ?, delivery_status = 'sent' WHERE id = ?",
-                                            (event.provider_message_id, last_msg["id"]),
-                                        )
-
-                            if not existing_human and event_text:
-                                # Сообщение отправлено человеком напрямую (из приложения WhatsApp / Inbox)
-                                add_message(
-                                    conversation_id=conv_id,
-                                    role="human",
-                                    text=event_text,
-                                    content_kind="text",
-                                    provider_message_id=event.provider_message_id,
-                                    delivery_status="sent",
-                                )
-
-                            open_handoff = get_open_handoff(conv_id)
-                            if open_handoff:
-                                from storage import mark_first_human_reply
-                                mark_first_human_reply(open_handoff["id"])
-
-            elif event.event_type == "message_failed":
-                if event.provider_message_id:
-                    update_delivery_status(event.provider_message_id, "failed")
-
-            elif event.event_type == "message_delivered":
-                if event.provider_message_id:
-                    update_delivery_status(event.provider_message_id, "delivered")
-
-            elif event.event_type == "message_read":
-                if event.provider_message_id:
-                    update_delivery_status(event.provider_message_id, "read")
-
-        logger.info(
-            "Вебхук Zernio: ack через %.3f с | событий=%d",
-            time.monotonic() - received_at, len(events),
-        )
-        return {"ok": True}
-
-
-def _register_meta_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
-    """Роуты вебхука Meta: GET-верификация подписки + POST событий."""
-
-    @app.get("/webhooks/meta")
-    async def meta_verify(request: Request):
-        """Привязка вебхука в дашборде Meta: echo challenge при верном токене.
-
-        Meta однократно дёргает наш URL GET-запросом hub.mode=subscribe —
-        при совпадении META_VERIFY_TOKEN возвращаем hub.challenge как текст.
-        """
-        params = request.query_params
-        if not verify_subscription(
-            hub_mode=params.get(QUERY_MODE, ""),
-            verify_token=params.get(QUERY_VERIFY_TOKEN, ""),
-            expected_token=settings.meta_verify_token,
-        ):
-            logger.warning("Привязка вебхука Meta отклонена: verify_token не совпал")
-            return PlainTextResponse("forbidden", status_code=403)
-        # Возвращаем challenge ровно как прислал Meta, чистым текстом.
-        return PlainTextResponse(params.get(QUERY_CHALLENGE, ""))
-
-    @app.post("/webhooks/meta")
-    async def meta_webhook(request: Request, background_tasks: BackgroundTasks):
-        """Приём вебхука Meta: проверка X-Hub-Signature-256 -> ack 200 -> фон.
-
-        Требование Meta то же, что у Zernio: ответить 2xx быстро, обработка —
-        в фоновой задаче (LLM + отправка могут длиться дольше).
-        Дедупликация через БД (storage.seen_events.check_and_add).
-        """
-        raw_body = await request.body()
-        signature = request.headers.get(META_HEADER_SIGNATURE, "")
-        if not verify_meta_signature(settings.meta_app_secret, raw_body, signature):
-            logger.warning("Вебхук Meta отклонён: подпись не прошла проверку")
-            return JSONResponse(status_code=401, content={"error": "invalid signature"})
-
-        try:
-            payload = json.loads(raw_body)
-        except ValueError:
-            logger.warning("Вебхук Meta с невалидным JSON: %d байт", len(raw_body))
-            return {"ok": True}
-
-        inbound_messages = parse_meta_events(payload)
-        if not inbound_messages:
-            # Статусы доставки и прочие не-наши события — подтверждаем молча.
-            return {"ok": True}
-
-        for inbound in inbound_messages:
-            # Дедупликация через БД (persistent across restarts)
-            event_id = getattr(inbound, "message_id", None) or ""
-            if not check_and_add(event_id):
-                logger.debug("Дубликат вебхука Meta проигнорирован: message_id=%s", event_id)
-                continue
-
-            processor = await state.processor_for(inbound)
-            if processor is None:
-                # Неизвестный номер: не наш клиент — ack, чтобы Meta не ретраила.
-                logger.warning(
-                    "Событие для незарегистрированного номера: phone_number_id=%s "
-                    "— подтверждено без обработки (клиента нет в clients/)",
-                    inbound.phone_number_id or "-",
-                )
-                continue
-            background_tasks.add_task(state.handle_event, inbound, processor)
-        return {"ok": True}
-
-
-def _register_telegram_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
-    """Роут вебхука Telegram: POST /webhooks/telegram/{bot_id}."""
-
-    @app.post("/webhooks/telegram/{bot_id}")
-    async def telegram_webhook(bot_id: str, request: Request,
-                               background_tasks: BackgroundTasks):
-        """Приём апдейта Telegram: проверка секрета -> ack 200 -> обработка в фоне.
-
-        Telegram ждёт быстрый 2xx и повторяет доставку при ошибке, поэтому
-        отвечаем сразу, а сценарий (LLM + отправка) уводим в фоновую задачу.
-        Дедуп — по update_id (Telegram тоже доставляет at-least-once). Клиент
-        ищется по id бота из URL; секрет вебхука — из его конфига.
-        Дедупликация через БД (storage.seen_events.check_and_add).
-        """
-        if state.multitenant:
-            # Реестр подтягивает изменения yaml на лету; бота ищем по id из URL.
-            await state.refresh_tenants()
-            bundle = state.tenants.get(bot_id)
-            if bundle is None:
-                logger.warning("Telegram вебхук: неизвестный бот %s", bot_id)
-                return JSONResponse(status_code=404, content={"ok": False})
-            expected_secret = bundle.settings.telegram_webhook_secret
-        else:
-            expected_secret = settings.telegram_webhook_secret
-            configured = bot_id_from_token(settings.telegram_bot_token)
-            if configured and configured != bot_id:
-                logger.warning("Telegram вебхук: bot_id %s не совпадает с токеном", bot_id)
-                return JSONResponse(status_code=404, content={"ok": False})
-
-        if expected_secret:
-            provided = request.headers.get(TELEGRAM_HEADER_SECRET, "")
-            if not hmac.compare_digest(provided, expected_secret):
-                logger.warning("Telegram вебхук отклонён: секрет не совпал (bot_id=%s)", bot_id)
-                return JSONResponse(status_code=401, content={"ok": False})
-        else:
-            logger.warning(
-                "Telegram вебхук принят без проверки секретного токена: TELEGRAM_WEBHOOK_SECRET не настроен (bot_id=%s)",
-                bot_id,
-            )
-
-        raw_body = await request.body()
-        try:
-            payload = json.loads(raw_body)
-        except ValueError:
-            logger.warning("Telegram вебхук с невалидным JSON: %d байт", len(raw_body))
-            return {"ok": True}
-
-        inbound_messages = parse_telegram_update(payload, bot_id)
-        if not inbound_messages:
-            # Редактирование, статусы и прочие не-наши события — молча ack.
-            return {"ok": True}
-
-        for inbound in inbound_messages:
-            # Дедупликация через БД (persistent across restarts). update_id у
-            # Telegram счётчик ВНУТРИ бота: два бота с update_id=100 не должны
-            # считаться дублем друг друга, поэтому ключ составной.
-            raw_id = getattr(inbound, "message_id", None) or ""
-            event_id = f"tg:{bot_id}:{raw_id}" if raw_id else ""
-            if not check_and_add(event_id):
-                logger.debug("Дубликат вебхука Telegram проигнорирован: update_id=%s", raw_id)
-                continue
-
-            processor = await state.processor_for(inbound)
-            if processor is None:
-                # Неизвестный бот: ack, чтобы Telegram не ретраил доставку.
-                logger.warning(
-                    "Telegram событие для незарегистрированного бота %s — "
-                    "подтверждено без обработки", bot_id,
-                )
-                continue
-            background_tasks.add_task(state.handle_event, inbound, processor)
-        return {"ok": True}
-
-
-def _register_telegram_owner_webhook(app: FastAPI, settings: Settings, state: WebhookState) -> None:
-    """Вебхук Telegram-бота владельца: POST /webhooks/telegram-owner.
-
-    Обрабатывает команды /start <code> для привязки чатов менеджеров.
-    Проверяет секретный токен из настроек (TELEGRAM_OWNER_WEBHOOK_SECRET).
-    """
-
-    @app.post("/webhooks/telegram-owner")
-    async def telegram_owner_webhook(request: Request, background_tasks: BackgroundTasks):
-        """Приём апдейта от Telegram-бота владельца."""
-        # Проверка секретного токена
-        expected_secret = getattr(settings, "telegram_owner_webhook_secret", "")
-        if expected_secret:
-            provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if not hmac.compare_digest(provided, expected_secret):
-                logger.warning("Telegram-owner вебхук отклонён: секрет не совпал")
-                return JSONResponse(status_code=401, content={"ok": False})
-
-        raw_body = await request.body()
-        try:
-            payload = json.loads(raw_body)
-        except ValueError:
-            logger.warning("Telegram-owner вебхук с невалидным JSON: %d байт", len(raw_body))
-            return {"ok": True}
-
-        # Дедупликация через БД
-        update_id = payload.get("update_id")
-        if update_id is not None:
-            from storage import check_and_add
-            if not check_and_add(f"tg_owner_{update_id}"):
-                logger.debug("Дубликат update_id Telegram-owner: %s", update_id)
-                return {"ok": True}
-
-        message = payload.get("message")
-        if not isinstance(message, dict):
-            return {"ok": True}
-
-        text = str(message.get("text") or "").strip()
-        chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
-        chat_id = str(chat.get("id") or "")
-
-        # Обработка команд: /start <code> — привязка чата, /stop — отвязка.
-        if text.startswith("/start"):
-            parts = text.split(maxsplit=1)
-            if len(parts) == 2:
-                code = parts[1].strip()
-                from storage import (
-                    MAX_BINDINGS_PER_CLIENT,
-                    add_tg_binding,
-                    complete_link_code,
-                    count_bindings,
-                    verify_link_code,
-                )
-                from whatsapp.telegram_client import TelegramClient
-
-                result = verify_link_code(code)
-                if not result:
-                    await _owner_bot_reply(settings, chat_id,
-                                           "❌ Код неверен или истёк. Получите новый в панели.")
-                    return {"ok": True}
-
-                client_key = result["client_key"]
-                code_hash = result["code_hash"]
-                if count_bindings(client_key) >= MAX_BINDINGS_PER_CLIENT:
-                    await _owner_bot_reply(
-                        settings, chat_id,
-                        f"⚠️ У клиента уже {MAX_BINDINGS_PER_CLIENT} привязанных чатов. "
-                        "Отвяжите лишний в панели или удалите этого бота.",
-                    )
-                    return {"ok": True}
-                # Код одноразовый: если его уже заняли — привязка не пройдёт.
-                if not complete_link_code(code_hash, chat_id):
-                    await _owner_bot_reply(settings, chat_id,
-                                           "⚠️ Этот код уже использован. Попросите новый в панели.")
-                    return {"ok": True}
-                if add_tg_binding(client_key, chat_id):
-                    logger.info("Telegram: чат %s привязан к клиенту %s", chat_id, client_key)
-                    await _owner_bot_reply(
-                        settings, chat_id,
-                        "✅ Подключено! Теперь вы будете получать уведомления о вопросах.",
-                    )
-                else:
-                    await _owner_bot_reply(settings, chat_id,
-                                           "Этот чат уже привязан — ничего менять не нужно.")
-            else:
-                await _owner_bot_reply(
-                    settings, chat_id,
-                    "👋 Привет! Чтобы подключить уведомления бота, перейдите в панель управления и нажмите «Подключить Telegram» — бот откроется со специальным кодом привязки.",
-                )
-
-        elif text.strip() == "/stop":
-            # Отвязка чата от всех клиентов, где он привязан.
-            from storage import remove_tg_binding
-            removed = 0
-            for binding in get_tg_bindings_for_notify_all():
-                if binding["chat_id"] == chat_id and remove_tg_binding(binding["client_key"], binding["id"]):
-                    removed += 1
-            if removed:
-                logger.info("Telegram: чат %s отвязан от %d клиентов", chat_id, removed)
-                await _owner_bot_reply(settings, chat_id, "✅ Чат отвязан.")
-            else:
-                await _owner_bot_reply(settings, chat_id, "Этот чат и так ни к чему не привязан.")
-
-        return {"ok": True}
-
-
-def get_tg_bindings_for_notify_all() -> list[dict]:
-    """Все привязки во всех клиентах — нужно для /stop (чат мог привязаться к разным)."""
-    from storage.db import fetchall
-    return [dict(row) for row in fetchall("SELECT id, client_key, chat_id FROM tg_bindings")]
-
-
-async def _owner_bot_reply(settings: Settings, chat_id: str, text: str) -> None:
-    """Ответ в чат менеджера от имени бота JAUAP (ошибки не роняют вебхук)."""
-    from whatsapp.telegram_client import TelegramClient
-    bot = TelegramClient(settings.telegram_owner_bot_token)
-    try:
-        await bot.send_text(chat_id, text)
-    except Exception:
-        logger.exception("Не удалось ответить в Telegram (%s)", chat_id)
-    finally:
-        await bot.close()
 
 
 def main() -> None:

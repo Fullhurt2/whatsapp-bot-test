@@ -464,9 +464,10 @@ def _int_env(name: str, default: int) -> int:
 
 
 def get_settings() -> Settings:
-    """Собирает итоговые настройки из .env и конфига клиента (CLIENT_CONFIG).
+    """Собирает системные настройки из .env (мультитенантный режим).
 
-    Бросает RuntimeError с понятным описанием, если не хватает обязательных полей.
+    Бросает RuntimeError с понятным описанием, если не хватает обязательных системных полей.
+    Бизнес-настройки клиентов загружаются реестром ClientRegistry из папки clients/.
     """
     provider = (os.getenv("MESSAGING_PROVIDER", "meta").strip().lower() or "meta")
     if provider not in ("meta", "zernio", "telegram"):
@@ -475,116 +476,7 @@ def get_settings() -> Settings:
             "ожидается 'meta', 'zernio' или 'telegram'"
         )
 
-    # Мультитенант: CLIENTS_DIR задан или в clients/ есть хотя бы один клиент.
-    # meta/zernio/telegram обслуживают реестр (в мультитенанте доступны все
-    # транспорты — провайдер задаёт каждый клиент).
-    if provider in ("meta", "zernio", "telegram"):
-        clients_dir = resolve_clients_dir()
-        if clients_dir is not None:
-            logger.info("Режим мультитенант: реестр клиентов в %s", clients_dir)
-            return _get_multitenant_settings(provider, clients_dir)
+    clients_dir = resolve_clients_dir() or (BASE_DIR / "clients")
+    logger.info("Режим мультитенант: реестр клиентов в %s", clients_dir)
+    return _get_multitenant_settings(provider, clients_dir)
 
-    cfg, config_file = _load_config()
-
-    model = str((cfg.get("llm") or {}).get("model") or "").strip() or os.getenv("LLM_MODEL", "").strip()
-    llm = LLMParams(
-        model=model,
-        temperature=float((cfg.get("llm") or {}).get("temperature", 1.0)),
-        max_tokens=int((cfg.get("llm") or {}).get("max_tokens", 3500)),
-        timeout_seconds=int((cfg.get("llm") or {}).get("timeout_seconds", 15)),
-        reasoning_effort=(cfg.get("llm") or {}).get("reasoning_effort") or None,
-    )
-
-    zernio_base_url = os.getenv("ZERNIO_BASE_URL", "").strip().rstrip("/") or "https://zernio.com/api/v1"
-
-    owner_phone = _resolve_owner_phone(cfg)
-
-    settings = Settings(
-        messaging_provider=provider,
-        zernio_api_key=os.getenv("ZERNIO_API_KEY", "").strip(),
-        zernio_webhook_secret=os.getenv("ZERNIO_WEBHOOK_SECRET", "").strip(),
-        zernio_base_url=zernio_base_url,
-        zernio_account_id=str(cfg.get("zernio_account_id") or "").strip(),
-        whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
-        whatsapp_phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", "").strip(),
-        meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
-        meta_verify_token=os.getenv("META_VERIFY_TOKEN", "").strip(),
-        meta_graph_version=os.getenv("META_GRAPH_VERSION", "").strip() or "v21.0",
-        # Порт: платформы-деплои (Railway/Render/Fly) подставляют PORT — он главный;
-        # APP_PORT нужен для локального запуска, APP_HOST=0.0.0.0 обязателен в контейнере.
-        app_host=os.getenv("APP_HOST", "0.0.0.0").strip() or "0.0.0.0",
-        app_port=int(os.getenv("PORT") or os.getenv("APP_PORT") or "8000"),
-        llm_api_url=os.getenv("LLM_API_URL", "").strip(),
-        llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
-        business_name=str(cfg.get("business_name") or "").strip(),
-        tone=str(cfg.get("tone") or "").strip(),
-        language=str(cfg.get("language") or "ru").strip().lower(),
-        knowledge_base=str(cfg.get("knowledge_base") or "").strip(),
-        owner_phone=owner_phone,
-        fallback_triggers=[str(t).strip() for t in (cfg.get("fallback_triggers") or []) if str(t).strip()],
-        llm=llm,
-        style_examples=str(cfg.get("style_examples") or "").strip(),
-        config_file=config_file,
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
-        telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
-        telegram_owner_bot_token=_owner_bot_token(),
-        telegram_owner_webhook_secret=_owner_bot_secret(),
-        public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
-        manual_timeout_hours=_int_env("MANUAL_TIMEOUT_HOURS", 12),
-        owner_telegram_chat_id=str(cfg.get("owner_telegram_chat_id") or "").strip(),
-        owner_template_name=str(cfg.get("owner_template_name") or "").strip(),
-        owner_template_language=str(cfg.get("owner_template_language") or "").strip(),
-        fallback_reply_ru=str(cfg.get("fallback_reply_ru") or "").strip(),
-        fallback_reply_kk=str(cfg.get("fallback_reply_kk") or "").strip(),
-        timeout_reply_ru=str(cfg.get("timeout_reply_ru") or "").strip(),
-        timeout_reply_kk=str(cfg.get("timeout_reply_kk") or "").strip(),
-        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
-        transcribe_base_url=os.getenv("TRANSCRIBE_BASE_URL", "").strip().rstrip("/") or "https://api.openai.com/v1",
-        transcribe_model=os.getenv("TRANSCRIBE_MODEL", "").strip() or "whisper-1",
-        vision_api_url=os.getenv("VISION_API_URL", "").strip().rstrip("/") or os.getenv("LLM_API_URL", "").strip(),
-        vision_api_key=os.getenv("VISION_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip(),
-        vision_model=os.getenv("VISION_MODEL", "").strip() or model,
-        media_dir=resolve_media_dir(),
-        media_retention_days=_int_env("MEDIA_RETENTION_DAYS", 30),
-        media=MediaSettings(
-            audio=bool((cfg.get("media") or {}).get("audio", True)),
-            image=bool((cfg.get("media") or {}).get("image", True)),
-            max_audio_seconds=int((cfg.get("media") or {}).get("max_audio_seconds", 120)),
-            max_image_mb=int((cfg.get("media") or {}).get("max_image_mb", 8)),
-            daily_limit=int((cfg.get("media") or {}).get("daily_limit", 50)),
-        ),
-    )
-
-    # Проверяем обязательные поля до старта, чтобы бот падал сразу с внятной ошибкой.
-    # Общие поля (LLM, бизнес) + свои у каждого провайдера: так можно держать
-    # несколько наборов в .env и переключаться переменной MESSAGING_PROVIDER.
-    required = {
-        "LLM_API_URL (.env)": settings.llm_api_url,
-        "LLM_API_KEY (.env)": settings.llm_api_key,
-        "business_name (клиентский yaml)": settings.business_name,
-        "knowledge_base (клиентский yaml)": settings.knowledge_base,
-        "llm.model (.env или клиентский yaml)": settings.llm.model,
-    }
-    if settings.messaging_provider == "meta":
-        required.update({
-            "WHATSAPP_ACCESS_TOKEN (.env, System User)": settings.whatsapp_access_token,
-            "WHATSAPP_PHONE_NUMBER_ID (.env)": settings.whatsapp_phone_number_id,
-            "META_APP_SECRET (.env)": settings.meta_app_secret,
-            "META_VERIFY_TOKEN (.env)": settings.meta_verify_token,
-        })
-    elif settings.messaging_provider == "telegram":
-        required.update({
-            "TELEGRAM_BOT_TOKEN (.env)": settings.telegram_bot_token,
-            "PUBLIC_BASE_URL (.env)": settings.public_base_url,
-        })
-    else:  # zernio
-        required.update({
-            "ZERNIO_API_KEY (.env)": settings.zernio_api_key,
-            "ZERNIO_WEBHOOK_SECRET (.env)": settings.zernio_webhook_secret,
-            "zernio_account_id (.env или клиентский yaml)": settings.zernio_account_id,
-        })
-    missing = [name for name, value in required.items() if not value]
-    if missing:
-        raise RuntimeError(f"Не заданы обязательные настройки: {', '.join(missing)}")
-
-    return settings
