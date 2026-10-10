@@ -766,9 +766,22 @@ async function openConversation(cid) {
   renderChatList();
   status("chatStatus", "");
   setChatModeUI(chatConvs.find((c) => c.id === cid));
+  const chatLayout = $("chatLayout");
+  if (chatLayout) chatLayout.classList.add("in-conversation");
+  const mobileBack = $("chatMobileBack");
+  if (mobileBack) mobileBack.classList.remove("hidden");
   await loadConversationMessages();
   // Открыв диалог, сбрасываем счётчик непрочитанных.
   chatApi("POST", "/conversations/" + encodeURIComponent(cid) + "/read").then(() => refreshChat());
+}
+
+function closeMobileChat() {
+  currentConvId = null;
+  const chatLayout = $("chatLayout");
+  if (chatLayout) chatLayout.classList.remove("in-conversation");
+  const mobileBack = $("chatMobileBack");
+  if (mobileBack) mobileBack.classList.add("hidden");
+  renderChatList();
 }
 
 async function loadConversationMessages() {
@@ -900,9 +913,10 @@ function stopChatPolling() {
   if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
 }
 
-// Enter отправляет сообщение чата, Shift+Enter — перенос строки.
+// Enter отправляет сообщение на десктопе, Shift+Enter — перенос строки. На мобильных Enter делает перенос.
 $("chatInput").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+  const isMobile = window.innerWidth <= 760 || navigator.maxTouchPoints > 0;
+  if (event.key === "Enter" && !event.shiftKey && !isMobile) {
     event.preventDefault();
     sendChatMessage();
   }
