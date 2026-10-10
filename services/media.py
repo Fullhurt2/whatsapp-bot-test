@@ -271,10 +271,88 @@ async def transcribe_audio(
     hint: название бизнеса + ключевые услуги из базы знаний.
     """
     # Проверяем, какой провайдер/модель транскрибации настроена
-    model = settings.transcribe_model or "whisper-1"
-    is_elevenlabs = "scribe" in model.lower() or "elevenlabs" in settings.transcribe_base_url.lower()
+    model = settings.transcribe_model or "elevenlabs/scribe-v2"
+    base_url = settings.transcribe_base_url.rstrip("/")
+    is_openrouter = "openrouter.ai" in base_url
+    is_elevenlabs_direct = "elevenlabs" in base_url and not is_openrouter
 
-    if is_elevenlabs:
+    # 1. Если транскрибация идёт через OpenRouter (единый ключ OPENROUTER_API_KEY)
+    if is_openrouter:
+        api_key = (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or settings.llm_api_key
+            or os.getenv("LLM_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise MediaError("OPENROUTER_API_KEY не задан для транскрибации")
+
+        endpoint = f"{base_url}/audio/transcriptions"
+        audio_b64 = base64.b64encode(data).decode("utf-8")
+        fmt = "ogg" if "ogg" in mime or "opus" in mime else ("mp3" if "mp3" in mime or "mpeg" in mime else "wav")
+        payload: dict = {
+            "model": model,
+            "input_audio": {
+                "data": audio_b64,
+                "format": fmt,
+            },
+        }
+        if language and language.lower() not in ("auto", "none"):
+            payload["language"] = language.lower()
+        if hint:
+            payload["prompt"] = hint[:400]
+
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            try:
+                response = await client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            except httpx.TimeoutException as exc:
+                if retry:
+                    logger.warning("Таймаут транскрибации OpenRouter — повтор запроса")
+                    return await transcribe_audio(data, mime, language, hint, settings, retry=False)
+                raise MediaError("Таймаут обращения к OpenRouter Audio API") from exc
+            except httpx.HTTPError as exc:
+                if retry:
+                    logger.warning("Сетевая ошибка OpenRouter Audio API (%s) — повтор запроса", exc)
+                    return await transcribe_audio(data, mime, language, hint, settings, retry=False)
+                raise MediaError(f"Сетевая ошибка OpenRouter Audio API: {exc}") from exc
+
+        if response.status_code != 200:
+            if retry and response.status_code >= 500:
+                logger.warning("OpenRouter Audio вернул %d — повтор через 1с", response.status_code)
+                await asyncio.sleep(1.0)
+                return await transcribe_audio(data, mime, language, hint, settings, retry=False)
+            raise MediaError(f"OpenRouter Audio API ошибка {response.status_code}: {response.text[:200]}")
+
+        try:
+            res_json = response.json()
+        except Exception as exc:
+            raise MediaError("Невалидный JSON от OpenRouter Audio API") from exc
+
+        transcript = str(res_json.get("text") or "").strip()
+        usage = res_json.get("usage") or {}
+        duration_s = float(usage.get("duration") or res_json.get("duration") or 0.0)
+        cost = float(usage.get("cost") or 0.0)
+        if cost <= 0.0 and duration_s > 0.0:
+            cost = round((duration_s / 60.0) * ELEVENLABS_SCRIBE_PRICE_PER_MINUTE, 6)
+
+        return MediaResult(
+            text=transcript,
+            duration_s=duration_s,
+            model=model,
+            cost=cost,
+            status="ok",
+            size_bytes=len(data),
+            mime=mime,
+        )
+
+    # 2. Если прямой ElevenLabs API
+    if is_elevenlabs_direct:
         eleven_key = (
             os.getenv("ELEVENLABS_API_KEY", "").strip()
             or settings.openai_api_key
@@ -284,26 +362,26 @@ async def transcribe_audio(
             raise MediaError("ELEVENLABS_API_KEY не задан для транскрибации Scribe v2")
 
         endpoint = (
-            settings.transcribe_base_url.rstrip("/")
-            if "speech-to-text" in settings.transcribe_base_url
+            base_url
+            if "speech-to-text" in base_url
             else "https://api.elevenlabs.io/v1/speech-to-text"
         )
         filename = "voice.ogg" if "ogg" in mime or "opus" in mime else "voice.mp3"
         files = {"file": (filename, data, mime or "audio/ogg")}
-        payload: dict[str, str] = {
+        payload_direct: dict[str, str] = {
             "model_id": model if model.startswith("scribe") else "scribe_v2",
         }
         if language and language.lower() not in ("auto", "none"):
-            payload["language_code"] = language.lower()
+            payload_direct["language_code"] = language.lower()
         if hint:
-            payload["keyterm_prompt"] = hint[:400]
+            payload_direct["keyterm_prompt"] = hint[:400]
 
         async with httpx.AsyncClient(timeout=35.0) as client:
             try:
                 response = await client.post(
                     endpoint,
                     headers={"xi-api-key": eleven_key},
-                    data=payload,
+                    data=payload_direct,
                     files=files,
                 )
             except httpx.TimeoutException as exc:
@@ -330,7 +408,6 @@ async def transcribe_audio(
             raise MediaError("Невалидный JSON от ElevenLabs Scribe API") from exc
 
         transcript = str(res_json.get("text") or "").strip()
-        # ElevenLabs Scribe возвращает words с timestamps или duration
         duration_s = 0.0
         words = res_json.get("words")
         if isinstance(words, list) and words:
