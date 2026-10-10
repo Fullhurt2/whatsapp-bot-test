@@ -425,7 +425,7 @@ async function saveEditor() {
     if (profileRes && !profileRes.ok) {
       profileMsg = "\nВнимание: профиль WhatsApp не обновился: " + profileRes.error;
     } else if (profileRes && profileRes.changed && profileRes.changed.length) {
-      profileMsg = "\nПрофиль WhatsApp обновлён в Meta/Zernio.";
+      profileMsg = "\nПрофиль в WhatsApp обновлён.";
     }
   }
 
@@ -703,18 +703,17 @@ async function loadWhatsAppDisplayName() {
     if (badgeEl) {
       const st = (data.status || "NONE").toUpperCase();
       badgeEl.className = "badge-status";
-      if (st === "APPROVED") {
+      if (st === "APPROVED" || st === "AVAILABLE_WITHOUT_REVIEW") {
         badgeEl.classList.add("badge-approved");
-        badgeEl.textContent = "Одобрено Meta";
+        badgeEl.textContent = "Подтверждено";
       } else if (st === "PENDING_REVIEW") {
         badgeEl.classList.add("badge-pending");
-        badgeEl.textContent = "На рассмотрении";
+        badgeEl.textContent = "На проверке";
       } else if (st === "DECLINED") {
         badgeEl.classList.add("badge-declined");
         badgeEl.textContent = "Отклонено";
       } else {
-        badgeEl.classList.add("badge-none");
-        badgeEl.textContent = st;
+        badgeEl.classList.add("hidden");
       }
     }
     // Если название бизнеса у бота ещё не заполнено — подставляем из WhatsApp
@@ -740,13 +739,13 @@ function syncBusinessNameFromWhatsApp() {
 async function promptChangeDisplayName() {
   const current = verifiedWhatsAppName || "";
   const newName = prompt(
-    "Введите новое отображаемое имя для WhatsApp (Meta):\n\n" +
-    "Внимание: смена имени отправляется на модерацию в Meta и занимает 1–3 рабочих дня.",
+    "Введите новое имя для WhatsApp:\n\n" +
+    "Проверка нового имени занимает 1–3 рабочих дня.",
     current
   );
   if (!newName || !newName.trim() || newName.trim() === current) return;
   const statusEl = $("profileStatus");
-  status(statusEl, "Отправляем запрос на смену имени в Meta…");
+  status(statusEl, "Отправляем запрос на смену имени…");
   try {
     const { ok, code, data } = await api("POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/zernio/display-name", {
       displayName: newName.trim(),
@@ -755,7 +754,7 @@ async function promptChangeDisplayName() {
       status(statusEl, humanError(code, data), true);
       return;
     }
-    status(statusEl, "Запрос на смену имени отправлен на модерацию в Meta. Статус обновится после проверки.", false);
+    status(statusEl, "Запрос на смену имени отправлен на проверку. Статус обновится после одобрения.", false);
     loadWhatsAppDisplayName();
   } catch (e) {
     status(statusEl, "Ошибка: " + e.message, true);
@@ -975,22 +974,20 @@ async function loadConversationMessages(isInitial = false) {
     const kind = (m.content_kind || "").toLowerCase();
     if (kind === "voice" || kind === "audio") {
       const durText = m.media_duration_s ? Math.round(m.media_duration_s) + " с" : "";
-      const modelBadge = m.media_model ? '<span class="provider-badge">' + esc(m.media_model) + '</span>' : '<span class="provider-badge">Whisper</span>';
       if (m.media_status === "expired") {
         mediaHtml = '<div class="media-expired" style="font-size:12px;color:#888;margin-bottom:4px;">⚠️ Файл удалён по истечении срока хранения</div>';
       } else if (m.media_status === "failed") {
         mediaHtml = '<div class="media-failed" style="margin-bottom:4px;"><span class="provider-badge" style="background:#fee;color:#c00;">Ошибка расшифровки</span> <button type="button" class="btn btn-sm" style="padding:2px 6px;font-size:11px;" onclick="retryMedia(' + m.id + ')">Повторить расшифровку</button></div>';
       } else if (m.media_path) {
-        mediaHtml = '<div class="media-voice" style="margin-bottom:4px;"><audio controls src="' + esc(mediaUrl) + '" preload="none" style="max-width:100%;height:32px;"></audio><div style="font-size:11px;color:#888;margin-top:2px;">' + esc(durText) + ' ' + modelBadge + '</div></div>';
+        mediaHtml = '<div class="media-voice" style="margin-bottom:4px;"><audio controls src="' + esc(mediaUrl) + '" preload="none" style="max-width:100%;height:32px;"></audio>' + (durText ? '<div style="font-size:11px;color:#888;margin-top:2px;">' + esc(durText) + '</div>' : '') + '</div>';
       }
     } else if (kind === "image") {
-      const modelBadge = m.media_model ? '<span class="provider-badge">' + esc(m.media_model) + '</span>' : '';
       if (m.media_status === "expired") {
         mediaHtml = '<div class="media-expired" style="font-size:12px;color:#888;margin-bottom:4px;">⚠️ Файл удалён по истечении срока хранения</div>';
       } else if (m.media_status === "failed") {
         mediaHtml = '<div class="media-failed" style="margin-bottom:4px;"><span class="provider-badge" style="background:#fee;color:#c00;">Ошибка распознавания</span> <button type="button" class="btn btn-sm" style="padding:2px 6px;font-size:11px;" onclick="retryMedia(' + m.id + ')">Повторить распознавание</button></div>';
       } else if (m.media_path) {
-        mediaHtml = '<div class="media-image" style="margin-bottom:4px;"><a href="' + esc(mediaUrl) + '" target="_blank" rel="noopener"><img src="' + esc(mediaUrl) + '" style="max-width:220px;max-height:220px;border-radius:6px;display:block;cursor:pointer;"></a><div style="font-size:11px;color:#888;margin-top:2px;">' + modelBadge + '</div></div>';
+        mediaHtml = '<div class="media-image" style="margin-bottom:4px;"><a href="' + esc(mediaUrl) + '" target="_blank" rel="noopener"><img src="' + esc(mediaUrl) + '" style="max-width:220px;max-height:220px;border-radius:6px;display:block;cursor:pointer;"></a></div>';
       }
     }
 
