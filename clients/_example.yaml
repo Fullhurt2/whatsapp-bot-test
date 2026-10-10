@@ -83,7 +83,7 @@ llm:
   temperature: 0.6
   max_tokens: 3500
   timeout_seconds: 15
-  reasoning_effort: "medium"
+  reasoning_effort: "none"
 
 # ТОКЕН ЭТОЙ WABA (System User с доступом к WhatsApp Account клиента).
 # Только для provider: wa. Оставьте пустым, чтобы использовать глобальный

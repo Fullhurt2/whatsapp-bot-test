@@ -366,6 +366,7 @@ def _get_multitenant_settings(provider: str, clients_dir: Path) -> Settings:
             temperature=1.0,
             max_tokens=3500,
             timeout_seconds=15,
+            reasoning_effort="none",
         ),
         clients_dir=str(clients_dir),
         # Публичный адрес сервиса — база для setWebhook Telegram-клиентов.

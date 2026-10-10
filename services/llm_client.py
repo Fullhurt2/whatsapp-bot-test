@@ -203,7 +203,12 @@ class LLMClient:
         if not self._omit_temperature:
             payload["temperature"] = self._params.temperature
         if self._params.reasoning_effort and not self._omit_reasoning_effort:
-            payload["reasoning_effort"] = self._params.reasoning_effort
+            if "openrouter.ai" in self._endpoint:
+                payload["reasoning"] = {"effort": self._params.reasoning_effort}
+            else:
+                payload["reasoning_effort"] = self._params.reasoning_effort
+        if "openrouter.ai" in self._endpoint:
+            payload["provider"] = {"sort": "latency", "allow_fallbacks": True}
         payload[self._limit_key()] = self._params.max_tokens
         return payload
 
