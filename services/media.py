@@ -303,16 +303,47 @@ async def transcribe_audio(
             f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек."
         )
 
-        payload: dict = {
-            "model": model,
-            "input_audio": {
-                "data": audio_b64,
-                "format": fmt,
-            },
-            "prompt": custom_prompt,
-        }
-        if language and language.lower() not in ("auto", "none"):
-            payload["language"] = language.lower()
+        is_gemini_audio = "gemini" in model.lower()
+
+        # Если это мультимодальный Gemini (google/gemini-3.5-flash / flash-lite)
+        if is_gemini_audio:
+            endpoint = f"{base_url}/chat/completions"
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": custom_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Расшифруй это аудиосообщение точно по правилам:"},
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": audio_b64,
+                                    "format": fmt,
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "temperature": 0.1,
+            }
+        else:
+            # Иначе эндпоинт аудио-транскрибации OpenRouter (Scribe v2 / Whisper)
+            endpoint = f"{base_url}/audio/transcriptions"
+            payload = {
+                "model": model,
+                "input_audio": {
+                    "data": audio_b64,
+                    "format": fmt,
+                },
+                "prompt": custom_prompt,
+            }
+            if language and language.lower() not in ("auto", "none"):
+                payload["language"] = language.lower()
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             try:
@@ -347,7 +378,13 @@ async def transcribe_audio(
         except Exception as exc:
             raise MediaError("Невалидный JSON от OpenRouter Audio API") from exc
 
-        transcript = str(res_json.get("text") or "").strip()
+        if is_gemini_audio:
+            choices = res_json.get("choices") or []
+            msg = (choices[0].get("message") or {}) if choices else {}
+            transcript = str(msg.get("content") or "").strip()
+        else:
+            transcript = str(res_json.get("text") or "").strip()
+
         usage = res_json.get("usage") or {}
         duration_s = float(usage.get("duration") or res_json.get("duration") or 0.0)
         cost = float(usage.get("cost") or 0.0)
