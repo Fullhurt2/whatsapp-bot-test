@@ -378,7 +378,11 @@ async def transcribe_audio(
         except Exception as exc:
             raise MediaError("Невалидный JSON от OpenRouter Audio API") from exc
 
-        if is_gemini_audio:
+        # Парсим текст ответа (поддерживает как text из audio/transcriptions, так и choices из chat/completions)
+        transcript = ""
+        if isinstance(res_json.get("text"), str) and res_json["text"].strip():
+            transcript = res_json["text"].strip()
+        elif "choices" in res_json:
             choices = res_json.get("choices") or []
             msg = (choices[0].get("message") or {}) if choices else {}
             transcript = str(msg.get("content") or "").strip()
