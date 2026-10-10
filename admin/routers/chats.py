@@ -101,11 +101,24 @@ def register_chats_routes(app, settings: Settings, state, clients_dir: Path) -> 
         try:
             import tempfile
             resolved_file = Path(media_path).resolve()
-            resolved_base = Path(settings.media_dir).resolve()
-            resolved_tmp = Path(tempfile.gettempdir()).resolve()
-            is_in_media = resolved_file.is_relative_to(resolved_base) if hasattr(resolved_file, "is_relative_to") else str(resolved_file).startswith(str(resolved_base))
-            is_in_tmp = resolved_file.is_relative_to(resolved_tmp) if hasattr(resolved_file, "is_relative_to") else str(resolved_file).startswith(str(resolved_tmp))
-            if not (is_in_media or is_in_tmp):
+            allowed_bases = [
+                Path(settings.media_dir).resolve(),
+                Path("/data/clients/media").resolve(),
+                Path(tempfile.gettempdir()).resolve(),
+            ]
+            if vol := os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip():
+                allowed_bases.append(Path(vol).resolve())
+                allowed_bases.append((Path(vol) / "clients" / "media").resolve())
+
+            def _is_safe(target: Path, base: Path) -> bool:
+                try:
+                    if hasattr(target, "is_relative_to"):
+                        return target.is_relative_to(base)
+                    return str(target).startswith(str(base))
+                except Exception:
+                    return False
+
+            if not any(_is_safe(resolved_file, base) for base in allowed_bases):
                 logger.warning("Попытка Path Traversal через media_path: %s", media_path)
                 return JSONResponse(status_code=403, content={"error": "нет доступа"})
         except Exception:
