@@ -770,7 +770,7 @@ async function openConversation(cid) {
   if (chatLayout) chatLayout.classList.add("in-conversation");
   const mobileBack = $("chatMobileBack");
   if (mobileBack) mobileBack.classList.remove("hidden");
-  await loadConversationMessages();
+  await loadConversationMessages(true);
   // Открыв диалог, сбрасываем счётчик непрочитанных.
   chatApi("POST", "/conversations/" + encodeURIComponent(cid) + "/read").then(() => refreshChat());
 }
@@ -784,7 +784,7 @@ function closeMobileChat() {
   renderChatList();
 }
 
-async function loadConversationMessages() {
+async function loadConversationMessages(isInitial = false) {
   if (!currentConvId) return;
   const { ok, code, data } = await chatApi("GET",
     "/conversations/" + encodeURIComponent(currentConvId) + "/messages?limit=100");
@@ -795,6 +795,10 @@ async function loadConversationMessages() {
     box.innerHTML = '<div class="muted">Сообщений пока нет.</div>';
     return;
   }
+
+  // Проверяем, был ли пользователь внизу (в пределах 60px от нижнего края)
+  const isNearBottom = isInitial || (box.scrollHeight - box.scrollTop - box.clientHeight < 60);
+
   box.innerHTML = messages.map((m) => {
     const statusBit = m.role === "human" && m.delivery_status ? " · " + esc(m.delivery_status) : "";
     let mediaHtml = "";
@@ -843,7 +847,10 @@ async function loadConversationMessages() {
       textHtml +
       '<span class="chat-msg-time">' + esc(fmtChatTime(m.created_at)) + statusBit + "</span></div>";
   }).join("");
-  box.scrollTop = box.scrollHeight;
+
+  if (isNearBottom) {
+    box.scrollTop = box.scrollHeight;
+  }
 }
 
 async function retryMedia(msgId) {
@@ -881,7 +888,7 @@ async function sendChatMessage() {
   }
   input.value = "";
   status("chatStatus", "Отправлено.");
-  await loadConversationMessages();
+  await loadConversationMessages(true);
   refreshChat();
 }
 

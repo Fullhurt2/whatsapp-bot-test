@@ -361,9 +361,9 @@ def register_analytics_routes(app, settings: Settings, state, clients_dir: Path)
     # --- Аналитика ---
 
     @app.get("/admin/clients/{pid}/stats")
-    async def get_client_stats(pid: str, request: Request,
-                               from_date: str | None = None,
-                               to_date: str | None = None):
+    async def get_stats_for_client(pid: str, request: Request,
+                                   from_date: str | None = None,
+                                   to_date: str | None = None):
         role, error = _authorize(settings, request, clients_dir, pid)
         if error is not None:
             return JSONResponse(status_code=error, content={"error": "нет доступа"})
@@ -373,9 +373,13 @@ def register_analytics_routes(app, settings: Settings, state, clients_dir: Path)
         from_date, to_date = parse_date_range(from_date, to_date)
         client_tz = str((_read_cfg(_client_yaml_path(clients_dir, pid)) or {}).get("timezone")
                         or settings.timezone or "Asia/Almaty")
-        stats = get_client_stats(_conversation_client_key(clients_dir, pid),
-                                 from_date, to_date, timezone=client_tz)
-        return stats
+        try:
+            stats = get_client_stats(_conversation_client_key(clients_dir, pid),
+                                     from_date, to_date, timezone=client_tz)
+            return stats
+        except Exception as exc:
+            logger.exception("Ошибка получения статистики для клиента %s: %s", pid, exc)
+            return JSONResponse(status_code=500, content={"error": f"Ошибка сбора аналитики: {exc}"})
 
     @app.get("/admin/clients/{pid}/stats/export.csv")
     async def export_client_stats(pid: str, request: Request,
@@ -407,5 +411,9 @@ def register_analytics_routes(app, settings: Settings, state, clients_dir: Path)
             stem: _conversation_client_key(clients_dir, stem)
             for stem in _client_pids(clients_dir)
         }
-        stats = get_admin_overview_stats(from_date, to_date, client_map)
-        return stats
+        try:
+            stats = get_admin_overview_stats(from_date, to_date, client_map)
+            return stats
+        except Exception as exc:
+            logger.exception("Ошибка получения общей статистики: %s", exc)
+            return JSONResponse(status_code=500, content={"error": f"Ошибка сбора общей аналитики: {exc}"})
