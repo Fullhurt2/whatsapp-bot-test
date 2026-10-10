@@ -683,6 +683,48 @@ def register_clients_routes(app, settings: Settings, state, clients_dir: Path) -
             "wabaName": str(waba.get("name") or "") if waba else "",
         }
 
+    @app.get("/admin/clients/{pid}/zernio/display-name")
+    async def zernio_get_display_name(pid: str, request: Request):
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        if not str(cfg.get("zernio_account_id") or "").strip():
+            return JSONResponse(status_code=409, content={"error": "номер ещё не подключён"})
+        async with _profile_zernio_client(state, settings, clients_dir, pid) as client:
+            if client is None:
+                return JSONResponse(status_code=409, content={"error": "нет доступа к Zernio"})
+            try:
+                info = await client.get_display_name()
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
+        return {"ok": True, **info}
+
+    @app.post("/admin/clients/{pid}/zernio/display-name")
+    async def zernio_change_display_name(pid: str, request: Request):
+        role, cfg, error = _zernio_guard(pid, request)
+        if error is not None:
+            return error
+        if not str(cfg.get("zernio_account_id") or "").strip():
+            return JSONResponse(status_code=409, content={"error": "номер ещё не подключён"})
+        try:
+            incoming = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "тело должно быть JSON"})
+        new_name = str((incoming or {}).get("displayName") or "").strip()
+        if not (3 <= len(new_name) <= 512):
+            return JSONResponse(status_code=400, content={"error": "длина имени должна быть от 3 до 512 символов"})
+        async with _profile_zernio_client(state, settings, clients_dir, pid) as client:
+            if client is None:
+                return JSONResponse(status_code=409, content={"error": "нет доступа к Zernio"})
+            try:
+                res = await client.change_display_name(new_name)
+            except (MessagingError, MessagingTimeout) as exc:
+                return _profile_failure(exc)
+        actor = "admin" if role == "admin" else f"client:{pid}"
+        _audit(clients_dir, actor, "zernio_display_name", pid, {}, {"displayName": new_name})
+        logger.info("Админ-API: отправлен запрос на смену имени WhatsApp для %s: %s", pid, new_name)
+        return {"ok": True, "result": res}
+
     @app.post("/admin/clients/{pid}/zernio/register-number")
     async def zernio_register_number(pid: str, request: Request):
         role, cfg, error = _zernio_guard(pid, request)

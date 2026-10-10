@@ -124,56 +124,102 @@
         </nav>
 
         <section class="tab-panel" id="tab-business">
-          <label for="f_business_name">Название бизнеса</label>
-          <input id="f_business_name" placeholder="Nails Studio">
-          <label for="f_tone">Как бот общается</label>
-          <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
-          <div class="hint">Язык ответа выбирается автоматически: бот отвечает на том же языке, на котором написал клиент.</div>
+          <!-- Карточка 1: Настройки бота -->
+          <div class="profile-group-card">
+            <div class="profile-group-head">
+              <div class="profile-group-title">
+                <span>🤖 Настройки бота</span>
+              </div>
+              <div class="profile-group-desc">Имя и манера общения, которые бот использует при ответах клиентам.</div>
+            </div>
 
+            <div style="display:flex;align-items:flex-end;gap:10px;">
+              <div style="flex:1;">
+                <label for="f_business_name" style="margin-top:0;">Название бизнеса</label>
+                <input id="f_business_name" placeholder="Nails Studio">
+              </div>
+              <button type="button" class="btn btn-sm" id="btnSyncNameFromWhatsApp" onclick="syncBusinessNameFromWhatsApp()" title="Подставить название из официального профиля WhatsApp" style="height:38px;white-space:nowrap;margin-bottom:1px;">
+                Взять из WhatsApp ⤓
+              </button>
+            </div>
+
+            <label for="f_tone">Как бот общается (тон и характер)</label>
+            <input id="f_tone" placeholder="вежливый, дружелюбный, на «вы»">
+            <div class="hint">Язык ответа выбирается автоматически: бот отвечает на том же языке, на котором написал клиент.</div>
+          </div>
+
+          <!-- Карточка 2: Профиль в WhatsApp (Meta / Zernio) -->
           <div id="businessProfileSection" class="hidden">
-            <div class="section-title" style="margin-top:24px">Профиль в WhatsApp</div>
-            <div class="hint">Что видят клиенты рядом с именем: описание, контакты, аватар. Изменения сохраняются через Meta/Zernio API.</div>
-
-            <label for="f_description">Описание (до 512 символов)</label>
-            <textarea id="f_description" class="auto-resize" placeholder="Описание бизнеса…" maxlength="512"></textarea>
-            <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
-
-            <div class="row">
-              <div>
-                <label for="f_email">Email</label>
-                <input id="f_email" class="mono" placeholder="hello@example.com">
+            <div class="profile-group-card">
+              <div class="profile-group-head">
+                <div class="profile-group-title">
+                  <span>📱 Профиль в WhatsApp</span>
+                </div>
+                <div class="profile-group-desc">То, что клиенты видят в WhatsApp рядом с номером: имя, описание, контакты и аватар. Сохраняются через WhatsApp/Zernio API при сохранении настроек.</div>
               </div>
-              <div>
-                <label for="f_vertical">Категория бизнеса</label>
-                <select id="f_vertical" class="mono"></select>
+
+              <!-- Официальное отображаемое имя в WhatsApp -->
+              <div class="wp-name-row" id="wpDisplayNameRow">
+                <div class="wp-name-info">
+                  <div class="wp-name-label">Имя в WhatsApp (Meta)</div>
+                  <div class="wp-name-value">
+                    <span id="wpVerifiedNameText">—</span>
+                    <span class="badge-status badge-none" id="wpNameStatusBadge">статус не проверен</span>
+                  </div>
+                </div>
+                <button type="button" class="btn btn-sm" id="btnRequestNameChange" onclick="promptChangeDisplayName()">
+                  Изменить имя…
+                </button>
               </div>
+
+              <!-- Современный блок аватара -->
+              <div class="avatar-card">
+                <div class="avatar-preview-box" id="avatarCurrent">
+                  <span class="avatar-fallback-icon">📷</span>
+                </div>
+                <div class="avatar-upload-col">
+                  <div class="avatar-upload-title">Аватар бизнес-аккаунта</div>
+                  <div class="avatar-upload-hint">JPG, PNG или WebP до 5 МБ. Рекомендуется квадратное фото 640×640.</div>
+                  <div class="avatar-actions">
+                    <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="handleProfilePhotoSelected()">
+                    <button type="button" class="btn btn-sm" id="choosePhotoBtn" onclick="$('f_profile_photo').click()">Выбрать новое фото…</button>
+                    <button type="button" class="btn btn-primary btn-sm hidden" id="uploadPhotoBtn" onclick="uploadProfilePhoto()">Загрузить выбранное</button>
+                    <span id="photoFileName" class="hint" style="margin:0;"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div style="margin-top:18px;">
+                <label for="f_description">Описание бизнеса (до 512 символов)</label>
+                <textarea id="f_description" class="auto-resize" placeholder="Опишите ваши товары, услуги и условия…" maxlength="512"></textarea>
+                <div id="descriptionCounter" class="counter" style="text-align:right;margin-top:2px;font-size:11px;color:#666">0/512</div>
+              </div>
+
+              <div class="row" style="margin-top:12px;">
+                <div>
+                  <label for="f_email" style="margin-top:0;">Email</label>
+                  <input id="f_email" class="mono" placeholder="hello@example.com">
+                </div>
+                <div>
+                  <label for="f_vertical" style="margin-top:0;">Категория бизнеса</label>
+                  <select id="f_vertical" class="mono"></select>
+                </div>
+              </div>
+              <div class="hint">Категория из официального справочника Meta WhatsApp.</div>
+
+              <div style="margin-top:14px;">
+                <label for="f_websites">Сайты (до 2, по одной ссылке на строку)</label>
+                <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://instagram.com/mybusiness" rows="2"></textarea>
+                <div class="hint">Ссылки должны начинаться с https://</div>
+              </div>
+
+              <div style="margin-top:14px;">
+                <label for="f_address">Адрес</label>
+                <textarea id="f_address" class="auto-resize" placeholder="Город, улица, дом, этаж, офис…"></textarea>
+              </div>
+
+              <div class="status" id="profileStatus" role="status" style="margin-top:12px;"></div>
             </div>
-            <div class="hint">Список категорий задан WhatsApp. Не нашли свою — оставьте «Не выбрана».</div>
-
-            <label for="f_websites">Сайты (до 2, по одному на строку)</label>
-            <textarea id="f_websites" class="auto-resize" placeholder="https://example.com&#10;https://shop.example.com" rows="2"></textarea>
-
-            <label for="f_address">Адрес</label>
-            <textarea id="f_address" class="auto-resize" placeholder="Адрес бизнеса…"></textarea>
-
-            <div class="section-title" style="margin-top:20px">Аватар</div>
-            <div class="hint">JPG/PNG/WebP, до 5 МБ. Рекомендуется 640×640.</div>
-            <div class="row" style="align-items:center;">
-              <div style="flex:1">
-                <label>Текущий аватар</label>
-                <div id="avatarCurrent" class="hint">не загружен</div>
-              </div>
-              <div>
-                <label>Загрузить новый</label>
-                <input type="file" id="f_profile_photo" accept="image/jpeg,image/png,image/webp">
-                <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px" onclick="uploadProfilePhoto()">Загрузить</button>
-              </div>
-            </div>
-
-            <p style="margin-top:18px">
-              <button type="button" class="btn btn-primary btn-sm" id="saveProfileBtn" onclick="saveProfile()">Сохранить профиль WhatsApp</button>
-            </p>
-            <div class="status" id="profileStatus" role="status"></div>
           </div>
         </section>
 

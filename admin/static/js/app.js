@@ -408,17 +408,33 @@ async function saveEditor() {
   const saveBtn = $("saveBtn");
   saveBtn.disabled = true;
   saveBtn.textContent = "Сохраняем…";
+
+  // 1. Сохраняем локальный конфиг клиента (PUT)
   const { ok, code, data } = await api("PUT", "/admin/clients/" + encodeURIComponent(currentPid), payload);
-  saveBtn.disabled = false;
-  saveBtn.textContent = "Сохранить настройки";
-  if (ok) {
-    setDirty(false);
-    const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
-    status("editorStatus", "Готово. Бот уже отвечает по новым настройкам." + warnings, false);
-    if (role === "admin") loadList();
+  if (!ok) {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Сохранить настройки";
+    status("editorStatus", humanError(code, data), true);
     return;
   }
-  status("editorStatus", humanError(code, data), true);
+
+  // 2. Если это WhatsApp / Zernio — синхронизируем профиль WhatsApp (PATCH), если есть изменения
+  let profileMsg = "";
+  if (["wa", "zernio"].includes(currentProvider)) {
+    const profileRes = await saveProfileIfChanged();
+    if (profileRes && !profileRes.ok) {
+      profileMsg = "\nВнимание: профиль WhatsApp не обновился: " + profileRes.error;
+    } else if (profileRes && profileRes.changed && profileRes.changed.length) {
+      profileMsg = "\nПрофиль WhatsApp обновлён в Meta/Zernio.";
+    }
+  }
+
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Сохранить настройки";
+  setDirty(false);
+  const warnings = (data.warnings || []).length ? "\n" + data.warnings.join("\n") : "";
+  status("editorStatus", "Готово. Бот уже отвечает по новым настройкам." + warnings + profileMsg, false);
+  if (role === "admin") loadList();
 }
 
 async function deleteCurrent() {
@@ -576,14 +592,17 @@ function setupProfileCounters() {
   if (descInput) descInput.addEventListener("input", () => updateCounter("f_description", "descriptionCounter", 512));
 }
 
+let initialProfileData = null;
+let verifiedWhatsAppName = "";
+
 async function loadProfile() {
   const statusEl = $("profileStatus");
-  status(statusEl, "Загружаем профиль…");
+  status(statusEl, "Загружаем профиль WhatsApp…");
   try {
     const { ok, code, data } = await api("GET", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile");
     if (!ok) {
       if (code === 409) {
-        status(statusEl, "Профиль недоступен для этого провайдера", true);
+        status(statusEl, "Профиль WhatsApp пока не привязан к номеру", false);
       } else {
         status(statusEl, humanError(code, data), true);
       }
@@ -595,62 +614,199 @@ async function loadProfile() {
     $("f_websites").value = (data.websites || []).join("\n");
     $("f_vertical").value = data.vertical || "";
     $("f_address").value = data.address || "";
-    // Avatar
-    const avatarEl = $("avatarCurrent");
-    if (data.photo_url) {
-      avatarEl.innerHTML = '<img src="' + esc(data.photo_url) + '" style="max-width:100px;max-height:100px;border-radius:8px">';
-    } else {
-      avatarEl.textContent = "не загружен";
-    }
+
+    initialProfileData = {
+      description: data.description || "",
+      email: data.email || "",
+      websites: (data.websites || []).join("\n"),
+      vertical: data.vertical || "",
+      address: data.address || "",
+    };
+
+    // Avatar preview
+    renderAvatarPreview(data.photo_url);
+
     updateCounter("f_description", "descriptionCounter", 512);
-    status(statusEl, "Профиль загружен", false);
+    status(statusEl, "", false);
+
+    // Загружаем статус официального имени WhatsApp (для Zernio)
+    if (currentProvider === "zernio") {
+      loadWhatsAppDisplayName();
+    }
   } catch (e) {
     status(statusEl, "Ошибка загрузки: " + e.message, true);
   }
 }
 
-async function saveProfile() {
-  const payload = {
-    description: $("f_description").value.trim(),
-    email: $("f_email").value.trim(),
-    websites: $("f_websites").value.split("\n").map(s => s.trim()).filter(Boolean),
-    vertical: $("f_vertical").value.trim(),
-    address: $("f_address").value.trim(),
-  };
-  const saveBtn = $("saveProfileBtn");
-  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Сохраняем…"; }
-  try {
-    const { ok, code, data } = await api("PATCH", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile", payload);
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль WhatsApp"; }
-    if (!ok) { status($("profileStatus"), humanError(code, data), true); return; }
-    status($("profileStatus"), "Профиль сохранён", false);
-    loadProfile();
-  } catch (e) {
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Сохранить профиль WhatsApp"; }
-    status($("profileStatus"), "Ошибка: " + e.message, true);
+function renderAvatarPreview(photoUrl) {
+  const avatarEl = $("avatarCurrent");
+  if (!avatarEl) return;
+  if (photoUrl) {
+    avatarEl.innerHTML = '<img src="' + esc(photoUrl) + '" alt="Avatar">';
+  } else {
+    avatarEl.innerHTML = '<span class="avatar-fallback-icon">📷</span>';
   }
+}
+
+function handleProfilePhotoSelected() {
+  const input = $("f_profile_photo");
+  const fileNameSpan = $("photoFileName");
+  const uploadBtn = $("uploadPhotoBtn");
+  if (!input || !input.files.length) {
+    if (fileNameSpan) fileNameSpan.textContent = "";
+    if (uploadBtn) show("uploadPhotoBtn", false);
+    return;
+  }
+  const file = input.files[0];
+  if (fileNameSpan) fileNameSpan.textContent = file.name + " (" + Math.round(file.size / 1024) + " КБ)";
+  if (uploadBtn) show("uploadPhotoBtn", true);
 }
 
 async function uploadProfilePhoto() {
   const input = $("f_profile_photo");
-  if (!input || !input.files.length) { status($("profileStatus"), "Выберите файл", true); return; }
+  const statusEl = $("profileStatus");
+  if (!input || !input.files.length) { status(statusEl, "Выберите файл для загрузки", true); return; }
   const file = input.files[0];
   const allowed = ["image/jpeg", "image/png", "image/webp"];
-  if (!allowed.includes(file.type)) { status($("profileStatus"), "Только JPG/PNG/WebP", true); return; }
-  if (file.size > 5 * 1024 * 1024) { status($("profileStatus"), "Файл больше 5 МБ", true); return; }
+  if (!allowed.includes(file.type)) { status(statusEl, "Формат файла: только JPG, PNG или WebP", true); return; }
+  if (file.size > 5 * 1024 * 1024) { status(statusEl, "Файл больше 5 МБ — выберите меньший размер", true); return; }
   const formData = new FormData();
   formData.append("file", file);
-  const statusEl = $("profileStatus");
-  status(statusEl, "Загружаем аватар…");
+  const uploadBtn = $("uploadPhotoBtn");
+  if (uploadBtn) { uploadBtn.disabled = true; uploadBtn.textContent = "Загружаем…"; }
+  status(statusEl, "Загружаем аватар в WhatsApp…");
   try {
     const { ok, code, data } = await api("POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile/photo", formData, { headers: {} });
+    if (uploadBtn) { uploadBtn.disabled = false; uploadBtn.textContent = "Загрузить выбранное"; }
     if (!ok) { status(statusEl, humanError(code, data), true); return; }
-    // Reload profile to show new avatar
     await loadProfile();
     input.value = "";
-    status(statusEl, "Аватар загружен", false);
+    show("uploadPhotoBtn", false);
+    $("photoFileName").textContent = "";
+    status(statusEl, "Аватар WhatsApp успешно обновлён!", false);
+  } catch (e) {
+    if (uploadBtn) { uploadBtn.disabled = false; uploadBtn.textContent = "Загрузить выбранное"; }
+    status(statusEl, "Ошибка: " + e.message, true);
+  }
+}
+
+async function loadWhatsAppDisplayName() {
+  try {
+    const { ok, data } = await api("GET", "/admin/clients/" + encodeURIComponent(currentPid) + "/zernio/display-name");
+    if (!ok || !data) return;
+    verifiedWhatsAppName = data.name || "";
+    const nameTextEl = $("wpVerifiedNameText");
+    const badgeEl = $("wpNameStatusBadge");
+    if (nameTextEl) {
+      nameTextEl.textContent = verifiedWhatsAppName || "Имя не задано";
+    }
+    if (badgeEl) {
+      const st = (data.status || "NONE").toUpperCase();
+      badgeEl.className = "badge-status";
+      if (st === "APPROVED") {
+        badgeEl.classList.add("badge-approved");
+        badgeEl.textContent = "Одобрено Meta";
+      } else if (st === "PENDING_REVIEW") {
+        badgeEl.classList.add("badge-pending");
+        badgeEl.textContent = "На рассмотрении";
+      } else if (st === "DECLINED") {
+        badgeEl.classList.add("badge-declined");
+        badgeEl.textContent = "Отклонено";
+      } else {
+        badgeEl.classList.add("badge-none");
+        badgeEl.textContent = st;
+      }
+    }
+    // Если название бизнеса у бота ещё не заполнено — подставляем из WhatsApp
+    const bizInput = $("f_business_name");
+    if (bizInput && !bizInput.value.trim() && verifiedWhatsAppName) {
+      bizInput.value = verifiedWhatsAppName;
+    }
+  } catch (e) {
+    // игнорируем ошибку при фоновом получении имени
+  }
+}
+
+function syncBusinessNameFromWhatsApp() {
+  const nameToUse = verifiedWhatsAppName || $("wpVerifiedNameText")?.textContent?.trim();
+  if (!nameToUse || nameToUse === "—" || nameToUse === "Имя не задано") {
+    alert("Официальное имя WhatsApp ещё не получено или номер не подключён.");
+    return;
+  }
+  $("f_business_name").value = nameToUse;
+  setDirty(true);
+}
+
+async function promptChangeDisplayName() {
+  const current = verifiedWhatsAppName || "";
+  const newName = prompt(
+    "Введите новое отображаемое имя для WhatsApp (Meta):\n\n" +
+    "Внимание: смена имени отправляется на модерацию в Meta и занимает 1–3 рабочих дня.",
+    current
+  );
+  if (!newName || !newName.trim() || newName.trim() === current) return;
+  const statusEl = $("profileStatus");
+  status(statusEl, "Отправляем запрос на смену имени в Meta…");
+  try {
+    const { ok, code, data } = await api("POST", "/admin/clients/" + encodeURIComponent(currentPid) + "/zernio/display-name", {
+      displayName: newName.trim(),
+    });
+    if (!ok) {
+      status(statusEl, humanError(code, data), true);
+      return;
+    }
+    status(statusEl, "Запрос на смену имени отправлен на модерацию в Meta. Статус обновится после проверки.", false);
+    loadWhatsAppDisplayName();
   } catch (e) {
     status(statusEl, "Ошибка: " + e.message, true);
+  }
+}
+
+async function saveProfileIfChanged() {
+  const currentDesc = $("f_description").value.trim();
+  const currentEmail = $("f_email").value.trim();
+  const currentWebsites = $("f_websites").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const currentVertical = $("f_vertical").value.trim();
+  const currentAddress = $("f_address").value.trim();
+
+  // Проверяем, изменились ли поля по сравнению с загруженными
+  if (initialProfileData) {
+    const origWebsites = initialProfileData.websites.split("\n").map(s => s.trim()).filter(Boolean);
+    const websitesEqual = currentWebsites.length === origWebsites.length &&
+      currentWebsites.every((s, i) => s === origWebsites[i]);
+    const isUnchanged = currentDesc === initialProfileData.description &&
+      currentEmail === initialProfileData.email &&
+      currentVertical === initialProfileData.vertical &&
+      currentAddress === initialProfileData.address &&
+      websitesEqual;
+    if (isUnchanged) {
+      return { ok: true, changed: [] };
+    }
+  }
+
+  const payload = {
+    description: currentDesc,
+    email: currentEmail,
+    websites: currentWebsites,
+    vertical: currentVertical,
+    address: currentAddress,
+  };
+
+  try {
+    const { ok, code, data } = await api("PATCH", "/admin/clients/" + encodeURIComponent(currentPid) + "/profile", payload);
+    if (!ok) {
+      return { ok: false, error: humanError(code, data) };
+    }
+    initialProfileData = {
+      description: currentDesc,
+      email: currentEmail,
+      websites: $("f_websites").value,
+      vertical: currentVertical,
+      address: currentAddress,
+    };
+    return { ok: true, changed: data.changed || [] };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 

@@ -234,6 +234,38 @@ class ZernioWhatsAppClient:
         if response.status_code != 200:
             raise ZernioError(_zernio_error_text(response))
 
+    async def get_display_name(self) -> dict:
+        """GET /whatsapp/business-profile/display-name: текущее подтверждённое имя и статус модерации."""
+        response = await self._call(
+            "GET",
+            f"{self._base}/whatsapp/business-profile/display-name",
+            params={"accountId": self._account_id},
+        )
+        if response.status_code != 200:
+            raise ZernioError(_zernio_error_text(response))
+        body = _json_dict(response)
+        info = body.get("displayName") if isinstance(body, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        return {
+            "name": _as_text(info.get("name")),
+            "status": _as_text(info.get("status")),
+            "phone_number": _as_text(info.get("phoneNumber")),
+        }
+
+    async def change_display_name(self, new_name: str) -> dict:
+        """POST /whatsapp/business-profile/display-name: запрос на смену имени через Meta (модерация 1-3 дня)."""
+        new_name = str(new_name or "").strip()
+        if not new_name:
+            raise ZernioError("Укажите новое отображаемое имя")
+        response = await self._call(
+            "POST",
+            f"{self._base}/whatsapp/business-profile/display-name",
+            json={"accountId": self._account_id, "displayName": new_name},
+        )
+        if response.status_code != 200:
+            raise ZernioError(_zernio_error_text(response))
+        return _json_dict(response)
+
     # --- внутреннее -----------------------------------------------------------
 
     async def _send_reply(self, conversation_id: str, body: str) -> None:
