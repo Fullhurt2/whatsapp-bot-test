@@ -303,10 +303,15 @@ async def transcribe_audio(
             f"4. Выведи ТОЛЬКО расшифрованный текст клиента, без комментариев и кавычек."
         )
 
-        is_gemini_audio = "gemini" in model.lower()
+        # google/gemini-3.5-transcribe — это именно модель транскрибации, она ждёт /api/v1/audio/transcriptions
+        # Только обычные чат-модели flash (например, gemini-3.5-flash) идут в chat/completions
+        is_transcribe_endpoint_model = (
+            "transcribe" in model.lower()
+            or "scribe" in model.lower()
+            or "whisper" in model.lower()
+        )
 
-        # Если это мультимодальный Gemini (google/gemini-3.5-flash / flash-lite)
-        if is_gemini_audio:
+        if not is_transcribe_endpoint_model and "gemini" in model.lower():
             endpoint = f"{base_url}/chat/completions"
             payload = {
                 "model": model,
@@ -332,7 +337,7 @@ async def transcribe_audio(
                 "temperature": 0.1,
             }
         else:
-            # Иначе эндпоинт аудио-транскрибации OpenRouter (Scribe v2 / Whisper)
+            # Для google/gemini-3.5-transcribe, elevenlabs/scribe-v2, openai/whisper-large-v3
             endpoint = f"{base_url}/audio/transcriptions"
             payload = {
                 "model": model,
